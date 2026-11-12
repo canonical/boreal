@@ -37,6 +37,13 @@
           ./hosts/poc.nix
         ];
       };
+      nixosConfigurations.boreal-vm = nixpkgs.lib.nixosSystem {
+        system = "x86_64-linux";
+        modules = [
+          ./modules
+          ./hosts/boreal-vm.nix
+        ];
+      };
       formatter = forAllSystems (pkgs: pkgs.nixfmt);
     };
 }
