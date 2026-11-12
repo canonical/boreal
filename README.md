@@ -41,6 +41,8 @@ them requires explicitly acknowledging that Temporal authorization is missing.
 `boreal.poc.users` declares demo accounts and SSH public keys, and
 `boreal.poc.workers` declares their packages and non-secret environments. The
 module does not install or configure a Temporal server.
+See [the disposable host example](docs/poc-host.md) for a complete module
+configuration and matching client queues.
 
 Set `boreal.poc.updater.enable = true` to install the updater and its oneshot
 service. A trusted root administrator can use `boreal-schedule-update` to
