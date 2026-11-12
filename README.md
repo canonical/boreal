@@ -33,6 +33,10 @@ The flake exposes `lab-worker`, `lab-worker-alt`, `lab-client`, and
 `nixosConfigurations.poc` host is an evaluation/build target for a container,
 not a hardware configuration to install on a real machine.
 
+For a disposable QEMU guest with demo users and workers, see the
+[VM instructions](docs/vm.md). The VM does not modify the host's NixOS
+configuration and is not secure for a shared lab.
+
 ## NixOS modules
 
 Import `nixosModules.default` to add the BFSU and SJTU substituters while
