@@ -1,0 +1,15 @@
+[package]
+name = "lab-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "lab-client"
+path = "main.rs"
+
+[dependencies]
+lab-core = { path = "../lab-core" }
+temporalio-client.workspace = true
+tokio.workspace = true
