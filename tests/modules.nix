@@ -21,6 +21,10 @@ let
         package = worker;
         environment.LAB_TASK_QUEUE = "alice-demo";
       };
+      updater = {
+        enable = true;
+        package = worker;
+      };
     };
   };
   missingAcknowledgement = mkHost { boreal.poc.enable = true; };
@@ -42,6 +46,8 @@ assert configured.nix.settings.substituters == [
 assert configured.users.users.alice.openssh.authorizedKeys.keys == [ "ssh-ed25519 AAAA demo" ];
 assert configured.systemd.services.boreal-worker-demo.serviceConfig.User == "alice";
 assert configured.systemd.services.boreal-worker-demo.environment.LAB_TASK_QUEUE == "alice-demo";
+assert configured.systemd.services.boreal-updater.serviceConfig.User == "root";
+assert configured.systemd.services.boreal-updater.serviceConfig.ExecStart == "${worker}/bin/test-worker run";
 assert assertionFailed missingAcknowledgement "acknowledgeInsecureTemporal";
 assert assertionFailed unknownUser "must belong to a user";
 pkgs.runCommand "boreal-module-tests" { } "touch $out"
