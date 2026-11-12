@@ -28,10 +28,11 @@ NIX_DISK_IMAGE="$PWD/boreal-vm.qcow2" "$VM/bin/run-boreal-vm-vm"
 The launcher creates the disk if it is absent and reuses it on subsequent
 starts. The disk contains the Temporal development database and VM state; it
 is not removed automatically. The launcher creates a separate store image at
-each start instead of mounting the host's Nix store. The VM also has normal
-QEMU user-mode outbound networking. The guest is configured with 4 vCPUs,
-6 GiB of RAM, and a 16 GiB virtual disk. Its configuration cannot be used to
-switch the host system.
+each start instead of mounting the host's Nix store; its temporary directory
+is not automatically removed by the launcher. The VM also has normal QEMU
+user-mode outbound networking. The guest is configured with 4 vCPUs, 6 GiB of
+RAM, and a 16 GiB virtual disk. Its configuration cannot be used to switch the
+host system.
 
 SSH is forwarded to the VM only on host loopback, `127.0.0.1:2222`. Other
 local host users can reach that port, so SSH authentication is still required.
