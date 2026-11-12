@@ -17,17 +17,23 @@ and compile substantial dependencies.
 From the repository root:
 
 ```sh
-nix build --out-link result-boreal-vm \
-  .#nixosConfigurations.boreal-vm.config.system.build.vm
-VM=$(readlink -f result-boreal-vm)
 mkdir -p "$HOME/boreal-vm"
-cd "$HOME/boreal-vm"
-NIX_DISK_IMAGE="$PWD/boreal-vm.qcow2" "$VM/bin/run-boreal-vm-vm"
+NIX_DISK_IMAGE="$HOME/boreal-vm/boreal-vm.qcow2" nix run .#boreal-vm
+```
+
+Alternatively, build the launcher and run it directly:
+
+```sh
+nix build --out-link result-boreal-vm .#boreal-vm
+mkdir -p "$HOME/boreal-vm"
+NIX_DISK_IMAGE="$HOME/boreal-vm/boreal-vm.qcow2" \
+  ./result-boreal-vm/bin/run-boreal-vm
 ```
 
 The launcher creates the disk if it is absent and reuses it on subsequent
-starts. The disk contains the Temporal development database and VM state; it
-is not removed automatically. The launcher creates a separate store image at
+starts. Without `NIX_DISK_IMAGE`, it uses `./boreal-vm.qcow2` in the current
+directory. The disk contains the Temporal development database and VM state;
+it is not removed automatically. The launcher creates a separate store image at
 each start instead of mounting the host's Nix store; its temporary directory
 is not automatically removed by the launcher. The VM also has normal QEMU
 user-mode outbound networking. The guest is configured with 4 vCPUs, 6 GiB of
