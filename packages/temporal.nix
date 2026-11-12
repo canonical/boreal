@@ -13,7 +13,9 @@ rustPlatform.buildRustPackage {
   src = lib.cleanSourceWith {
     src = ../temporal;
     filter = path: type:
-      baseNameOf path != "target" && lib.cleanSourceFilter path type;
+      baseNameOf path != "target"
+      && baseNameOf path != "README.md"
+      && lib.cleanSourceFilter path type;
   };
   cargoLock.lockFile = ../temporal/Cargo.lock;
   cargoBuildFlags = [ "--package" crate ];
