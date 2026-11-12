@@ -29,6 +29,7 @@ in
 
   networking.hostName = "boreal-vm";
   networking.firewall.enable = true;
+  system.name = "boreal";
   system.stateVersion = "26.05";
   system.switch.enable = false;
 
@@ -119,6 +120,8 @@ in
     };
 
   virtualisation = {
+    # Preserve the existing default disk path when the system name changes.
+    diskImage = "./boreal-vm.qcow2";
     memorySize = 6144;
     cores = 4;
     diskSize = 16384;

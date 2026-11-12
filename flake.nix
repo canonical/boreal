@@ -3,7 +3,7 @@
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
 
-  outputs = { nixpkgs, ... }:
+  outputs = { self, nixpkgs, ... }:
     let
       systems = [ "x86_64-linux" "aarch64-linux" ];
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
@@ -25,7 +25,11 @@
         };
       });
 
-      packages = forAllSystems (pkgs: import ./packages { inherit pkgs; });
+      packages = forAllSystems (pkgs:
+        (import ./packages { inherit pkgs; })
+        // nixpkgs.lib.optionalAttrs (pkgs.stdenv.hostPlatform.system == "x86_64-linux") {
+          boreal-vm = self.nixosConfigurations.boreal-vm.config.system.build.vm;
+        });
       checks = forAllSystems (pkgs: {
         modules = import ./tests/modules.nix { inherit nixpkgs pkgs; };
       });
