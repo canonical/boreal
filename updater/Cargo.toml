@@ -1,0 +1,12 @@
+[package]
+name = "boreal-updater"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "boreal-updater"
+path = "main.rs"
+
+# This crate is independently buildable; it is not part of the Temporal workspace.
+[workspace]
