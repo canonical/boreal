@@ -30,7 +30,7 @@ The `temporal` CLI is optional but can start a local development server. From
 this directory, build with `cargo build --workspace --locked`. For example:
 
 ```sh
-temporal server start-dev
+temporal server start-dev --headless
 ```
 
 In separate terminals, with the same namespace (and no `LAB_TASK_QUEUE` override):
