@@ -2,6 +2,19 @@
 
 ## Current state
 
+- `boreal.enable`, `boreal.users.<user>`, and `boreal.updater` replace
+  `boreal.poc`. Worker `package` names resolve against the Boreal worker
+  packages (`lab-worker` and `lab-worker-alt`), preserving the `greet` and
+  `count` Temporal workflow types, `<user>` namespaces, and `<user>-<worker>`
+  queues.
+- Nix generates authoritative group-readable policy files at
+  `/etc/boreal/users/<user>/perms.yaml` (`0440`, `root:boreal` under `0750`
+  directories) outside writable home directories and without secrets in the Nix
+  store. A user always controls their own work; default `read` (`status` and
+  `result`) and `write` (`start` and `cancel`) policies apply to all of their
+  workers unless a worker-specific setting replaces that field (`true` grants
+  all Boreal users, `false` grants none beyond the owner, and a list grants
+  named Boreal users). **These policy files are not enforced at runtime yet.**
 - The local `boreal-shell` prototype parses commands and supports completion,
   highlighting, and session history, but every workflow command is a mock. It
   is not a login shell or an authorization boundary.
@@ -9,50 +22,18 @@
   The VM's Temporal development server is unauthenticated, all three accounts
   share a test SSH key, and `admin` has unrestricted passwordless sudo. This is
   not safe for a shared lab.
-- The updater schedules and prebuilds revisions, but activation is blocked.
-  `boreal.poc` is still the implemented NixOS module interface.
+- The updater schedules and prebuilds revisions under `boreal.updater`, and
+  activation remains blocked.
 
 ## Next steps
 
-### 1. Establish the Boreal module
-
-- Replace the `boreal.poc` module definition with `boreal.enable` and nested
-  `boreal.users.<user>` settings for SSH public keys, permissions, and workers.
-  Resolve each worker's package name against the known Boreal packages.
-- Target configuration shape (not implemented yet):
-
-  ```nix
-  boreal.enable = true;
-  boreal.users.alice = {
-    keys = [ "<Alice's public SSH key>" ];
-    permissions = { read = true; write = false; };
-    workers = {
-      greet = { package = "lab-worker"; permissions.write = [ "bob" ]; };
-      count = { package = "lab-worker-alt"; permissions.read = [ "bob" ]; };
-    };
-  };
-  ```
-
-- Generate Nix-managed per-user `perms.yaml` files. Make them group-readable;
-  use a protected authoritative copy so a writable home directory cannot
-  replace the policy. Policy files in the Nix store must contain no secrets.
-- A user always controls their own work. Default `read` and `write` values
-  apply to all their workers; a worker-specific setting replaces that field.
-  `true` grants all lab users, `false` grants none, and a list grants named
-  users. `read` covers status and results; `write` grants start and cancel.
-  For example, Alice's `count.permissions.read = [ "bob" ]` restricts count
-  results to Alice and Bob even if her default read setting is `true`.
-- Treat `greet` and `count` as Boreal workflows. Preserve their Temporal workflow
-  types, namespaces, queues, and replay compatibility when migrating existing
-  work. Move the updater options out of `boreal.poc`, update the VM, module tests,
-  and documentation, and keep activation blocked.
-
-### 2. Enforce permissions before connecting the shell
+### 1. Enforce permissions before connecting the shell
 
 - Use SSH and OS identity to identify the caller; never trust a caller-supplied
-  username. Apply the Nix-generated policy before start, cancel, status, result,
-  and list operations, including explicitly delegated access to another user's
-  worker. Verify the actual workflow type and run when checking existing work.
+  username. Apply the Nix-generated `/etc/boreal/users/<user>/perms.yaml` policy
+  before start, cancel, status, result, and list operations, including
+  explicitly delegated access to another user's worker. Verify the actual
+  workflow type and run when checking existing work.
 - Keep direct Temporal endpoints, internal services, and the database out of
   users' reach. Work out and test host-level isolation for workers that need
   Temporal access while running under their users' Unix accounts. A restricted
@@ -62,7 +43,7 @@
   issuer or Temporal authentication service. Do not claim isolation until direct
   access and alternative SSH paths have been tested.
 
-### 3. Turn the mock shell into the user interface
+### 2. Turn the mock shell into the user interface
 
 - Connect `workers`, `start`, `list`, `status`, `result`, `cancel`, and
   `permissions` to the enforced operations. Filter listings and completions by
@@ -74,7 +55,7 @@
 - Test authorized and denied cross-user actions, direct-access bypass attempts,
   completion, terminal behavior, and workflow recovery in a disposable VM.
 
-### 4. Restrict administration and finish safe updates
+### 3. Restrict administration and finish safe updates
 
 - Design the admin's restricted root interface for starting/stopping the
   permitted Temporal services and requesting Nix configuration updates. The
