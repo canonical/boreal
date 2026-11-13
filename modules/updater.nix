@@ -1,7 +1,12 @@
-{ config, lib, pkgs, ... }:
+{
+  config,
+  lib,
+  pkgs,
+  ...
+}:
 
 let
-  cfg = config.boreal.poc.updater;
+  cfg = config.boreal.updater;
   schedule = pkgs.writeShellScriptBin "boreal-schedule-update" ''
     set -eu
     ${lib.getExe cfg.package} schedule "$@"
@@ -9,22 +14,28 @@ let
   '';
 in
 {
-  options.boreal.poc.updater = {
-    enable = lib.mkEnableOption "the fail-closed Boreal update prototype";
+  options.boreal.updater = {
+    enable = lib.mkEnableOption "the fail-closed Boreal update service";
     package = lib.mkOption {
       type = lib.types.package;
       default = pkgs.callPackage ../packages/updater.nix { };
-      description = "The fail-closed update prototype package.";
+      description = "The fail-closed Boreal updater package.";
     };
   };
 
   config = lib.mkIf cfg.enable {
-    environment.systemPackages = [ cfg.package schedule ];
+    environment.systemPackages = [
+      cfg.package
+      schedule
+    ];
     systemd.services.boreal-updater = {
       description = "Prebuild a scheduled Boreal update (activation is blocked)";
       wants = [ "network-online.target" ];
       after = [ "network-online.target" ];
-      path = [ pkgs.nix pkgs.git ];
+      path = [
+        pkgs.nix
+        pkgs.git
+      ];
       serviceConfig = {
         Type = "oneshot";
         User = "root";
