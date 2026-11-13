@@ -28,20 +28,20 @@ def main():
         process = subprocess.Popen(sys.argv[1:], stdin=slave, stdout=slave, stderr=slave, env=env)
         os.close(slave)
 
-        def wait_for(needle):
+        def wait_for(*needles):
             data = bytearray()
             deadline = time.monotonic() + 10
             cursor_replies = 0
-            while needle not in data:
+            while not all(needle in data for needle in needles):
                 timeout = deadline - time.monotonic()
                 if timeout <= 0 or not select.select([master], [], [], timeout)[0]:
-                    raise AssertionError(f"missing {needle!r} in {bytes(data)!r}")
+                    raise AssertionError(f"missing {needles!r} in {bytes(data)!r}")
                 try:
                     chunk = os.read(master, 8192)
                 except OSError as err:
-                    raise AssertionError(f"shell closed before {needle!r}: {bytes(data)!r}") from err
+                    raise AssertionError(f"shell closed before {needles!r}: {bytes(data)!r}") from err
                 if not chunk:
-                    raise AssertionError(f"shell closed before {needle!r}: {bytes(data)!r}")
+                    raise AssertionError(f"shell closed before {needles!r}: {bytes(data)!r}")
                 data.extend(chunk)
                 # Crossterm asks the terminal for its cursor position; the PTY
                 # is not a terminal emulator, so answer the query ourselves.
@@ -52,7 +52,38 @@ def main():
             return bytes(data)
 
         try:
-            assert b"mock-only" in wait_for(b"boreal\x1b")
+            wait_for(b"mock-only", b"boreal\x1b", b"\x1b[6 q")
+
+            # Partial commands are underlined; the selected match uses the
+            # terminal defaults in reverse, while inactive text is bright black.
+            os.write(master, b"st")
+            wait_for(b"\x1b[4mst", b"\x1b[6 q")
+            os.write(master, b"\t")
+            wait_for(
+                b"\x1b[4;7;49;39mst",
+                b"\x1b[7;49;39mart",
+                b"\x1b[4;90mst",
+                b"\x1b[90matus",
+                b"\x1b[33mDescribe a workflow",
+            )
+            os.write(master, b"\x03")
+            wait_for(b"boreal\x1b", b"\x1b[6 q")
+
+            # Unknown commands are red and recognized commands are green.
+            os.write(master, b"unknown")
+            wait_for(b"\x1b[31munknown", b"\x1b[6 q")
+            os.write(master, b"\x03")
+            wait_for(b"boreal\x1b", b"\x1b[6 q")
+            os.write(master, b"workers")
+            wait_for(b"\x1b[32mworkers", b"\x1b[6 q")
+            os.write(master, b"\x03")
+            wait_for(b"boreal\x1b", b"\x1b[6 q")
+
+            # Options include their dashes, but not the value after '='.
+            os.write(master, b"list --owner=bob")
+            wait_for(b"\x1b[33m--owner", b"=bob", b"\x1b[6 q")
+            os.write(master, b"\x03")
+            wait_for(b"boreal\x1b", b"\x1b[6 q")
 
             # Tab completes a command; Enter handles either menu acceptance or submission.
             os.write(master, b"work")
@@ -83,21 +114,27 @@ def main():
             data = bytearray()
             replies = 0
             deadline = time.monotonic() + 10
-            while process.poll() is None:
+            while True:
                 timeout = deadline - time.monotonic()
                 if timeout <= 0:
                     raise AssertionError(f"shell did not exit: {bytes(data)!r}")
                 if not select.select([master], [], [], timeout)[0]:
+                    if process.poll() is not None:
+                        break
                     continue
                 try:
-                    data.extend(os.read(master, 8192))
+                    chunk = os.read(master, 8192)
                 except OSError:
                     break
+                if not chunk:
+                    break
+                data.extend(chunk)
                 requests = data.count(b"\x1b[6n")
                 for _ in range(requests - replies):
                     os.write(master, b"\x1b[1;1R")
                 replies = requests
             assert process.wait(timeout=5) == 0, bytes(data)
+            assert b"\x1b[0 q" in data, "terminal cursor was not reset on exit"
         finally:
             if process.poll() is None:
                 process.terminate()
@@ -108,7 +145,7 @@ def main():
                     process.wait()
             os.close(master)
 
-    print("PTY completion, history, ghost hint, and mock execution: passed")
+    print("PTY styles, cursor, completion, history, and mock execution: passed")
 
 
 if __name__ == "__main__":
