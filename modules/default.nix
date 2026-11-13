@@ -1,6 +1,6 @@
 {
   imports = [
-    ./poc-workers.nix
+    ./boreal.nix
     ./substituters.nix
     ./updater.nix
   ];
