@@ -2,5 +2,6 @@
 /result-*
 /boreal-vm.qcow2
 /temporal/target/
+/shell/target/
 /updater/target/
 /.direnv/
