@@ -28,8 +28,36 @@ See [Temporal POC](temporal/README.md) for running the disposable development
 server, workers, and client. Use only non-secret test data. The server and demo
 clients do not implement maintenance authorization.
 
-The flake exposes `lab-worker`, `lab-worker-alt`, `lab-client`, and
-`boreal-updater` packages. Each worker has its own Nix derivation. The
+## Local shell prototype
+
+Run the mock interactive shell without a VM or Temporal server:
+
+```sh
+nix run .#boreal-shell
+# Alternatively: cargo run --manifest-path shell/Cargo.toml --locked
+```
+
+Type `help` to see the mock commands. For example, try
+`start greet run-1 'Alice Smith' 5 --owner bob`. Tab completes commands and
+arguments; Up/Down navigate the current session's history. Previously entered
+commands may appear as ghost suggestions; press Right to accept them. `exit` or
+Ctrl-D closes the shell, and Ctrl-C clears the current input. History is kept
+in memory only.
+
+The users and workers are sample values. Commands only display their parsed
+arguments: they never connect to Temporal, run programs, or modify lab work.
+This is not a security boundary and must not be installed as a login shell.
+
+For the shell's unit and terminal interaction checks:
+
+```sh
+cargo test --manifest-path shell/Cargo.toml --locked
+cargo build --manifest-path shell/Cargo.toml --locked
+python3 tests/shell-pty.py shell/target/debug/boreal-shell
+```
+
+The flake exposes `lab-worker`, `lab-worker-alt`, `lab-client`, `boreal-shell`,
+and `boreal-updater` packages. Each worker has its own Nix derivation. The
 `nixosConfigurations.poc` host is an evaluation/build target for a container,
 not a hardware configuration to install on a real machine.
 
