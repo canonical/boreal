@@ -1,8 +1,10 @@
-# Temporal Rust POC
+# Boreal Temporal workflows
 
 This workspace uses the official Temporal Rust SDK 1.2. `lab-core` contains the
-shared worker setup and two workflows and activities. Each separately deployable
-worker registers only its own workflow and activity:
+shared worker setup and the two Boreal workflows and activities (`greet` and
+`count`). Their registered Temporal workflow and activity type names are
+preserved for deterministic replay compatibility with existing histories, and
+each separately deployable worker registers only its own workflow and activity:
 
 | Package | Client workload | Workflow / activity | Default queue |
 | --- | --- | --- | --- |
@@ -102,7 +104,7 @@ gate is in place, including every start path (other clients, schedules,
 signal-with-start and child workflows as applicable). It must close that gate
 atomically with respect to in-flight starts and account for already accepted
 starts before checking/draining work or replacing binaries. Reopen only after
-the update and compatible workers are ready. Neither this POC nor queue names
+the update and compatible workers are ready. Neither this client nor queue names
 provide that gate, and an unavailable or uncertain gate is not permission to
 proceed. Coordinate the actual maintenance protocol with the host/server design.
 

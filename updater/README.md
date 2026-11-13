@@ -1,4 +1,4 @@
-# Boreal updater proof of concept
+# Boreal updater
 
 This program schedules **and prebuilds** a NixOS configuration. It does **not**
 wait for idle, switch configurations, run `nixos-rebuild`, or perform garbage

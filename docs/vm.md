@@ -1,10 +1,12 @@
 # Disposable Boreal VM
 
 This QEMU VM is a development environment, not a secure shared lab. It runs an
-unauthenticated Temporal development server; Alice and Bob can access each
-other's Temporal namespaces. Alice, Bob, and the passwordless-sudo `admin`
-account all authorize the same public key. Anyone with its private key can
-therefore administer the VM. Use only dummy data and trusted test users.
+unauthenticated Temporal development server without runtime policy enforcement;
+Alice and Bob can still reach each other's Temporal namespaces directly even
+though Nix generates `/etc/boreal/users/{alice,bob}/perms.yaml`. Alice, Bob, and
+the passwordless-sudo `admin` account also authorize the same test public key.
+Anyone with its private key can therefore administer the VM. Use only dummy data
+and trusted test users.
 
 The VM configuration is separate from the host configuration. Building or
 starting it does not switch `ziczac` or change `/etc/nixos`. It requires an
@@ -45,7 +47,7 @@ local host users can reach that port, so SSH authentication is still required.
 The VM configuration contains the public key selected for this test; it is
 not a private key. Replace it in `hosts/boreal-vm.nix` if using another key.
 
-## Exercise a workflow
+## Exercise workflows and inspect generated policy
 
 In another terminal on the host:
 
@@ -53,24 +55,26 @@ In another terminal on the host:
 ssh -i ~/.ssh/self -p 2222 alice@127.0.0.1
 ```
 
-Inside the VM, check the services and start a greeting workflow:
+Inside the VM, inspect the generated group-readable policy files, check the
+worker services, and start a `greet` workflow:
 
 ```sh
+cat /etc/boreal/users/alice/perms.yaml
 systemctl status temporal-dev boreal-worker-alice-greet
 export TEMPORAL_NAMESPACE=alice
 export LAB_TASK_QUEUE=alice-greet
-lab-client start greet alice-demo-1 Example 5
-lab-client status alice-demo-1
+lab-client start greet alice-run-1 Example 5
+lab-client status alice-run-1
 ```
 
 Check status again after the timer expires. Use a new workflow ID for each
 start. To test Bob, SSH as `bob`, set `TEMPORAL_NAMESPACE=bob` and
-`LAB_TASK_QUEUE=bob-greet`, and use a different workflow ID. For the counting
-workload, use `alice-count` or `bob-count` as the matching queue and replace
+`LAB_TASK_QUEUE=bob-greet`, and use a different workflow ID. For the `count`
+workflow, use `alice-count` or `bob-count` as the matching queue and replace
 `greet` with `count`. Never put differently registered worker packages on the
 same queue.
 
-To inspect or test the updater, SSH as `admin` using the same key and use
+To inspect or test `boreal.updater`, SSH as `admin` using the same key and use
 `sudo`. The updater only schedules and builds; it intentionally cannot switch
 configurations. See [the updater documentation](../updater/README.md). To shut
 down the VM cleanly after test work has finished:
@@ -80,5 +84,5 @@ ssh -i ~/.ssh/self -p 2222 admin@127.0.0.1 'sudo systemctl poweroff'
 ```
 
 Stopping or rebuilding the VM can interrupt test work; coordinate with anyone
-using it first. Do not use the development server or this updater as a
+using it first. Do not use the development server or this VM configuration as a
 production deployment.
