@@ -9,14 +9,6 @@ let
   packages = import ../packages { inherit pkgs; };
   # This is a public SSH key, intentionally shared by disposable lab accounts.
   publicKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINuoseDzo0mUwBthHFnKfNPK1EdJTrpv7boeC1ybMsty";
-  mkWorker = user: workload: package: {
-    inherit user package;
-    environment = {
-      TEMPORAL_ADDRESS = "127.0.0.1:7233";
-      TEMPORAL_NAMESPACE = user;
-      LAB_TASK_QUEUE = "${user}-${workload}";
-    };
-  };
   workerNames = [
     "alice-greet"
     "alice-count"
@@ -66,19 +58,35 @@ in
     pkgs.temporal-cli
   ];
 
-  boreal.poc = {
+  # Local users can still reach all namespaces on temporal-dev until host and
+  # server enforcement are added; perms.yaml records the policy only.
+  boreal = {
     enable = true;
-    # Local users can reach all namespaces; this is not authorization.
-    acknowledgeInsecureTemporal = true;
     users = {
-      alice.sshKeys = [ publicKey ];
-      bob.sshKeys = [ publicKey ];
-    };
-    workers = {
-      alice-greet = mkWorker "alice" "greet" packages.lab-worker;
-      alice-count = mkWorker "alice" "count" packages.lab-worker-alt;
-      bob-greet = mkWorker "bob" "greet" packages.lab-worker;
-      bob-count = mkWorker "bob" "count" packages.lab-worker-alt;
+      alice = {
+        keys = [ publicKey ];
+        permissions = {
+          read = true;
+          write = false;
+        };
+        workers = {
+          greet = {
+            package = "lab-worker";
+            permissions.write = [ "bob" ];
+          };
+          count = {
+            package = "lab-worker-alt";
+            permissions.read = [ "bob" ];
+          };
+        };
+      };
+      bob = {
+        keys = [ publicKey ];
+        workers = {
+          greet.package = "lab-worker";
+          count.package = "lab-worker-alt";
+        };
+      };
     };
     updater = {
       enable = true;
