@@ -62,9 +62,17 @@ def main():
             wait_for(
                 b"\x1b[4;7;49;39mst",
                 b"\x1b[7;49;39mart",
+                b"\x1b[7;49;39m   Start a workflow",
                 b"\x1b[4;90mst",
                 b"\x1b[90matus",
                 b"\x1b[33mDescribe a workflow",
+            )
+            # Selection follows Tab without coloring the selected description's
+            # background; inactive descriptions retain their original yellow.
+            os.write(master, b"\t")
+            wait_for(
+                b"\x1b[7;49;39m  Describe a workflow",
+                b"\x1b[33mStart a workflow",
             )
             os.write(master, b"\x03")
             wait_for(b"boreal\x1b", b"\x1b[6 q")
