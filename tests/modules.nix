@@ -1,24 +1,90 @@
-{ nixpkgs, pkgs }:
+{
+  self,
+  nixpkgs,
+  pkgs,
+}:
 
 let
   inherit (nixpkgs) lib;
   system = pkgs.stdenv.hostPlatform.system;
+
+  trainBin = pkgs.writeShellScriptBin "train-worker" "exit 0";
+  evalBin = pkgs.writeShellScriptBin "eval-worker" "exit 0";
+  updaterStub = pkgs.writeShellScriptBin "test-updater" "exit 0";
+
+  baseContainer = {
+    boot.isContainer = true;
+    networking.hostName = "boreal-container";
+    system.stateVersion = "26.05";
+  };
+
   mkHost =
     extra:
-    (lib.nixosSystem {
+    (self.lib.mkHost {
       inherit system;
       modules = [
-        ../modules
-        ../hosts/container.nix
+        baseContainer
         extra
       ];
     }).config;
-  updaterStub = pkgs.writeShellScriptBin "test-updater" "exit 0";
 
-  configured = mkHost {
+  sampleLabModule = {
     boreal = {
       enable = true;
       temporalAddress = "127.0.0.1:7234";
+      workerPackages = {
+        train-worker = {
+          package = trainBin;
+          workflowType = "TrainWorkflow";
+          description = "Run a training job";
+          args = [
+            {
+              name = "dataset";
+              type = "string";
+              description = "Dataset name";
+            }
+            {
+              name = "mode";
+              type = "enum";
+              choices = [
+                "fast"
+                "accurate"
+              ];
+              default = "fast";
+            }
+            {
+              name = "epochs";
+              type = "int";
+              min = 1;
+              max = 500;
+              default = 10;
+            }
+            {
+              name = "learning_rate";
+              type = "float";
+              min = 0.0;
+              max = 1.0;
+              default = 0.05;
+            }
+            {
+              name = "dry_run";
+              type = "bool";
+              default = false;
+            }
+          ];
+        };
+        eval-worker = {
+          package = evalBin;
+          workflowType = "EvalWorkflow";
+          description = "Evaluate a checkpoint";
+          args = [
+            {
+              name = "checkpoint";
+              type = "string";
+            }
+          ];
+        };
+      };
       users = {
         alice = {
           keys = [ "ssh-ed25519 AAAA alice-test-key" ];
@@ -27,22 +93,22 @@ let
             write = false;
           };
           workers = {
-            greet = {
-              package = "lab-worker";
+            train = {
+              package = "train-worker";
               permissions.write = [
                 "bob"
                 "bob"
               ];
             };
-            count = {
-              package = "lab-worker-alt";
+            eval = {
+              package = "eval-worker";
               permissions.read = [ "bob" ];
             };
           };
         };
         bob = {
           keys = [ "ssh-ed25519 BBBB bob-test-key" ];
-          workers.greet.package = "lab-worker";
+          workers.eval.package = "eval-worker";
         };
       };
       updater = {
@@ -52,15 +118,155 @@ let
     };
   };
 
+  configured = mkHost sampleLabModule;
+  withChinaMirrors =
+    (self.lib.mkHost {
+      inherit system;
+      modules = [
+        baseContainer
+        self.nixosModules.chinaMirrors
+      ];
+    }).config;
+
+  labCheckDrv = self.lib.mkLabCheck {
+    inherit pkgs;
+    modules = [ sampleLabModule ];
+  };
+
   assertionFailed =
     config: text:
     builtins.any (entry: !entry.assertion && lib.hasInfix text entry.message) config.assertions;
 
+  mkWorkerPkgHost =
+    pkgSpec:
+    mkHost {
+      boreal = {
+        enable = true;
+        workerPackages.bad-worker = {
+          package = trainBin;
+          workflowType = "BadWorkflow";
+        }
+        // pkgSpec;
+      };
+    };
+
   unknownPackage = mkHost {
     boreal = {
       enable = true;
-      users.alice.workers.greet.package = "boreal-shell";
+      users.alice.workers.train.package = "unregistered";
     };
+  };
+  emptyWorkflowType = mkWorkerPkgHost { workflowType = "   "; };
+  invalidArgName = mkWorkerPkgHost {
+    args = [
+      {
+        name = "bad-arg";
+        type = "string";
+      }
+    ];
+  };
+  duplicateArgName = mkWorkerPkgHost {
+    args = [
+      {
+        name = "x";
+        type = "string";
+      }
+      {
+        name = "x";
+        type = "int";
+      }
+    ];
+  };
+  optionalBeforeRequired = mkWorkerPkgHost {
+    args = [
+      {
+        name = "opt";
+        type = "int";
+        default = 1;
+      }
+      {
+        name = "req";
+        type = "string";
+      }
+    ];
+  };
+  missingEnumChoices = mkWorkerPkgHost {
+    args = [
+      {
+        name = "kind";
+        type = "enum";
+      }
+    ];
+  };
+  unexpectedChoices = mkWorkerPkgHost {
+    args = [
+      {
+        name = "kind";
+        type = "string";
+        choices = [ "a" ];
+      }
+    ];
+  };
+  invertedBounds = mkWorkerPkgHost {
+    args = [
+      {
+        name = "n";
+        type = "int";
+        min = 10;
+        max = 5;
+      }
+    ];
+  };
+  boundsOnString = mkWorkerPkgHost {
+    args = [
+      {
+        name = "s";
+        type = "string";
+        min = 1;
+      }
+    ];
+  };
+  floatBoundOnInt = mkWorkerPkgHost {
+    args = [
+      {
+        name = "n";
+        type = "int";
+        min = 1.5;
+      }
+    ];
+  };
+  defaultTypeMismatch = mkWorkerPkgHost {
+    args = [
+      {
+        name = "n";
+        type = "int";
+        default = "ten";
+      }
+    ];
+  };
+  defaultOutOfBounds = mkWorkerPkgHost {
+    args = [
+      {
+        name = "n";
+        type = "int";
+        min = 1;
+        max = 10;
+        default = 20;
+      }
+    ];
+  };
+  defaultInvalidChoice = mkWorkerPkgHost {
+    args = [
+      {
+        name = "kind";
+        type = "enum";
+        choices = [
+          "a"
+          "b"
+        ];
+        default = "c";
+      }
+    ];
   };
   unknownDefaultPermUser = mkHost {
     boreal = {
@@ -71,8 +277,12 @@ let
   unknownWorkerPermUser = mkHost {
     boreal = {
       enable = true;
-      users.alice.workers.greet = {
-        package = "lab-worker";
+      workerPackages.eval-worker = {
+        package = evalBin;
+        workflowType = "EvalWorkflow";
+      };
+      users.alice.workers.eval = {
+        package = "eval-worker";
         permissions.read = [ "mallory" ];
       };
     };
@@ -86,15 +296,23 @@ let
   invalidWorkerName = mkHost {
     boreal = {
       enable = true;
-      users.alice.workers."BadName".package = "lab-worker";
+      workerPackages.eval-worker = {
+        package = evalBin;
+        workflowType = "EvalWorkflow";
+      };
+      users.alice.workers."BadName".package = "eval-worker";
     };
   };
   collidingUnitKey = mkHost {
     boreal = {
       enable = true;
+      workerPackages.eval-worker = {
+        package = evalBin;
+        workflowType = "EvalWorkflow";
+      };
       users = {
-        alice.workers."bob-greet".package = "lab-worker";
-        alice-bob.workers.greet.package = "lab-worker";
+        alice.workers."bob-eval".package = "eval-worker";
+        alice-bob.workers.eval.package = "eval-worker";
       };
     };
   };
@@ -107,39 +325,88 @@ let
   removedPocOption = mkHost { boreal.poc.enable = true; };
 
   vm =
-    (lib.nixosSystem {
+    (self.lib.mkVm {
       system = "x86_64-linux";
       modules = [
-        ../modules
-        ../hosts/boreal-vm.nix
+        sampleLabModule
+        {
+          boreal.temporalAddress = lib.mkForce "127.0.0.1:7233";
+          boreal.vm = {
+            sshPort = 2223;
+            devAuthorizedKeys = [ "ssh-ed25519 DDDD dev-key" ];
+          };
+        }
       ];
     }).config;
 
-  vmWorkers = [
-    {
-      name = "alice-greet";
-      user = "alice";
-      executable = "lab-worker";
-    }
-    {
-      name = "alice-count";
-      user = "alice";
-      executable = "lab-worker-alt";
-    }
-    {
-      name = "bob-greet";
-      user = "bob";
-      executable = "lab-worker";
-    }
-    {
-      name = "bob-count";
-      user = "bob";
-      executable = "lab-worker-alt";
-    }
-  ];
+  emptyUsersVm =
+    (self.lib.mkVm {
+      system = "x86_64-linux";
+      modules = [ { boreal.enable = true; } ];
+    }).config;
 
+  workersEtc = configured.environment.etc."boreal/workers.yaml";
   alicePermsEtc = configured.environment.etc."boreal/users/alice/perms.yaml";
   bobPermsEtc = configured.environment.etc."boreal/users/bob/perms.yaml";
+
+  expectedWorkersCatalog = pkgs.writeText "expected-workers.json" (
+    builtins.toJSON {
+      train-worker = {
+        workflowType = "TrainWorkflow";
+        description = "Run a training job";
+        args = [
+          {
+            name = "dataset";
+            type = "string";
+            description = "Dataset name";
+          }
+          {
+            name = "mode";
+            type = "enum";
+            description = "";
+            choices = [
+              "fast"
+              "accurate"
+            ];
+            default = "fast";
+          }
+          {
+            name = "epochs";
+            type = "int";
+            description = "";
+            min = 1;
+            max = 500;
+            default = 10;
+          }
+          {
+            name = "learning_rate";
+            type = "float";
+            description = "";
+            min = 0.0;
+            max = 1.0;
+            default = 0.05;
+          }
+          {
+            name = "dry_run";
+            type = "bool";
+            description = "";
+            default = false;
+          }
+        ];
+      };
+      eval-worker = {
+        workflowType = "EvalWorkflow";
+        description = "Evaluate a checkpoint";
+        args = [
+          {
+            name = "checkpoint";
+            type = "string";
+            description = "";
+          }
+        ];
+      };
+    }
+  );
 
   expectedAlicePolicy = pkgs.writeText "expected-alice-perms.json" (
     builtins.toJSON {
@@ -149,15 +416,15 @@ let
         write = false;
       };
       workers = {
-        greet = {
-          package = "lab-worker";
+        train = {
+          package = "train-worker";
           permissions = {
             read = true;
             write = [ "bob" ];
           };
         };
-        count = {
-          package = "lab-worker-alt";
+        eval = {
+          package = "eval-worker";
           permissions = {
             read = [ "bob" ];
             write = false;
@@ -175,8 +442,8 @@ let
         write = false;
       };
       workers = {
-        greet = {
-          package = "lab-worker";
+        eval = {
+          package = "eval-worker";
           permissions = {
             read = false;
             write = false;
@@ -186,8 +453,9 @@ let
     }
   );
 in
+assert configured.nix.settings.substituters == [ "https://cache.nixos.org/" ];
 assert
-  configured.nix.settings.substituters == [
+  withChinaMirrors.nix.settings.substituters == [
     "https://mirrors.bfsu.edu.cn/nix-channels/store"
     "https://mirror.sjtu.edu.cn/nix-channels/store"
     "https://cache.nixos.org/"
@@ -200,12 +468,10 @@ assert
     "ssh-ed25519 AAAA alice-test-key"
   ];
 assert builtins.elem "boreal" configured.users.users.bob.extraGroups;
-assert alicePermsEtc.user == "root";
-assert alicePermsEtc.group == "boreal";
-assert alicePermsEtc.mode == "0440";
-assert bobPermsEtc.user == "root";
-assert bobPermsEtc.group == "boreal";
-assert bobPermsEtc.mode == "0440";
+assert workersEtc.user == "root" && workersEtc.group == "boreal" && workersEtc.mode == "0440";
+assert
+  alicePermsEtc.user == "root" && alicePermsEtc.group == "boreal" && alicePermsEtc.mode == "0440";
+assert bobPermsEtc.user == "root" && bobPermsEtc.group == "boreal" && bobPermsEtc.mode == "0440";
 assert builtins.all (rule: builtins.elem rule configured.systemd.tmpfiles.rules) [
   "d /etc/boreal 0750 root boreal -"
   "d /etc/boreal/users 0750 root boreal -"
@@ -213,25 +479,37 @@ assert builtins.all (rule: builtins.elem rule configured.systemd.tmpfiles.rules)
   "d /etc/boreal/users/bob 0750 root boreal -"
 ];
 assert !builtins.any (lib.hasInfix "/home/") configured.systemd.tmpfiles.rules;
-assert configured.systemd.services.boreal-worker-alice-greet.serviceConfig.User == "alice";
+assert configured.systemd.services.boreal-worker-alice-train.serviceConfig.User == "alice";
 assert
-  configured.systemd.services.boreal-worker-alice-greet.environment.TEMPORAL_ADDRESS
+  configured.systemd.services.boreal-worker-alice-train.environment.TEMPORAL_ADDRESS
   == "127.0.0.1:7234";
 assert
-  configured.systemd.services.boreal-worker-alice-greet.environment.TEMPORAL_NAMESPACE == "alice";
+  configured.systemd.services.boreal-worker-alice-train.environment.TEMPORAL_NAMESPACE == "alice";
 assert
-  configured.systemd.services.boreal-worker-alice-greet.environment.LAB_TASK_QUEUE == "alice-greet";
-assert lib.hasSuffix "/bin/lab-worker"
-  configured.systemd.services.boreal-worker-alice-greet.serviceConfig.ExecStart;
-assert lib.hasSuffix "/bin/lab-worker-alt"
-  configured.systemd.services.boreal-worker-alice-count.serviceConfig.ExecStart;
+  configured.systemd.services.boreal-worker-alice-train.environment.LAB_TASK_QUEUE == "alice-train";
 assert
-  configured.systemd.services.boreal-worker-alice-count.environment.LAB_TASK_QUEUE == "alice-count";
+  configured.systemd.services.boreal-worker-alice-train.serviceConfig.ExecStart
+  == "${trainBin}/bin/train-worker";
+assert
+  configured.systemd.services.boreal-worker-alice-eval.serviceConfig.ExecStart
+  == "${evalBin}/bin/eval-worker";
 assert configured.systemd.services.boreal-updater.serviceConfig.User == "root";
 assert
   configured.systemd.services.boreal-updater.serviceConfig.ExecStart
   == "${updaterStub}/bin/test-updater run";
-assert assertionFailed unknownPackage "known Boreal worker packages";
+assert assertionFailed unknownPackage "boreal.workerPackages";
+assert assertionFailed emptyWorkflowType "workflowType";
+assert assertionFailed invalidArgName "argument names";
+assert assertionFailed duplicateArgName "argument names";
+assert assertionFailed optionalBeforeRequired "precede optional";
+assert assertionFailed missingEnumChoices "choices";
+assert assertionFailed unexpectedChoices "choices";
+assert assertionFailed invertedBounds "min/max";
+assert assertionFailed boundsOnString "min/max";
+assert assertionFailed floatBoundOnInt "min/max";
+assert assertionFailed defaultTypeMismatch "default values";
+assert assertionFailed defaultOutOfBounds "default values";
+assert assertionFailed defaultInvalidChoice "default values";
 assert assertionFailed unknownDefaultPermUser "declared in boreal.users";
 assert assertionFailed unknownWorkerPermUser "declared in boreal.users";
 assert assertionFailed rootUser "must not be root";
@@ -241,8 +519,6 @@ assert assertionFailed emptyTemporalAddress "temporalAddress";
 assert assertionFailed removedPocOption "boreal.poc";
 assert vm.boreal.enable;
 assert vm.boreal.updater.enable;
-assert vm.environment.etc."boreal/users/alice/perms.yaml".mode == "0440";
-assert vm.environment.etc."boreal/users/bob/perms.yaml".mode == "0440";
 assert vm.services.openssh.enable;
 assert !vm.system.switch.enable;
 assert vm.system.name == "boreal";
@@ -252,12 +528,9 @@ assert vm.virtualisation.diskImage == "./boreal-vm.qcow2";
 assert !vm.services.openssh.settings.PasswordAuthentication;
 assert !vm.services.openssh.settings.KbdInteractiveAuthentication;
 assert vm.services.openssh.settings.PermitRootLogin == "no";
-assert vm.users.users.alice.openssh.authorizedKeys.keys != [ ];
-assert
-  vm.users.users.alice.openssh.authorizedKeys.keys == vm.users.users.bob.openssh.authorizedKeys.keys;
-assert
-  vm.users.users.admin.openssh.authorizedKeys.keys
-  == vm.users.users.alice.openssh.authorizedKeys.keys;
+assert builtins.elem "ssh-ed25519 DDDD dev-key" vm.users.users.alice.openssh.authorizedKeys.keys;
+assert builtins.elem "ssh-ed25519 DDDD dev-key" vm.users.users.bob.openssh.authorizedKeys.keys;
+assert vm.users.users.admin.openssh.authorizedKeys.keys == [ "ssh-ed25519 DDDD dev-key" ];
 assert builtins.elem "wheel" vm.users.users.admin.extraGroups;
 assert !vm.security.sudo.wheelNeedsPassword;
 assert vm.virtualisation.useNixStoreImage;
@@ -269,28 +542,33 @@ assert builtins.all (
   port.from == "host"
   && port.proto == "tcp"
   && port.host.address == "127.0.0.1"
-  && port.host.port == 2222
+  && port.host.port == 2223
   && port.guest.port == 22
 ) vm.virtualisation.forwardPorts;
-assert builtins.all (
-  {
-    name,
-    user,
-    executable,
-  }:
-  let
-    service = vm.systemd.services."boreal-worker-${name}";
-  in
-  service.serviceConfig.User == user
-  && service.environment.TEMPORAL_ADDRESS == "127.0.0.1:7233"
-  && service.environment.TEMPORAL_NAMESPACE == user
-  && service.environment.LAB_TASK_QUEUE == name
-  && lib.hasSuffix "/bin/${executable}" service.serviceConfig.ExecStart
-) vmWorkers;
+assert builtins.all
+  (
+    unitName:
+    let
+      service = vm.systemd.services.${unitName};
+    in
+    builtins.elem "temporal-dev.service" service.after
+    && builtins.elem "temporal-dev.service" service.wants
+    && service.serviceConfig.RestartSec == 5
+  )
+  [
+    "boreal-worker-alice-train"
+    "boreal-worker-alice-eval"
+    "boreal-worker-bob-eval"
+  ];
 assert vm.systemd.services.temporal-dev.serviceConfig.DynamicUser;
 assert lib.hasInfix "--ip 127.0.0.1" vm.systemd.services.temporal-dev.serviceConfig.ExecStart;
+assert lib.hasInfix "--namespace alice --namespace bob"
+  vm.systemd.services.temporal-dev.serviceConfig.ExecStart;
+assert lib.hasInfix "--namespace default"
+  emptyUsersVm.systemd.services.temporal-dev.serviceConfig.ExecStart;
 pkgs.runCommand "boreal-module-tests"
   {
+    inherit labCheckDrv;
     nativeBuildInputs = [
       pkgs.python3
       pkgs.remarshal
@@ -298,16 +576,19 @@ pkgs.runCommand "boreal-module-tests"
   }
   ''
     set -eu
-    if grep -q 'ssh-ed25519' ${alicePermsEtc.source} ${bobPermsEtc.source}; then
-      echo "SSH key leaked into perms.yaml" >&2
+    test -e "$labCheckDrv"
+    if grep -Eq 'ssh-|/nix/store/' ${workersEtc.source} ${alicePermsEtc.source} ${bobPermsEtc.source}; then
+      echo "Key or store path leaked into generated policy YAML" >&2
       exit 1
     fi
+    remarshal --if yaml --of json ${workersEtc.source} > workers.json
     remarshal --if yaml --of json ${alicePermsEtc.source} > alice.json
     remarshal --if yaml --of json ${bobPermsEtc.source} > bob.json
     python3 - <<'PY'
     import json, pathlib
 
     for actual_path, expected_path in [
+        ("workers.json", "${expectedWorkersCatalog}"),
         ("alice.json", "${expectedAlicePolicy}"),
         ("bob.json", "${expectedBobPolicy}"),
     ]:
