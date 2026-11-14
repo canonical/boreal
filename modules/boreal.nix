@@ -14,14 +14,11 @@ let
     types
     ;
 
-  borealPackages = import ../packages { inherit pkgs; };
-  workerPackages = {
-    inherit (borealPackages) lab-worker lab-worker-alt;
-  };
-
   yamlFormat = pkgs.formats.yaml { };
   permissionType = types.either types.bool (types.listOf types.str);
+  nonEmpty = text: builtins.match "^[[:space:]]*$" text == null;
   validName = name: builtins.match "^[a-z][a-z0-9_-]*$" name != null;
+  validArgName = name: builtins.match "^[a-z][a-z0-9_]*$" name != null;
 
   normalizeGrant = grant: if builtins.isList grant then lib.unique grant else grant;
   grantUsers = grant: if builtins.isList grant then grant else [ ];
@@ -50,6 +47,96 @@ let
     }) userCfg.workers;
   };
 
+  mkArgSpec =
+    arg:
+    {
+      inherit (arg) name type description;
+    }
+    // lib.optionalAttrs (arg.type == "enum") {
+      inherit (arg) choices;
+    }
+    // lib.optionalAttrs (arg.min != null) {
+      inherit (arg) min;
+    }
+    // lib.optionalAttrs (arg.max != null) {
+      inherit (arg) max;
+    }
+    // lib.optionalAttrs (arg.default != null) {
+      inherit (arg) default;
+    };
+
+  mkWorkersCatalog = lib.mapAttrs (_: pkgCfg: {
+    inherit (pkgCfg) workflowType description;
+    args = map mkArgSpec pkgCfg.args;
+  }) cfg.workerPackages;
+
+  validArgOrder =
+    args:
+    (builtins.foldl'
+      (
+        state: arg:
+        let
+          isOptional = arg.default != null;
+        in
+        {
+          seenOptional = state.seenOptional || isOptional;
+          ok = state.ok && !(state.seenOptional && !isOptional);
+        }
+      )
+      {
+        seenOptional = false;
+        ok = true;
+      }
+      args
+    ).ok;
+
+  validArgBounds =
+    arg:
+    let
+      isNumeric = arg.type == "int" || arg.type == "float";
+      boundsAllowed = if isNumeric then true else arg.min == null && arg.max == null;
+      intBoundsValid =
+        arg.type != "int"
+        || ((arg.min == null || builtins.isInt arg.min) && (arg.max == null || builtins.isInt arg.max));
+      orderValid = arg.min == null || arg.max == null || arg.min <= arg.max;
+    in
+    boundsAllowed && intBoundsValid && orderValid;
+
+  validArgChoices =
+    arg:
+    if arg.type == "enum" then
+      arg.choices != [ ]
+      && lib.all nonEmpty arg.choices
+      && builtins.length arg.choices == builtins.length (lib.unique arg.choices)
+    else
+      arg.choices == [ ];
+
+  validArgDefault =
+    arg:
+    if arg.default == null then
+      true
+    else
+      let
+        typeMatches =
+          if arg.type == "string" then
+            builtins.isString arg.default
+          else if arg.type == "enum" then
+            builtins.isString arg.default && builtins.elem arg.default arg.choices
+          else if arg.type == "int" then
+            builtins.isInt arg.default
+          else if arg.type == "float" then
+            builtins.isInt arg.default || builtins.isFloat arg.default
+          else
+            builtins.isBool arg.default;
+        withinBounds =
+          !(builtins.isInt arg.default || builtins.isFloat arg.default)
+          || ((arg.min == null || arg.default >= arg.min) && (arg.max == null || arg.default <= arg.max));
+      in
+      typeMatches && withinBounds;
+
+  workerPackageNames = builtins.attrNames cfg.workerPackages;
+  workerPackageValues = builtins.attrValues cfg.workerPackages;
+
   userNames = builtins.attrNames cfg.users;
   workerEntries = lib.concatLists (
     lib.mapAttrsToList (
@@ -75,13 +162,69 @@ let
       )
     ) cfg.users
   );
+
+  argModule = types.submodule {
+    options = {
+      name = mkOption {
+        type = types.str;
+        description = "Workflow input field and shell argument name.";
+      };
+
+      type = mkOption {
+        type = types.enum [
+          "string"
+          "int"
+          "float"
+          "bool"
+          "enum"
+        ];
+        description = "Scalar argument type used for validation and JSON encoding.";
+      };
+
+      description = mkOption {
+        type = types.str;
+        default = "";
+        description = "Short human-readable argument description.";
+      };
+
+      choices = mkOption {
+        type = types.listOf types.str;
+        default = [ ];
+        description = "Allowed values when type is enum.";
+      };
+
+      min = mkOption {
+        type = types.nullOr types.number;
+        default = null;
+        description = "Inclusive lower bound for int or float arguments.";
+      };
+
+      max = mkOption {
+        type = types.nullOr types.number;
+        default = null;
+        description = "Inclusive upper bound for int or float arguments.";
+      };
+
+      default = mkOption {
+        type = types.nullOr (
+          types.oneOf [
+            types.str
+            types.number
+            types.bool
+          ]
+        );
+        default = null;
+        description = "Optional default value; arguments with null default are required.";
+      };
+    };
+  };
 in
 {
   imports = [
     (lib.mkRemovedOptionModule [
       "boreal"
       "poc"
-    ] "Use boreal.enable, boreal.users, and boreal.updater instead.")
+    ] "Use boreal.enable, boreal.workerPackages, boreal.users, and boreal.updater instead.")
   ];
 
   options.boreal = {
@@ -91,6 +234,38 @@ in
       type = types.str;
       default = "127.0.0.1:7233";
       description = "Temporal frontend address configured on Boreal workers.";
+    };
+
+    workerPackages = mkOption {
+      default = { };
+      description = "Registered Boreal worker packages and their workflow schemas.";
+      type = types.attrsOf (
+        types.submodule {
+          options = {
+            package = mkOption {
+              type = types.package;
+              description = "Executable package running this Temporal worker.";
+            };
+
+            workflowType = mkOption {
+              type = types.str;
+              description = "Registered Temporal workflow type name.";
+            };
+
+            description = mkOption {
+              type = types.str;
+              default = "";
+              description = "Short summary shown in shell listings and completions.";
+            };
+
+            args = mkOption {
+              type = types.listOf argModule;
+              default = [ ];
+              description = "Ordered flat input arguments serialized as a JSON object.";
+            };
+          };
+        }
+      );
     };
 
     users = mkOption {
@@ -135,7 +310,7 @@ in
                   options = {
                     package = mkOption {
                       type = types.str;
-                      description = "Name of a known Boreal worker package (such as lab-worker or lab-worker-alt).";
+                      description = "Name of a worker registered in boreal.workerPackages.";
                     };
 
                     permissions = {
@@ -164,8 +339,42 @@ in
   config = mkIf cfg.enable {
     assertions = [
       {
-        assertion = builtins.match "^[[:space:]]*$" cfg.temporalAddress == null;
+        assertion = nonEmpty cfg.temporalAddress;
         message = "boreal.temporalAddress must not be empty.";
+      }
+      {
+        assertion = lib.all validName workerPackageNames;
+        message = "Every boreal.workerPackages key must match ^[a-z][a-z0-9_-]*$.";
+      }
+      {
+        assertion = lib.all (pkgCfg: nonEmpty pkgCfg.workflowType) workerPackageValues;
+        message = "Every boreal.workerPackages entry must declare a non-empty workflowType.";
+      }
+      {
+        assertion = lib.all (
+          pkgCfg:
+          let
+            argNames = map (arg: arg.name) pkgCfg.args;
+          in
+          lib.all validArgName argNames && builtins.length argNames == builtins.length (lib.unique argNames)
+        ) workerPackageValues;
+        message = "Worker argument names must be unique per package and match ^[a-z][a-z0-9_]*$.";
+      }
+      {
+        assertion = lib.all (pkgCfg: validArgOrder pkgCfg.args) workerPackageValues;
+        message = "Required worker arguments (default = null) must precede optional arguments.";
+      }
+      {
+        assertion = lib.all (pkgCfg: lib.all validArgChoices pkgCfg.args) workerPackageValues;
+        message = "Enum worker arguments require unique non-empty choices; non-enum arguments must omit choices.";
+      }
+      {
+        assertion = lib.all (pkgCfg: lib.all validArgBounds pkgCfg.args) workerPackageValues;
+        message = "Worker argument min/max bounds are valid only on int/float types with min <= max.";
+      }
+      {
+        assertion = lib.all (pkgCfg: lib.all validArgDefault pkgCfg.args) workerPackageValues;
+        message = "Worker argument default values must match their declared type, choices, and min/max bounds.";
       }
       {
         assertion = lib.all (user: user != "root" && validName user) userNames;
@@ -180,8 +389,8 @@ in
         message = "Boreal user-worker identifiers (<user>-<worker>) must be unique across boreal.users.";
       }
       {
-        assertion = lib.all (entry: builtins.hasAttr entry.cfg.package workerPackages) workerEntries;
-        message = "Every Boreal worker package must be one of the known Boreal worker packages: ${lib.concatStringsSep ", " (builtins.attrNames workerPackages)}.";
+        assertion = lib.all (entry: builtins.hasAttr entry.cfg.package cfg.workerPackages) workerEntries;
+        message = "Every Boreal user worker package must be declared in boreal.workerPackages.";
       }
       {
         assertion = lib.all (target: builtins.hasAttr target cfg.users) referencedUsers;
@@ -203,7 +412,15 @@ in
     ]
     ++ map (user: "d /etc/boreal/users/${user} 0750 root boreal -") userNames;
 
-    environment.etc = lib.mapAttrs' (
+    environment.etc = {
+      "boreal/workers.yaml" = {
+        source = yamlFormat.generate "boreal-workers.yaml" mkWorkersCatalog;
+        user = "root";
+        group = "boreal";
+        mode = "0440";
+      };
+    }
+    // lib.mapAttrs' (
       user: userCfg:
       lib.nameValuePair "boreal/users/${user}/perms.yaml" {
         source = yamlFormat.generate (lib.strings.sanitizeDerivationName "boreal-perms-${user}.yaml") (
@@ -231,8 +448,8 @@ in
           serviceConfig = {
             User = entry.user;
             ExecStart =
-              if builtins.hasAttr entry.cfg.package workerPackages then
-                lib.getExe workerPackages.${entry.cfg.package}
+              if builtins.hasAttr entry.cfg.package cfg.workerPackages then
+                lib.getExe cfg.workerPackages.${entry.cfg.package}.package
               else
                 "/bin/false";
             Restart = "on-failure";
