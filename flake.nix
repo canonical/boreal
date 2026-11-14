@@ -1,5 +1,5 @@
 {
-  description = "Boreal lab infrastructure";
+  description = "Boreal NixOS and Temporal lab framework";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
 
@@ -11,8 +11,20 @@
         "aarch64-linux"
       ];
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
+      borealLib = import ./lib { inherit self nixpkgs; };
     in
     {
+      lib = borealLib;
+
+      nixosModules = {
+        default = import ./modules;
+        boreal = import ./modules;
+        vm = import ./modules/vm.nix;
+        chinaMirrors = import ./modules/china-mirrors.nix;
+      };
+
+      packages = forAllSystems (pkgs: import ./packages { inherit pkgs; });
+
       devShells = forAllSystems (pkgs: {
         default = pkgs.mkShell {
           packages = with pkgs; [
@@ -29,31 +41,12 @@
         };
       });
 
-      packages = forAllSystems (
-        pkgs:
-        (import ./packages { inherit pkgs; })
-        // nixpkgs.lib.optionalAttrs (pkgs.stdenv.hostPlatform.system == "x86_64-linux") {
-          boreal-vm = self.nixosConfigurations.boreal-vm.config.system.build.vm;
-        }
-      );
       checks = forAllSystems (pkgs: {
-        modules = import ./tests/modules.nix { inherit nixpkgs pkgs; };
+        modules = import ./tests/modules.nix {
+          inherit self nixpkgs pkgs;
+        };
       });
-      nixosModules.default = import ./modules;
-      nixosConfigurations.container = nixpkgs.lib.nixosSystem {
-        system = "x86_64-linux";
-        modules = [
-          ./modules
-          ./hosts/container.nix
-        ];
-      };
-      nixosConfigurations.boreal-vm = nixpkgs.lib.nixosSystem {
-        system = "x86_64-linux";
-        modules = [
-          ./modules
-          ./hosts/boreal-vm.nix
-        ];
-      };
+
       formatter = forAllSystems (pkgs: pkgs.nixfmt);
     };
 }
