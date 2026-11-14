@@ -1,0 +1,20 @@
+[workspace]
+resolver = "3"
+
+[package]
+name = "boreal-worker"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+license = "MIT"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+temporalio-client = "~1.2.0"
+temporalio-common = "~1.2.0"
+temporalio-macros = "~1.2.0"
+temporalio-sdk = "~1.2.0"
+temporalio-workflow = "~1.2.0"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync"] }
