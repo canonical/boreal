@@ -4,5 +4,5 @@
 /worker/target/
 /shell/target/
 /updater/target/
-/downstream/
+/downstreams/
 /.direnv/
