@@ -60,11 +60,7 @@
                 "https://mirrors.bfsu.edu.cn/nix-channels/store"
                 "https://mirror.sjtu.edu.cn/nix-channels/store"
               ];
-              boreal.updater = {
-                enable = true;
-                repository = "https://github.com/canonical/boreal.git";
-                branch = "downstreams/demo-lab";
-              };
+              boreal.updater.enable = true;
               boreal.vm.adminKeys = [ publicKey ];
             }
           )

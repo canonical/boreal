@@ -57,6 +57,6 @@ ssh -p 2222 admin@127.0.0.1
 services
 service status temporal
 service restart boreal-worker-alice-greet
-update status
+updater status
 poweroff
 ```
