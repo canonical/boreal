@@ -2,11 +2,17 @@
 name = "boreal-updater"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.92"
+license = "MIT"
 publish = false
 
 [[bin]]
 name = "boreal-updater"
 path = "main.rs"
 
-# This crate is independently buildable; it is not part of the Temporal workspace.
+[dependencies]
+boreal-common = { path = "../common" }
+
+# Independently buildable outside the Temporal SDK workspace.
 [workspace]
+resolver = "3"
