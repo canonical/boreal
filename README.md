@@ -2,59 +2,81 @@
 
 A NixOS and Temporal Rust framework for SSH-managed multi-user labs. `main`
 provides the reusable NixOS modules, Nix builder library (`boreal.lib`),
-starter flake template (`templates.default`), `boreal-worker` Rust runtime
-crate, interactive `boreal-shell` prototype, and fail-closed `boreal-updater`
-service. Concrete lab deployments consume Boreal as a flake input—either in a
-standalone repository or on `downstreams/<name>` orphan branches checked out as
-worktrees under gitignored `downstreams/` (for example, `downstreams/demo-lab`).
+starter flake template (`templates.default`), `boreal-common` policy/IPC
+library, `boreal-worker` Rust runtime crate, `boreal-broker` policy engine and
+worker gRPC gate, interactive `boreal-shell`, restricted `boreal-admin`
+interface, and fail-closed `boreal-updater` service. Concrete lab deployments
+consume Boreal as a flake input—either in a standalone repository or on
+`downstreams/<name>` orphan branches checked out as worktrees under gitignored
+`downstreams/` (for example, `downstreams/demo-lab`).
 
 The root flake tracks `nixos-26.05`; `flake.lock` pins the selected revision.
 Update lock files deliberately rather than resolving moving branches during
 deployment.
 
-**This is not yet a secure shared-lab deployment.** Although Boreal generates
-authoritative `/etc/boreal/workers.yaml` and `/etc/boreal/users/<user>/perms.yaml`
-catalogs, runtime permission enforcement and Temporal server/host isolation are
-not wired up yet. A development server on localhost is reachable by local users,
-and namespaces, Unix accounts, and agent skills do not by themselves enforce
-Temporal isolation.
+## Security and isolation summary
 
-The update service can schedule and prebuild a pinned revision, but it **never
-switches the system**: it fails closed until an independently enforced
-admission-and-drain protocol exists. It does not run garbage collection. See
-[architecture](docs/architecture.md) and [updater](updater/README.md).
+- **Host-isolated Temporal & PostgreSQL**: `services.temporal` (`temporal-server`)
+  and PostgreSQL run inside an isolated network namespace
+  (`/run/netns/boreal-internal`) with a `0770 postgres:boreal-pg` Unix socket.
+  User SSH sessions have no network or Unix-socket route to Temporal or
+  PostgreSQL.
+- **Per-worker network namespace & gRPC gate**: Each
+  `boreal-worker-<user>-<worker>.service` runs under `<user>` inside
+  `/run/netns/boreal-worker-<user>-<worker>` with `ProtectProc = "invisible"`
+  and `kernel.yama.ptrace_scope = 2`. Workers reach Temporal solely through a
+  per-worker HTTP/2 gRPC gate in `boreal-broker` that restricts RPC methods,
+  `namespace` (`<user>`), and `task_queue` (`<user>-<worker>`).
+- **Kernel-authenticated runtime policy**: `boreal-broker` authenticates callers
+  on `/run/boreal/broker.sock` (`0660 boreal-broker:boreal`) via `SO_PEERCRED`,
+  validates typed argument schemas from `/etc/boreal/workers.yaml`, enforces
+  `/etc/boreal/users/<user>/perms.yaml` across `start`, `cancel`, `status`,
+  `result`, `list`, and `permissions`, and verifies registered `workflowType`
+  and pinned `run_id` on existing executions.
+- **Restricted SSH shell & user secrets**: OpenSSH disables SFTP, TCP/Unix/agent
+  forwarding, tunnels, and `~/.ssh/rc`. `boreal-shell` drives commands and
+  permission-filtered completions from `/etc/boreal/`, requires `[y/N]`
+  confirmation before `cancel`, rejects unsupported non-interactive SSH
+  commands, and stores secrets under `~/.config/boreal/secrets` (`0700`/`0600`)
+  via hidden TTY prompt or `ssh <user>@<host> "secrets set <name>" < file`.
+- **Restricted administration & gated updates**: `boreal.admin` assigns `admin`
+  to `boreal-admin`, delegating via sanitized `sudo` only to `boreal-admin-ctl`
+  for allowlisted Temporal/worker unit control and updater commands without
+  access to user homes, secrets, or logs (assuming no console, hypervisor, or
+  unrestricted root session). `boreal-updater` binds updates to the configured
+  HTTPS repository (and reviewed branch), enforces an admission barrier and
+  schedule/descendant/lease/PostgreSQL drain protocol, activates the exact
+  prebuilt closure, fails closed on uncertainty, and never runs automatic GC.
+
+See [architecture](docs/architecture.md) and [updater](updater/README.md).
 
 ## Framework development
 
 ```sh
 nix develop
+cargo test --manifest-path common/Cargo.toml --locked
 cargo test --manifest-path worker/Cargo.toml --locked
-cargo test --manifest-path updater/Cargo.toml --locked
+cargo test --manifest-path broker/Cargo.toml --locked
 cargo test --manifest-path shell/Cargo.toml --locked
+cargo test --manifest-path admin/Cargo.toml --locked
+cargo test --manifest-path updater/Cargo.toml --locked
 nix flake check
 ```
 
-For the shell's terminal interaction checks:
+For the shell's terminal interaction checks and local standalone mock preview
+(used only outside SSH when `/etc/boreal` is absent):
 
 ```sh
 cargo build --manifest-path shell/Cargo.toml --locked
 python3 tests/shell-pty.py shell/target/debug/boreal-shell
-```
-
-Run the mock interactive shell locally without a VM or Temporal server:
-
-```sh
 nix run .#boreal-shell
 ```
 
-Commands in `boreal-shell` currently display parsed mock arguments only; they
-never connect to Temporal, run programs, or enforce security boundaries.
-
 ## Create or mount a downstream lab
 
-End users can bootstrap a standalone lab repository directly from Boreal's
-starter template, with `boreal` prewired as a flake input and
-`${boreal}/worker` linked automatically at `.boreal/boreal-worker`:
+Bootstrap a standalone lab repository from Boreal's starter template, with
+`boreal` prewired as a flake input and `${boreal}/worker` linked automatically
+at `.boreal/boreal-worker`:
 
 ```sh
 nix flake new my-lab -t github:canonical/boreal
@@ -82,12 +104,13 @@ nix run ./downstreams/demo-lab#boreal-vm --override-input boreal . --no-write-lo
 ```
 
 Note that Git remotes do not enforce per-branch read permissions: keep public
-examples (like `downstreams/demo-lab`) on `origin`, and push private labs
-to separate private Git remotes.
+examples (like `downstreams/demo-lab`) on `origin`, and push private labs to
+separate private Git remotes.
 
 ## Flake outputs
 
-- `templates.default` — starter downstream lab flake (`nix flake new my-lab -t github:canonical/boreal`).
+- `templates.default` — starter downstream lab flake
+  (`nix flake new my-lab -t github:canonical/boreal`).
 - `lib`:
   - `mkHost { system, modules, specialArgs ? {} }` — NixOS system preloaded with
     `nixosModules.default`.
@@ -101,15 +124,15 @@ to separate private Git remotes.
     `${boreal}/worker` at `.boreal/boreal-worker` without manual `outputHashes`.
 - `nixosModules`:
   - `default` / `boreal` — `boreal.enable`, `boreal.workerPackages`,
-    `boreal.users`, and `boreal.updater`.
-  - `vm` — disposable QEMU guest configuration (`boreal.vm.*`) with dynamic
-    `temporal-dev` namespaces derived from `boreal.users`.
-- `packages.<system>`: `boreal-shell` and `boreal-updater`.
+    `boreal.users`, `boreal.admin`, and `boreal.updater`.
+  - `vm` — disposable QEMU guest configuration (`boreal.vm.*`).
+- `packages.<system>`: `boreal-broker`, `boreal-shell`, `boreal-admin`, and
+  `boreal-updater`.
 
 See [host configuration](docs/host.md), [VM guide](docs/vm.md), and
 [worker runtime](worker/README.md) for downstream usage details.
 
-Users should provision their own secrets outside Git and the Nix store under
+Users provision their own secrets outside Git and the Nix store under
 `~/.config/boreal/secrets` (`0700` directory, `0600` files). Never place secret
 contents into Temporal inputs, results, errors, or logs. Agent instructions are
 in `AGENTS.md` and `.agents/skills/`.

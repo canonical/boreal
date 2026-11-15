@@ -1,11 +1,5 @@
 # Downstream host and lab configuration
 
-This example generates Boreal user accounts, worker units, `/etc/boreal/workers.yaml`,
-and `/etc/boreal/users/<user>/perms.yaml`, but **does not yet enforce Temporal
-authentication or runtime permissions**. Any local user who can reach a
-development server can still access any namespace until host and server
-isolation are configured. Use it only in an isolated test environment.
-
 A downstream flake (bootstrapped with `nix flake new my-lab -t github:canonical/boreal`
 or maintained on a `downstreams/<name>` orphan branch) takes `boreal` as an
 input, defines a shared `lab.nix` for both its disposable test VM and
@@ -81,8 +75,9 @@ in
 }
 ```
 
-In the downstream `flake.nix`, combine `lab.nix` with hardware/network modules
-using `boreal.lib.mkHost` and validate the policy in CI with
+In the downstream `flake.nix`, combine `lab.nix` with hardware/network modules,
+restricted `boreal.admin`, and bounded `boreal.updater` using
+`boreal.lib.mkHost`, and validate the policy in CI with
 `boreal.lib.mkLabCheck`:
 
 ```nix
@@ -102,28 +97,54 @@ nixosConfigurations.lab-metal-01 = boreal.lib.mkHost {
   modules = [
     ./lab.nix
     ./hosts/lab-metal-01.nix
-    { boreal.updater.enable = true; }
+    {
+      boreal.admin = {
+        enable = true;
+        keys = [ "ssh-ed25519 AAAAC3Nza..." ];
+      };
+      boreal.updater = {
+        enable = true;
+        repository = "https://github.com/example/my-lab.git";
+        branch = "main";
+        configurationName = "lab-metal-01";
+      };
+    }
   ];
 };
 ```
 
-For user `<user>` and worker `<worker>`, Boreal configures
-`boreal-worker-<user>-<worker>.service` with `TEMPORAL_ADDRESS`
+For user `<user>` and worker `<worker>`, Boreal isolates PostgreSQL and
+`services.temporal` inside `/run/netns/boreal-internal` and configures
+`boreal-worker-<user>-<worker>.service` inside
+`/run/netns/boreal-worker-<user>-<worker>` with `TEMPORAL_ADDRESS`
 (`boreal.temporalAddress`, default `127.0.0.1:7233`),
 `TEMPORAL_NAMESPACE=<user>`, and `LAB_TASK_QUEUE=<user>-<worker>`. Do not mix
 differently registered worker packages on the same queue.
 
-Because `main` only provides the Boreal framework (no `nixosConfigurations`),
-the updater always targets the **downstream lab repository and 40-digit
-downstream commit** (whether in a standalone repo or on a `downstreams/<name>`
-branch), whose committed `flake.lock` pins the exact `boreal` `main` commit.
-Keep local `--override-input boreal` (`file://`) overrides out of committed
-`flake.lock` files by passing `--no-write-lock-file` during local testing:
+## User secrets and restricted administration
 
-```text
-sudo boreal-schedule-update <downstream-https-repo-url> <40-digit-downstream-commit> <configuration-name>
-sudo boreal-updater status
+Lab users connect over SSH into `boreal-shell` and manage their own secrets
+without exposing secret contents on command lines or in Temporal history:
+
+```sh
+ssh alice@lab-metal-01 "secrets set api_token" < ./api_token
+ssh alice@lab-metal-01
 ```
 
-The service prebuilds the configuration and then reports `blocked`; it cannot
-switch or garbage-collect the system. See [the updater documentation](../updater/README.md).
+Because `main` only provides the Boreal framework (no `nixosConfigurations`),
+`boreal.updater` always targets a **40-digit commit on the downstream lab
+repository** (and reviewed `branch` when set) whose committed `flake.lock` pins
+`boreal` without local `file://` or `path` overrides. Administrators operate
+allowlisted services and gated updates through the restricted `admin` SSH
+interface:
+
+```sh
+ssh admin@lab-metal-01 services
+ssh admin@lab-metal-01 "update schedule <40-digit-downstream-commit>"
+ssh admin@lab-metal-01 "update prebuild"
+ssh admin@lab-metal-01 "update apply"
+ssh admin@lab-metal-01 "update status"
+```
+
+See [the updater documentation](../updater/README.md) for drain and recovery
+semantics.

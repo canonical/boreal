@@ -50,17 +50,20 @@ Boreal framework revision.
 
      ```sh
      ssh -p 2222 alice@127.0.0.1
+     ssh -p 2222 admin@127.0.0.1 services
+     ssh -p 2222 admin@127.0.0.1 poweroff
      ```
 
 5. Deploy and stage updates:
-   - Add `./hosts/<hostname>.nix` (importing `hardware-configuration.nix` and
-     host networking/SSH settings) and wire `nixosConfigurations.<hostname>` in
-     `flake.nix` using `boreal.lib.mkHost`.
+   - Add `./hosts/<hostname>.nix` (importing `hardware-configuration.nix`,
+     `boreal.admin`, and `boreal.updater` repository/branch settings) and wire
+     `nixosConfigurations.<hostname>` in `flake.nix` using `boreal.lib.mkHost`.
    - Commit a remote-resolved `flake.lock` (via `nix flake lock` or
-     `nix flake update boreal`) and push to your repository. On the host, stage
-     the downstream commit with
-     `sudo boreal-schedule-update <https-repo-url> <40-digit-commit> <hostname>`.
+     `nix flake update boreal`) and push to your reviewed branch. Stage and
+     apply updates via `ssh admin@<host> "update schedule <40-digit-commit>"`,
+     `update prebuild`, and `update apply`.
 
-**Security note:** Runtime permission enforcement and Temporal server/host
-isolation are still under active development in Boreal. Never place secrets in
-Git, the Nix store, command-line arguments, or Temporal history.
+**Security note:** Provision user secrets under `~/.config/boreal/secrets`
+(`0700` directory, `0600` files) via `boreal-shell` (`secrets set <name>`).
+Never place secrets in Git, the Nix store, command-line arguments, or Temporal
+history.

@@ -1,15 +1,14 @@
 # Disposable QEMU test VM (`boreal.lib.mkVm`)
 
 `boreal.nixosModules.vm` and `boreal.lib.mkVm` let any downstream lab build an
-isolated QEMU test guest from the same `lab.nix` used for bare-metal hosts.
+isolated QEMU test guest from the same `lab.nix` used for bare-metal hosts,
+including network-namespace Temporal/PostgreSQL isolation, `boreal-broker`
+policy and worker-gate enforcement, `boreal-shell`, and restricted
+`boreal-admin`.
 
-This QEMU VM is a development environment, not a secure shared lab. It runs an
-unauthenticated Temporal development server (`temporal-dev`) without runtime
-policy enforcement; local guest accounts can still reach each other's Temporal
-namespaces directly even though Nix generates `/etc/boreal/workers.yaml` and
-`/etc/boreal/users/<user>/perms.yaml`. When `boreal.vm.devAuthorizedKeys` is
-set, `admin` and all `boreal.users` accounts authorize those developer public
-keys for convenient local testing. Use only dummy data and trusted test users.
+When `boreal.vm.devAuthorizedKeys` is set, `admin` and all `boreal.users`
+accounts authorize those developer public keys for local testing; do not use
+shared developer keys for untrusted multi-user hosts.
 
 ## Downstream flake wiring
 
@@ -20,7 +19,11 @@ nixosConfigurations.boreal-vm = boreal.lib.mkVm {
   modules = [
     ./lab.nix
     {
-      boreal.updater.enable = true;
+      boreal.updater = {
+        enable = true;
+        repository = "https://github.com/example/my-lab.git";
+        branch = "main";
+      };
       boreal.vm = {
         diskImage = "./boreal-vm.qcow2";
         sshPort = 2222;
@@ -32,12 +35,13 @@ nixosConfigurations.boreal-vm = boreal.lib.mkVm {
 ```
 
 `boreal.nixosModules.vm` automatically:
-- Registers `--namespace <user>` on `temporal-dev.service` for every user in
-  `boreal.users` (defaulting to `--namespace default` when empty).
-- Orders all `boreal-worker-<user>-<worker>` units after `temporal-dev.service`
-  with bounded restart limits.
-- Disables `system.switch.enable` so the VM configuration can never switch a
-  host machine, uses an isolated Nix store image, disables shared host
+- Runs isolated PostgreSQL, `temporal.service`, `boreal-temporal-namespaces`,
+  `boreal-broker.service`, and per-worker network namespaces derived from
+  `boreal.users`.
+- Enables restricted `boreal.admin` with `allowPoweroff = true` and bounded
+  worker restart limits.
+- Disables `system.switch.enable` by default so the VM configuration cannot
+  switch a host machine, uses an isolated Nix store image, disables shared host
   directories, and forwards `127.0.0.1:<sshPort>` to guest SSH port `22`.
 
 ## Build and start (`downstreams/demo-lab` worktree example)
@@ -48,32 +52,28 @@ With the `downstreams/demo-lab` orphan branch checked out at
 ```sh
 mkdir -p "$HOME/boreal-vm"
 NIX_DISK_IMAGE="$HOME/boreal-vm/boreal-vm.qcow2" \
-  nix run ./downstreams/demo-lab#boreal-vm
+  nix run ./downstreams/demo-lab#boreal-vm --override-input boreal . --no-write-lock-file
 ```
 
 Without `NIX_DISK_IMAGE`, the launcher uses `boreal.vm.diskImage`
 (`./boreal-vm.qcow2` by default) in the current working directory. The disk
-persists the Temporal SQLite database and guest state across restarts, and
+persists PostgreSQL Temporal state and guest state across restarts, and
 temporary per-start store images are not removed automatically.
 
-## Inspect generated catalogs and shut down
+## Interact over SSH and shut down
 
 From another terminal on the host:
 
 ```sh
-ssh -i ~/.ssh/self -p 2222 alice@127.0.0.1
-```
+# Interactive restricted lab shell:
+ssh -p 2222 alice@127.0.0.1
 
-Inside the guest:
+# Upload a user secret from stdin without shell/history exposure:
+ssh -p 2222 alice@127.0.0.1 "secrets set api_token" < ./api_token
 
-```sh
-cat /etc/boreal/workers.yaml
-cat /etc/boreal/users/alice/perms.yaml
-systemctl status temporal-dev
-```
+# Inspect allowlisted Temporal/worker service health as restricted admin:
+ssh -p 2222 admin@127.0.0.1 services
 
-To shut down the VM cleanly after test work has finished:
-
-```sh
-ssh -i ~/.ssh/self -p 2222 admin@127.0.0.1 'sudo systemctl poweroff'
+# Shut down the disposable VM cleanly after work finishes:
+ssh -p 2222 admin@127.0.0.1 poweroff
 ```
