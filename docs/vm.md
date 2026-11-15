@@ -18,7 +18,6 @@ nixosConfigurations.boreal-vm = boreal.lib.mkVm {
   system = "x86_64-linux";
   specialArgs = { inherit self; };
   modules = [
-    boreal.nixosModules.chinaMirrors # Optional regional cache mirrors
     ./lab.nix
     {
       boreal.updater.enable = true;
@@ -41,14 +40,15 @@ nixosConfigurations.boreal-vm = boreal.lib.mkVm {
   host machine, uses an isolated Nix store image, disables shared host
   directories, and forwards `127.0.0.1:<sshPort>` to guest SSH port `22`.
 
-## Build and start (`demo-lab` worktree example)
+## Build and start (`downstreams/demo-lab` worktree example)
 
-With the `demo-lab` orphan branch checked out at `downstream/demo-lab`:
+With the `downstreams/demo-lab` orphan branch checked out at
+`downstreams/demo-lab`:
 
 ```sh
 mkdir -p "$HOME/boreal-vm"
 NIX_DISK_IMAGE="$HOME/boreal-vm/boreal-vm.qcow2" \
-  nix run ./downstream/demo-lab#boreal-vm
+  nix run ./downstreams/demo-lab#boreal-vm
 ```
 
 Without `NIX_DISK_IMAGE`, the launcher uses `boreal.vm.diskImage`

@@ -3,9 +3,10 @@
 A NixOS and Temporal Rust framework for SSH-managed multi-user labs. `main`
 provides the reusable NixOS modules, Nix builder library (`boreal.lib`),
 `boreal-worker` Rust runtime crate, interactive `boreal-shell` prototype, and
-fail-closed `boreal-updater` service. Downstream lab deployments live on orphan
-branches checked out as worktrees under gitignored `downstream/` (for example,
-`downstream/demo-lab` on orphan branch `demo-lab`).
+fail-closed `boreal-updater` service. Downstream lab deployments live on
+`downstreams/<name>` orphan branches checked out as worktrees under gitignored
+`downstreams/` (for example, `downstreams/demo-lab` on orphan branch
+`downstreams/demo-lab`).
 
 The root flake tracks `nixos-26.05`; `flake.lock` pins the selected revision.
 Update lock files deliberately rather than resolving moving branches during
@@ -52,19 +53,20 @@ never connect to Temporal, run programs, or enforce security boundaries.
 ## Downstream lab worktrees
 
 Downstream projects consume Boreal as a flake input and live on independent
-orphan branches mounted inside gitignored `downstream/<name>/`:
+`downstreams/<name>` orphan branches mounted inside gitignored
+`downstreams/<name>/`:
 
 ```sh
-# Mount the reference demo-lab orphan branch:
-git worktree add downstream/demo-lab demo-lab
+# Mount the reference downstreams/demo-lab orphan branch:
+git worktree add downstreams/demo-lab downstreams/demo-lab
 
 # Check or run the downstream VM against local framework commits on main:
-nix flake check ./downstream/demo-lab --override-input boreal .
-nix run ./downstream/demo-lab#boreal-vm --override-input boreal .
+nix flake check ./downstreams/demo-lab --override-input boreal .
+nix run ./downstreams/demo-lab#boreal-vm --override-input boreal .
 ```
 
 Note that Git remotes do not enforce per-branch read permissions: keep public
-examples (like `demo-lab`) as orphan branches on `origin`, and push private labs
+examples (like `downstreams/demo-lab`) on `origin`, and push private labs
 to separate private Git remotes.
 
 ## Flake outputs
@@ -85,7 +87,6 @@ to separate private Git remotes.
     `boreal.users`, and `boreal.updater`.
   - `vm` — disposable QEMU guest configuration (`boreal.vm.*`) with dynamic
     `temporal-dev` namespaces derived from `boreal.users`.
-  - `chinaMirrors` — opt-in BFSU and SJTU Nix substituters.
 - `packages.<system>`: `boreal-shell` and `boreal-updater`.
 
 See [host configuration](docs/host.md), [VM guide](docs/vm.md), and

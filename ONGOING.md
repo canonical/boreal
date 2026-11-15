@@ -3,11 +3,11 @@
 ## Current state
 
 - `main` is a reusable Boreal flake framework (`boreal.lib`,
-  `boreal.nixosModules.{default,boreal,vm,chinaMirrors}`, `boreal-worker`,
-  `boreal-shell`, and `boreal-updater`). Downstream lab deployments live on
-  orphan branches checked out inside gitignored `downstream/` (such as
-  `downstream/demo-lab` on branch `demo-lab`, preserving the `greet` and `count`
-  workflows, `alice`/`bob` namespaces, and `<user>-<worker>` queues).
+  `boreal.nixosModules.{default,boreal,vm}`, `boreal-worker`, `boreal-shell`,
+  and `boreal-updater`). Downstream lab deployments live on
+  `downstreams/<name>` orphan branches checked out inside gitignored
+  `downstreams/` (such as `downstreams/demo-lab`, preserving the `greet` and
+  `count` workflows, `alice`/`bob` namespaces, and `<user>-<worker>` queues).
 - Downstream labs register worker derivations and typed flat argument schemas in
   `boreal.workerPackages` and declare users, SSH keys, worker instances, and
   permissions in `boreal.users.<user>`.
@@ -61,7 +61,7 @@
   arguments, history, logs, the Nix store, or Temporal history.
 - Test authorized and denied cross-user actions, direct-access bypass attempts,
   completion, terminal behavior, and workflow recovery in the disposable
-  `demo-lab` VM.
+  `downstreams/demo-lab` VM.
 
 ### 3. Restrict administration and finish safe updates
 

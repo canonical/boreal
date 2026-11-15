@@ -1,10 +1,11 @@
 # Architecture and security boundaries
 
 Boreal separates reusable lab infrastructure (on `main`) from concrete lab
-deployments (in downstream flakes or orphan-branch worktrees under
-`downstream/`). Downstream labs register their Temporal worker derivations and
-typed flat argument schemas in `boreal.workerPackages` and declare accounts, SSH
-public keys, worker instances, and permissions in `boreal.users`.
+deployments (in downstream flakes or `downstreams/<name>` orphan-branch
+worktrees under `downstreams/`). Downstream labs register their Temporal worker
+derivations and typed flat argument schemas in `boreal.workerPackages` and
+declare accounts, SSH public keys, worker instances, and permissions in
+`boreal.users`.
 
 Nix generates two protected, group-readable catalogs under `/etc/boreal/`
 (`0750`, `root:boreal`):

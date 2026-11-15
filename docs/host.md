@@ -77,8 +77,8 @@ in
 ```
 
 In the downstream `flake.nix`, combine `lab.nix` with hardware/network modules
-using `boreal.lib.mkHost` (optionally adding `boreal.nixosModules.chinaMirrors`)
-and validate the policy in CI with `boreal.lib.mkLabCheck`:
+using `boreal.lib.mkHost` and validate the policy in CI with
+`boreal.lib.mkLabCheck`:
 
 ```nix
 nixosConfigurations.lab-metal-01 = boreal.lib.mkHost {
