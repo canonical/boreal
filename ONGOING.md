@@ -10,9 +10,10 @@
   inside gitignored `downstreams/` (such as `downstreams/demo-lab`, preserving
   the `greet` and `count` workflows, `alice`/`bob` namespaces, and
   `<user>-<worker>` queues).
-- Downstream labs register worker derivations and typed flat argument schemas in
-  `boreal.workerPackages` and declare users, SSH keys, worker instances, and
-  permissions in `boreal.users.<user>`.
+- Downstream labs link `${boreal}/worker` at `.boreal/boreal-worker` via
+  `boreal.lib.{buildRustWorker,mkDevShell}`, register worker derivations and
+  typed flat argument schemas in `boreal.workerPackages`, and declare users,
+  SSH keys, worker instances, and permissions in `boreal.users.<user>`.
 - Nix generates authoritative group-readable catalogs under `/etc/boreal/`
   (`0750`, `root:boreal`) outside writable home directories and without secrets
   or store paths in the Nix store:
@@ -28,7 +29,8 @@
   `/etc/boreal/` or enforcing authorization.
 - Disposable `boreal.lib.mkVm` guests run an unauthenticated `temporal-dev`
   server and `admin` has unrestricted passwordless sudo. `boreal.updater`
-  schedules and prebuilds revisions, and activation remains blocked.
+  schedules and prebuilds downstream lab commits (whose committed `flake.lock`
+  pins `main`), and activation remains blocked.
 
 ## Next steps
 
@@ -74,8 +76,8 @@
   and secrets from that restricted interface; test that it cannot be bypassed.
 - GitHub review is managed outside Boreal; do not add a separate signature or
   approval service. Configure `boreal.updater` to limit updates to the
-  downstream lab's intended repository and reviewed branch, and activate the
-  exact revision that was prebuilt.
+  downstream lab's intended repository (and reviewed branch when applicable),
+  and activate the exact downstream revision that was prebuilt.
 - Before enabling system activation, implement an enforced admission barrier
   and authoritative drain/recovery protocol covering concurrent starts,
   schedules, child workflows, activities, failures, and interrupted updates.
