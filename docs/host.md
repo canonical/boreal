@@ -65,6 +65,7 @@ in
       };
       bob = {
         keys = [ ]; # Add Bob's public SSH key.
+        editMode = "vi"; # Optional: "emacs" (default), "vi", or "helix" (~/.borealrc).
         workers = {
           greet.package = "lab-worker";
           count.package = "lab-worker-alt";

@@ -55,7 +55,9 @@ store:
 
 OpenSSH disables root login, SFTP, TCP/Unix/agent/X11 forwarding, tunnels,
 `~/.ssh/rc`, and `~/.ssh/environment`. Lab users have `0700` home directories
-and login shell `boreal-shell`. Interactive sessions expose dynamic `clap` /
+and login shell `boreal-shell`. Interactive sessions read `~/.borealrc` (`0600`
+regular file, `O_NOFOLLOW`, provisioned from `boreal.users.<name>.editMode` as
+`emacs`, `vi`, or `helix` with `emacs` fallback), and expose dynamic `clap` /
 `reedline` commands (`workers`, `start`, `list`, `status`, `result`, `cancel`,
 `permissions`, `secrets`, `help`, `exit`) and permission-filtered completions;
 non-interactive SSH accepts only `secrets set <name>`, `secrets list`, and
