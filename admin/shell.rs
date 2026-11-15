@@ -26,11 +26,10 @@ const SUDO_BIN: &str = "/run/wrappers/bin/sudo";
 enum AdminAction {
     Services,
     Service { op: String, unit: String },
-    UpdateSchedule { rev: String },
-    UpdatePrebuild,
-    UpdateApply,
-    UpdateRecover,
-    UpdateStatus,
+    UpdaterUpdate,
+    UpdaterSchedule,
+    UpdaterRecover,
+    UpdaterStatus,
     Poweroff,
     Exit,
 }
@@ -64,18 +63,17 @@ impl AdminGrammar {
 
         if self.policy.updater_enabled {
             root = root.subcommand(
-                ClapCommand::new("update")
-                    .about("Schedule, prebuild, apply, or inspect NixOS lab updates")
+                ClapCommand::new("updater")
+                    .about("Sync /etc/nixos, prebuild, schedule switch, or inspect update state")
                     .subcommand_required(true)
                     .subcommand(
-                        ClapCommand::new("schedule")
-                            .about("Schedule a 40-digit downstream Git commit")
-                            .arg(Arg::new("rev").required(true)),
+                        ClapCommand::new("update")
+                            .about("Sync /etc/nixos with remote branch and build generation"),
                     )
-                    .subcommand(ClapCommand::new("prebuild").about("Prebuild the scheduled commit"))
                     .subcommand(
-                        ClapCommand::new("apply")
-                            .about("Close gate, drain work, and switch to prebuilt closure"),
+                        ClapCommand::new("schedule").about(
+                            "Schedule switch to built generation when no pipeline is running",
+                        ),
                     )
                     .subcommand(
                         ClapCommand::new("recover").about("Recover from an interrupted update"),
@@ -116,23 +114,11 @@ impl AdminGrammar {
                     .to_owned();
                 AdminAction::Service { op, unit }
             }
-            Some(("update", sub)) => match sub.subcommand() {
-                Some(("schedule", s)) => {
-                    let rev = s.get_one::<String>("rev").unwrap().clone();
-                    if rev.len() != 40 || !rev.bytes().all(|b| b.is_ascii_hexdigit()) {
-                        return Err(ParseErr::Clap(cmd.error(
-                            ErrorKind::ValueValidation,
-                            "revision must be a full 40-digit hexadecimal Git commit hash",
-                        )));
-                    }
-                    AdminAction::UpdateSchedule {
-                        rev: rev.to_ascii_lowercase(),
-                    }
-                }
-                Some(("prebuild", _)) => AdminAction::UpdatePrebuild,
-                Some(("apply", _)) => AdminAction::UpdateApply,
-                Some(("recover", _)) => AdminAction::UpdateRecover,
-                Some(("status", _)) => AdminAction::UpdateStatus,
+            Some(("updater", sub)) => match sub.subcommand() {
+                Some(("update", _)) => AdminAction::UpdaterUpdate,
+                Some(("schedule", _)) => AdminAction::UpdaterSchedule,
+                Some(("recover", _)) => AdminAction::UpdaterRecover,
+                Some(("status", _)) => AdminAction::UpdaterStatus,
                 _ => unreachable!(),
             },
             Some(("poweroff", _)) => AdminAction::Poweroff,
@@ -149,13 +135,10 @@ impl AdminGrammar {
             AdminAction::Service { op, unit } => {
                 Some(vec!["service".into(), op.clone(), unit.clone()])
             }
-            AdminAction::UpdateSchedule { rev } => {
-                Some(vec!["update".into(), "schedule".into(), rev.clone()])
-            }
-            AdminAction::UpdatePrebuild => Some(vec!["update".into(), "prebuild".into()]),
-            AdminAction::UpdateApply => Some(vec!["update".into(), "apply".into()]),
-            AdminAction::UpdateRecover => Some(vec!["update".into(), "recover".into()]),
-            AdminAction::UpdateStatus => Some(vec!["update".into(), "status".into()]),
+            AdminAction::UpdaterUpdate => Some(vec!["updater".into(), "update".into()]),
+            AdminAction::UpdaterSchedule => Some(vec!["updater".into(), "schedule".into()]),
+            AdminAction::UpdaterRecover => Some(vec!["updater".into(), "recover".into()]),
+            AdminAction::UpdaterStatus => Some(vec!["updater".into(), "status".into()]),
             AdminAction::Poweroff => Some(vec!["poweroff".into()]),
         }
     }
@@ -416,13 +399,33 @@ allowPoweroff: false
             })
         );
         assert_eq!(
-            g.parse("update schedule 0123456789abcdef0123456789ABCDEF01234567")
-                .ok()
-                .flatten(),
-            Some(AdminAction::UpdateSchedule {
-                rev: "0123456789abcdef0123456789abcdef01234567".into()
-            })
+            g.parse("updater update").ok().flatten(),
+            Some(AdminAction::UpdaterUpdate)
         );
+        assert_eq!(
+            g.parse("updater schedule").ok().flatten(),
+            Some(AdminAction::UpdaterSchedule)
+        );
+        assert_eq!(
+            g.parse("updater status").ok().flatten(),
+            Some(AdminAction::UpdaterStatus)
+        );
+        assert_eq!(
+            g.parse("updater recover").ok().flatten(),
+            Some(AdminAction::UpdaterRecover)
+        );
+
+        let mut completer = Completer {
+            grammar: Arc::new(sample_grammar()),
+        };
+        let suggestions: Vec<_> = completer
+            .complete("updater ", 8)
+            .into_iter()
+            .map(|s| s.value)
+            .collect();
+        for expected in ["update", "schedule", "status", "recover"] {
+            assert!(suggestions.iter().any(|s| s == expected), "{suggestions:?}");
+        }
 
         for rejected in [
             "/bin/sh",
@@ -431,6 +434,10 @@ allowPoweroff: false
             "service restart sshd",
             "service status postgresql",
             "services; id",
+            "updater run",
+            "updater update extra",
+            "updater schedule 0123456789abcdef0123456789abcdef01234567",
+            "update status",
             "poweroff",
             "sudo -l",
         ] {

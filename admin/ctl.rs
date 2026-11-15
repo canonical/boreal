@@ -97,13 +97,6 @@ fn show_units(units: &[&str]) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_hex_rev(rev: &str) -> Result<(), String> {
-    if rev.len() != 40 || !rev.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err("revision must be a 40-digit hexadecimal Git commit hash".into());
-    }
-    Ok(())
-}
-
 fn run_ctl(args: &[String], policy: &AdminPolicy) -> Result<(), String> {
     match args {
         [cmd] if cmd == "services" => {
@@ -128,7 +121,7 @@ fn run_ctl(args: &[String], policy: &AdminPolicy) -> Result<(), String> {
                 _ => Err("service operation must be status, start, stop, or restart".into()),
             }
         }
-        [cmd, sub, rest @ ..] if cmd == "update" => {
+        [cmd, rest @ ..] if cmd == "updater" => {
             if !policy.updater_enabled {
                 return Err("boreal.updater is not enabled on this host".into());
             }
@@ -136,63 +129,18 @@ fn run_ctl(args: &[String], policy: &AdminPolicy) -> Result<(), String> {
                 .updater_bin
                 .as_ref()
                 .ok_or("missing updater binary in admin policy")?;
-            match (sub.as_str(), rest) {
-                ("schedule", [rev]) => {
-                    validate_hex_rev(rev)?;
+            match rest {
+                [sub] if matches!(sub.as_str(), "update" | "schedule" | "recover" | "status") => {
                     let st = Command::new(updater)
-                        .args(["schedule", rev.as_str()])
+                        .arg(sub.as_str())
                         .status()
                         .map_err(|e| format!("invoke boreal-updater: {e}"))?;
                     if !st.success() {
-                        return Err("boreal-updater schedule failed".into());
+                        return Err(format!("boreal-updater {sub} failed"));
                     }
                     Ok(())
                 }
-                ("prebuild", []) => {
-                    let st = Command::new(updater)
-                        .arg("prebuild")
-                        .status()
-                        .map_err(|e| format!("invoke boreal-updater: {e}"))?;
-                    if !st.success() {
-                        return Err("boreal-updater prebuild failed".into());
-                    }
-                    Ok(())
-                }
-                ("apply", []) => {
-                    let st = Command::new(SYSTEMCTL)
-                        .args(["--no-pager", "start", "boreal-updater.service"])
-                        .status()
-                        .map_err(|e| format!("start boreal-updater.service: {e}"))?;
-                    let _ = Command::new(updater).arg("status").status();
-                    if !st.success() {
-                        return Err("boreal-updater.service did not complete activation".into());
-                    }
-                    Ok(())
-                }
-                ("recover", []) => {
-                    let st = Command::new(updater)
-                        .arg("recover")
-                        .status()
-                        .map_err(|e| format!("invoke boreal-updater: {e}"))?;
-                    if !st.success() {
-                        return Err("boreal-updater recover failed".into());
-                    }
-                    Ok(())
-                }
-                ("status", []) => {
-                    let st = Command::new(updater)
-                        .arg("status")
-                        .status()
-                        .map_err(|e| format!("invoke boreal-updater: {e}"))?;
-                    if !st.success() {
-                        return Err("boreal-updater status failed".into());
-                    }
-                    Ok(())
-                }
-                _ => Err(
-                    "usage: update <schedule <40-hex-rev> | prebuild | apply | recover | status>"
-                        .into(),
-                ),
+                _ => Err("usage: updater <update | schedule | recover | status>".into()),
             }
         }
         [cmd] if cmd == "poweroff" => {
@@ -209,7 +157,7 @@ fn run_ctl(args: &[String], policy: &AdminPolicy) -> Result<(), String> {
             Ok(())
         }
         _ => Err(
-            "usage: boreal-admin-ctl <services | service <status|start|stop|restart> <unit> | update ... | poweroff>"
+            "usage: boreal-admin-ctl <services | service <status|start|stop|restart> <unit> | updater <update|schedule|recover|status> | poweroff>"
                 .into(),
         ),
     }
@@ -252,7 +200,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_ctl_rejects_unlisted_services_and_bad_revisions() {
+    fn test_ctl_rejects_unlisted_services_and_disallowed_updater_invocations() {
         let policy = AdminPolicy::from_yaml(
             "\
 services:
@@ -269,7 +217,14 @@ allowPoweroff: false
             vec!["service", "restart", "sshd"],
             vec!["service", "status", "postgresql"],
             vec!["service", "reload", "temporal"],
-            vec!["update", "schedule", "not-a-40-char-sha"],
+            vec!["updater", "run"],
+            vec!["updater", "update", "extra"],
+            vec![
+                "updater",
+                "schedule",
+                "0123456789abcdef0123456789abcdef01234567",
+            ],
+            vec!["update", "status"],
             vec!["poweroff"],
             vec!["/bin/sh"],
         ] {
