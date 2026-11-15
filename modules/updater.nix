@@ -10,22 +10,6 @@ let
   cfg = borealCfg.updater;
   yamlFormat = pkgs.formats.yaml { };
 
-  validRepo =
-    repo:
-    builtins.match "^https://[A-Za-z0-9.-]+(:[0-9]+)?/[A-Za-z0-9/._~-]+$" repo != null
-    && !(lib.hasInfix ".." repo);
-
-  validBranch =
-    branch:
-    branch != ""
-    && builtins.stringLength branch <= 200
-    && !(lib.hasPrefix "/" branch)
-    && !(lib.hasSuffix "/" branch)
-    && !(lib.hasSuffix ".lock" branch)
-    && !(lib.hasInfix ".." branch)
-    && !(lib.hasInfix "//" branch)
-    && builtins.match "^[A-Za-z0-9/_.-]+$" branch != null;
-
   validHost =
     host:
     host != ""
@@ -40,23 +24,34 @@ let
   );
 
   updaterPolicy = {
-    inherit (cfg) repository;
-    host = cfg.configurationName;
+    projectDir = "/etc/nixos";
+    host = config.networking.hostName;
     allowSwitch = config.system.switch.enable;
     inherit workerUnits;
     brokerSocket = "/run/boreal/updater.sock";
-  }
-  // lib.optionalAttrs (cfg.branch != null) {
-    inherit (cfg) branch;
   };
 
-  schedule = pkgs.writeShellScriptBin "boreal-schedule-update" ''
-    set -eu
-    ${lib.getExe cfg.package} schedule "$@"
-    exec ${config.systemd.package}/bin/systemctl --no-block start boreal-updater.service
-  '';
+  removedMsg = "Place the downstream Git checkout at /etc/nixos (tracking an https:// remote branch) and set networking.hostName instead.";
 in
 {
+  imports = [
+    (lib.mkRemovedOptionModule [
+      "boreal"
+      "updater"
+      "repository"
+    ] removedMsg)
+    (lib.mkRemovedOptionModule [
+      "boreal"
+      "updater"
+      "branch"
+    ] removedMsg)
+    (lib.mkRemovedOptionModule [
+      "boreal"
+      "updater"
+      "configurationName"
+    ] removedMsg)
+  ];
+
   options.boreal.updater = {
     enable = lib.mkEnableOption "the gated Boreal update service";
 
@@ -66,40 +61,13 @@ in
       defaultText = lib.literalExpression "pkgs.callPackage ../packages/updater.nix { }";
       description = "The Boreal updater package.";
     };
-
-    repository = lib.mkOption {
-      type = lib.types.str;
-      default = "";
-      description = "Downstream lab HTTPS Git repository URL permitted for updates.";
-    };
-
-    branch = lib.mkOption {
-      type = lib.types.nullOr lib.types.str;
-      default = null;
-      description = "Reviewed Git branch required on scheduled downstream commits when set.";
-    };
-
-    configurationName = lib.mkOption {
-      type = lib.types.str;
-      default = config.networking.hostName;
-      defaultText = lib.literalExpression "config.networking.hostName";
-      description = "nixosConfigurations.<name> attribute built and activated for this host.";
-    };
   };
 
   config = lib.mkIf cfg.enable {
     assertions = [
       {
-        assertion = validRepo cfg.repository;
-        message = "boreal.updater.repository must be an https:// Git repository URL without credentials, query, or fragment.";
-      }
-      {
-        assertion = cfg.branch == null || validBranch cfg.branch;
-        message = "boreal.updater.branch must be null or a valid reviewed Git branch name.";
-      }
-      {
-        assertion = validHost cfg.configurationName;
-        message = "boreal.updater.configurationName must be a single DNS-style hostname.";
+        assertion = validHost config.networking.hostName;
+        message = "networking.hostName must be a single DNS-style hostname when boreal.updater is enabled.";
       }
     ];
 
@@ -112,12 +80,12 @@ in
 
     environment.systemPackages = [
       cfg.package
-      schedule
+      pkgs.git
     ];
 
     systemd.services = {
       boreal-updater = {
-        description = "Prebuild, drain, and activate a scheduled Boreal update";
+        description = "Drain running pipelines and activate a prebuilt Boreal generation";
         wants = [ "network-online.target" ];
         after = [
           "network-online.target"
