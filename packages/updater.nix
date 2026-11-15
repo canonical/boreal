@@ -1,4 +1,8 @@
-{ lib, rustPlatform }:
+{
+  git,
+  lib,
+  rustPlatform,
+}:
 
 let
   fs = lib.fileset;
@@ -25,5 +29,6 @@ rustPlatform.buildRustPackage {
   inherit src;
   sourceRoot = "${src.name}/updater";
   cargoLock.lockFile = ../updater/Cargo.lock;
+  nativeCheckInputs = [ git ];
   meta.mainProgram = "boreal-updater";
 }
