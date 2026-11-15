@@ -57,7 +57,10 @@ Downstream projects consume Boreal as a flake input and live on independent
 `downstreams/<name>/`:
 
 ```sh
-# Mount the reference downstreams/demo-lab orphan branch:
+# Start a new downstream lab from the starter template:
+git worktree add -b downstreams/my-lab downstreams/my-lab downstreams/template
+
+# Or mount the reference downstreams/demo-lab orphan branch:
 git worktree add downstreams/demo-lab downstreams/demo-lab
 
 # Check or run the downstream VM against local framework commits on main:
