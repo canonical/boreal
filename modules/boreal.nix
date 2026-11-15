@@ -509,12 +509,12 @@ in
               else
                 "/bin/false";
             Restart = "on-failure";
+            RestartSec = 2;
             TimeoutStopSec = "infinity";
             NoNewPrivileges = true;
             PrivateTmp = true;
             ProtectSystem = "strict";
             ProtectProc = "invisible";
-            ProcSubset = "pid";
           };
         };
       }) workerEntries

@@ -99,7 +99,7 @@ in
         listen_addresses = lib.mkForce "127.0.0.1";
         unix_socket_directories = lib.mkForce "/run/postgresql";
         unix_socket_group = lib.mkForce "boreal-pg";
-        unix_socket_permissions = lib.mkForce "0750";
+        unix_socket_permissions = lib.mkForce "0770";
       };
       authentication = lib.mkForce ''
         local all postgres peer
@@ -208,6 +208,7 @@ in
         serviceConfig = {
           NetworkNamespacePath = "/run/netns/boreal-internal";
           SupplementaryGroups = [ "boreal-pg" ];
+          SystemCallFilter = [ "@chown" ];
         };
       };
 
@@ -362,12 +363,11 @@ in
         };
         serviceConfig = {
           User = "root";
-          Group = "root";
+          Group = "boreal";
           RuntimeDirectory = "boreal";
           RuntimeDirectoryMode = "0750";
           StateDirectory = "boreal-broker";
           StateDirectoryMode = "0700";
-          ExecStartPre = "${pkgs.coreutils}/bin/chown root:boreal /run/boreal";
           ExecStart = lib.getExe cfg.brokerPackage;
           Restart = "always";
           RestartSec = 2;
