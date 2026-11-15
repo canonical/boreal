@@ -119,14 +119,6 @@ let
   };
 
   configured = mkHost sampleLabModule;
-  withChinaMirrors =
-    (self.lib.mkHost {
-      inherit system;
-      modules = [
-        baseContainer
-        self.nixosModules.chinaMirrors
-      ];
-    }).config;
 
   labCheckDrv = self.lib.mkLabCheck {
     inherit pkgs;
@@ -454,12 +446,6 @@ let
   );
 in
 assert configured.nix.settings.substituters == [ "https://cache.nixos.org/" ];
-assert
-  withChinaMirrors.nix.settings.substituters == [
-    "https://mirrors.bfsu.edu.cn/nix-channels/store"
-    "https://mirror.sjtu.edu.cn/nix-channels/store"
-    "https://cache.nixos.org/"
-  ];
 assert builtins.hasAttr "boreal" configured.users.groups;
 assert configured.users.users.alice.isNormalUser;
 assert builtins.elem "boreal" configured.users.users.alice.extraGroups;

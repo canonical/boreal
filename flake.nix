@@ -20,7 +20,6 @@
         default = import ./modules;
         boreal = import ./modules;
         vm = import ./modules/vm.nix;
-        chinaMirrors = import ./modules/china-mirrors.nix;
       };
 
       packages = forAllSystems (pkgs: import ./packages { inherit pkgs; });
