@@ -56,12 +56,14 @@ Boreal framework revision.
 
 5. Deploy and stage updates:
    - Add `./hosts/<hostname>.nix` (importing `hardware-configuration.nix`,
-     `boreal.admin`, and `boreal.updater` repository/branch settings) and wire
+     setting `networking.hostName = "<hostname>";`, and configuring
+     `boreal.admin` and `boreal.updater.enable = true;`) and wire
      `nixosConfigurations.<hostname>` in `flake.nix` using `boreal.lib.mkHost`.
-   - Commit a remote-resolved `flake.lock` (via `nix flake lock` or
-     `nix flake update boreal`) and push to your reviewed branch. Stage and
-     apply updates via `ssh admin@<host> "update schedule <40-digit-commit>"`,
-     `update prebuild`, and `update apply`.
+   - Clone this repository at `/etc/nixos` on the host tracking your reviewed
+     `https://` branch. Commit a remote-resolved `flake.lock` (via
+     `nix flake lock` or `nix flake update boreal`), push to the remote branch,
+     and run `ssh admin@<host> "updater update"` followed by
+     `ssh admin@<host> "updater schedule"`.
 
 **Security note:** Provision user secrets under `~/.config/boreal/secrets`
 (`0700` directory, `0600` files) via `boreal-shell` (`secrets set <name>`).
