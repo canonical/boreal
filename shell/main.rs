@@ -1,6 +1,8 @@
 mod client;
 mod command;
 mod completion;
+#[cfg_attr(not(test), allow(dead_code))]
+mod helix;
 mod highlighter;
 mod menu;
 
