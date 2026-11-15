@@ -15,6 +15,8 @@ use boreal_common::yaml::{self, Value};
 
 const STATE_DIR: &str = "/var/lib/boreal-updater";
 const POLICY_PATH: &str = "/etc/boreal/updater.yaml";
+const DEFAULT_PROJECT_DIR: &str = "/etc/nixos";
+const MAX_LOCKFILE_BYTES: usize = 4 * 1024 * 1024;
 const DEFAULT_DRAIN_TIMEOUT: Duration = Duration::from_secs(3600);
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
@@ -24,8 +26,7 @@ unsafe extern "C" {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Policy {
-    pub repository: String,
-    pub branch: Option<String>,
+    pub project_dir: PathBuf,
     pub host: String,
     pub allow_switch: bool,
     pub worker_units: Vec<String>,
@@ -44,20 +45,11 @@ impl Policy {
     pub fn from_yaml(text: &str) -> Result<Self, String> {
         let doc = yaml::parse(text).map_err(|e| format!("parse updater policy YAML: {e:?}"))?;
         let map = doc.as_map().ok_or("updater.yaml root must be a mapping")?;
-        let repo = map
-            .get("repository")
-            .and_then(Value::as_str)
-            .ok_or("updater.yaml missing 'repository'")?;
-        validate_repo(repo)?;
 
-        let branch = match map.get("branch") {
-            None | Some(Value::Null) => None,
-            Some(Value::Str(s)) if s.is_empty() => None,
-            Some(Value::Str(s)) => {
-                validate_branch(s)?;
-                Some(s.clone())
-            }
-            _ => return Err("updater.yaml 'branch' must be a string or null".into()),
+        let project_dir = match map.get("projectDir") {
+            None | Some(Value::Null) => validate_project_dir(DEFAULT_PROJECT_DIR)?,
+            Some(Value::Str(s)) => validate_project_dir(s)?,
+            _ => return Err("updater.yaml 'projectDir' must be a string".into()),
         };
 
         let host = map
@@ -88,8 +80,7 @@ impl Policy {
             .map_or_else(|| PathBuf::from(UPDATER_SOCKET), PathBuf::from);
 
         Ok(Self {
-            repository: repo.to_owned(),
-            branch,
+            project_dir,
             host: host.to_owned(),
             allow_switch,
             worker_units,
@@ -98,17 +89,34 @@ impl Policy {
     }
 }
 
+pub fn validate_project_dir(raw: &str) -> Result<PathBuf, String> {
+    if !raw.starts_with('/')
+        || raw.len() < 2
+        || raw.ends_with('/')
+        || raw.contains("//")
+        || raw.split('/').any(|seg| matches!(seg, "." | ".."))
+        || raw
+            .bytes()
+            .any(|b| b.is_ascii_control() || b.is_ascii_whitespace() || matches!(b, b'?' | b'#'))
+    {
+        return Err(
+            "projectDir must be a normalized absolute path without special characters".into(),
+        );
+    }
+    Ok(PathBuf::from(raw))
+}
+
 pub fn validate_repo(repo: &str) -> Result<(), String> {
     let rest = repo
         .strip_prefix("https://")
-        .ok_or("repository must use https://")?;
+        .ok_or("upstream repository URL must use https://")?;
     let (host_port, path) = rest
         .split_once('/')
-        .ok_or("repository URL must include a path")?;
+        .ok_or("upstream repository URL must include a path")?;
     let domain = match host_port.split_once(':') {
         Some((h, port)) => {
             if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
-                return Err("invalid port in repository URL".into());
+                return Err("invalid port in upstream repository URL".into());
             }
             h
         }
@@ -125,9 +133,25 @@ pub fn validate_repo(repo: &str) -> Result<(), String> {
             .all(|c| c.is_ascii_alphanumeric() || b"/._~-".contains(&c))
     {
         return Err(
-            "repository URL must contain only a host and an unescaped path (no credentials, query, or fragment)"
+            "upstream repository URL must contain only a host and an unescaped path (no credentials, query, or fragment)"
                 .into(),
         );
+    }
+    Ok(())
+}
+
+pub fn validate_remote_name(remote: &str) -> Result<(), String> {
+    if remote.is_empty()
+        || remote.len() > 64
+        || remote.starts_with(['-', '.'])
+        || remote.ends_with(['.', '/'])
+        || remote.ends_with(".lock")
+        || remote.contains("..")
+        || !remote
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+    {
+        return Err("invalid Git remote name".into());
     }
     Ok(())
 }
@@ -135,7 +159,7 @@ pub fn validate_repo(repo: &str) -> Result<(), String> {
 pub fn validate_branch(branch: &str) -> Result<(), String> {
     if branch.is_empty()
         || branch.len() > 200
-        || branch.starts_with('/')
+        || branch.starts_with(['/', '-'])
         || branch.ends_with('/')
         || branch.ends_with(".lock")
         || branch.contains("..")
@@ -145,7 +169,7 @@ pub fn validate_branch(branch: &str) -> Result<(), String> {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"/_.-".contains(&b))
     {
-        return Err("invalid reviewed Git branch name".into());
+        return Err("invalid Git branch name".into());
     }
     Ok(())
 }
@@ -179,61 +203,39 @@ fn valid_unit_name(u: &str) -> bool {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Target {
     repo: String,
-    branch: Option<String>,
+    branch: String,
     rev: String,
     host: String,
 }
 
 impl Target {
-    fn from_policy_and_rev(policy: &Policy, rev: &str) -> Result<Self, String> {
-        Ok(Self {
-            repo: policy.repository.clone(),
-            branch: policy.branch.clone(),
-            rev: validate_rev(rev)?,
-            host: policy.host.clone(),
-        })
-    }
-
     fn verify_matches_policy(&self, policy: &Policy) -> Result<(), String> {
-        if self.repo != policy.repository {
-            return Err(format!(
-                "scheduled repository '{}' does not match configured '{}'",
-                self.repo, policy.repository
-            ));
-        }
-        if self.branch != policy.branch {
-            return Err("scheduled branch does not match configured reviewed branch".into());
-        }
         if self.host != policy.host {
             return Err(format!(
-                "scheduled host '{}' does not match configured '{}'",
+                "built host '{}' does not match configured '{}'",
                 self.host, policy.host
             ));
         }
         Ok(())
     }
 
-    fn flake(&self) -> String {
-        match &self.branch {
-            Some(branch) => format!("git+{}?ref=refs/heads/{branch}&rev={}", self.repo, self.rev),
-            None => format!("git+{}?rev={}", self.repo, self.rev),
-        }
-    }
-
-    fn installable(&self) -> String {
-        format!(
-            "{}#nixosConfigurations.{}.config.system.build.toplevel",
-            self.flake(),
-            self.host
-        )
+    fn installable(&self, project_dir: &Path) -> Result<String, String> {
+        let dir_str = project_dir
+            .to_str()
+            .ok_or("projectDir is not valid UTF-8")?;
+        validate_project_dir(dir_str)?;
+        Ok(format!(
+            "git+file://{dir_str}?rev={}#nixosConfigurations.{}.config.system.build.toplevel",
+            self.rev, self.host
+        ))
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Phase {
-    Scheduled,
     Building,
     Prebuilt,
+    Scheduled,
     Draining,
     Activating,
     Activated,
@@ -244,9 +246,9 @@ enum Phase {
 impl Phase {
     fn name(self) -> &'static str {
         match self {
-            Self::Scheduled => "scheduled",
             Self::Building => "building",
             Self::Prebuilt => "prebuilt",
+            Self::Scheduled => "scheduled",
             Self::Draining => "draining",
             Self::Activating => "activating",
             Self::Activated => "activated",
@@ -257,9 +259,9 @@ impl Phase {
 
     fn parse(s: &str) -> Result<Self, String> {
         match s {
-            "scheduled" => Ok(Self::Scheduled),
             "building" => Ok(Self::Building),
             "prebuilt" => Ok(Self::Prebuilt),
+            "scheduled" => Ok(Self::Scheduled),
             "draining" => Ok(Self::Draining),
             "activating" => Ok(Self::Activating),
             "activated" => Ok(Self::Activated),
@@ -288,11 +290,11 @@ impl State {
             .map(|c| if matches!(c, '\n' | '\r') { ' ' } else { c })
             .collect();
         format!(
-            "version=2\nphase={}\nupdate_id={}\nrepo={}\nbranch={}\nrev={}\nhost={}\nresult={}\ngc_root={}\nreason={}\n",
+            "version=3\nphase={}\nupdate_id={}\nrepo={}\nbranch={}\nrev={}\nhost={}\nresult={}\ngc_root={}\nreason={}\n",
             self.phase.name(),
             self.update_id,
             self.target.repo,
-            self.target.branch.as_deref().unwrap_or(""),
+            self.target.branch,
             self.target.rev,
             self.target.host,
             self.result.as_deref().and_then(Path::to_str).unwrap_or(""),
@@ -312,7 +314,7 @@ impl State {
                 .and_then(|line| line.strip_prefix(name))
                 .ok_or_else(|| format!("invalid state: missing {name}"))
         }
-        if field(&mut lines, "version=")? != "2" {
+        if field(&mut lines, "version=")? != "3" {
             return Err("unsupported state version".into());
         }
         let phase = Phase::parse(field(&mut lines, "phase=")?)?;
@@ -326,13 +328,8 @@ impl State {
         }
         let repo = field(&mut lines, "repo=")?;
         validate_repo(repo)?;
-        let raw_branch = field(&mut lines, "branch=")?;
-        let branch = if raw_branch.is_empty() {
-            None
-        } else {
-            validate_branch(raw_branch)?;
-            Some(raw_branch.to_owned())
-        };
+        let branch = field(&mut lines, "branch=")?;
+        validate_branch(branch)?;
         let rev = validate_rev(field(&mut lines, "rev=")?)?;
         let host = field(&mut lines, "host=")?;
         validate_host(host)?;
@@ -354,7 +351,11 @@ impl State {
         };
         if matches!(
             phase,
-            Phase::Prebuilt | Phase::Draining | Phase::Activating | Phase::Activated
+            Phase::Prebuilt
+                | Phase::Scheduled
+                | Phase::Draining
+                | Phase::Activating
+                | Phase::Activated
         ) && (result.is_none() || gc_root.is_none())
         {
             return Err("state phase requires prebuilt result and gc_root".into());
@@ -363,7 +364,7 @@ impl State {
             update_id: update_id.to_owned(),
             target: Target {
                 repo: repo.to_owned(),
-                branch,
+                branch: branch.to_owned(),
                 rev,
                 host: host.to_owned(),
             },
@@ -439,7 +440,8 @@ fn load_opt(dir: &Path) -> Result<Option<State>, String> {
 }
 
 fn load(dir: &Path) -> Result<State, String> {
-    load_opt(dir)?.ok_or_else(|| "no update has been scheduled".into())
+    load_opt(dir)?
+        .ok_or_else(|| "no generation has been built; run 'boreal-updater update' first".into())
 }
 
 fn save(dir: &Path, state: &State) -> Result<(), String> {
@@ -490,9 +492,16 @@ fn attempt_dir(dir: &Path) -> Result<PathBuf, String> {
 }
 
 trait Environment {
-    fn prebuild(&self, target: &Target, attempt: &Path) -> Result<PathBuf, String>;
+    fn sync_project(&self, policy: &Policy) -> Result<Target, String>;
+    fn build_generation(
+        &self,
+        policy: &Policy,
+        target: &Target,
+        attempt: &Path,
+    ) -> Result<PathBuf, String>;
     fn verify_prebuilt(&self, gc_root: &Path, expected_result: &Path) -> Result<(), String>;
     fn broker_call(&self, req: &UpdaterRequest) -> Result<UpdaterResponse, String>;
+    fn start_updater_service(&self) -> Result<(), String>;
     fn stop_workers(&self, units: &[String]) -> Result<(), String>;
     fn start_workers(&self, units: &[String]) -> Result<(), String>;
     fn activate_closure(&self, result: &Path) -> Result<(), String>;
@@ -506,49 +515,63 @@ trait Environment {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct UpstreamSpec {
+    local_branch: String,
+    remote_name: String,
+    remote_branch: String,
+    repo_url: String,
+}
+
 struct LiveEnv<'a> {
     policy: &'a Policy,
+    expected_uid: Option<u32>,
 }
 
 impl LiveEnv<'_> {
-    fn git_fetch_branch_cmd(git_dir: &Path, repo: &str, branch: &str) -> Command {
+    fn git_cmd(project_dir: &Path) -> Command {
         let mut cmd = Command::new("git");
-        cmd.arg("-C").arg(git_dir).args([
+        cmd.arg("-C")
+            .arg(project_dir)
+            .args(["-c", "core.hooksPath=/dev/null"]);
+        cmd
+    }
+
+    fn git_stdout(project_dir: &Path, args: &[&str], context: &str) -> Result<String, String> {
+        let out = Self::git_cmd(project_dir)
+            .args(args)
+            .output()
+            .map_err(|e| format!("{context}: {e}"))?;
+        if !out.status.success() {
+            let detail = String::from_utf8_lossy(&out.stderr);
+            let trimmed = detail.trim();
+            if trimmed.is_empty() {
+                return Err(format!("{context} failed ({})", out.status));
+            }
+            return Err(format!("{context}: {trimmed}"));
+        }
+        String::from_utf8(out.stdout)
+            .map(|s| s.trim().to_owned())
+            .map_err(|_| format!("{context}: non-UTF-8 output from git"))
+    }
+
+    fn git_fetch_upstream_cmd(project_dir: &Path, remote: &str, remote_branch: &str) -> Command {
+        let mut cmd = Self::git_cmd(project_dir);
+        cmd.args([
             "fetch",
             "--quiet",
             "--no-tags",
             "--",
-            repo,
-            &format!("+refs/heads/{branch}:refs/remotes/origin/reviewed"),
+            remote,
+            &format!("+refs/heads/{remote_branch}:refs/remotes/{remote}/{remote_branch}"),
         ]);
         cmd
     }
 
-    fn git_ancestor_cmd(git_dir: &Path, rev: &str) -> Command {
-        let mut cmd = Command::new("git");
-        cmd.arg("-C").arg(git_dir).args([
-            "merge-base",
-            "--is-ancestor",
-            rev,
-            "refs/remotes/origin/reviewed",
-        ]);
+    fn git_hard_reset_cmd(project_dir: &Path, rev: &str) -> Command {
+        let mut cmd = Self::git_cmd(project_dir);
+        cmd.args(["reset", "--hard", "--quiet", rev]);
         cmd
-    }
-
-    fn nix_source_command(flake_ref: &str) -> Command {
-        let expr = format!("(builtins.getFlake \"{flake_ref}\").outPath");
-        let mut command = Command::new("nix");
-        command.args([
-            "--extra-experimental-features",
-            "nix-command flakes",
-            "eval",
-            "--no-update-lock-file",
-            "--no-write-lock-file",
-            "--raw",
-            "--expr",
-            &expr,
-        ]);
-        command
     }
 
     fn nix_build_command(installable: &str, result_link: &Path) -> Command {
@@ -567,94 +590,76 @@ impl LiveEnv<'_> {
         command
     }
 
-    fn verify_commit_in_repo(target: &Target, git_dir: &Path) -> Result<(), String> {
-        DirBuilder::new()
-            .mode(0o700)
-            .create(git_dir)
-            .map_err(|e| format!("create git dir: {e}"))?;
-        let init = Command::new("git")
-            .args(["init", "--bare", "--quiet"])
-            .arg(git_dir)
-            .status()
-            .map_err(|e| format!("start git init: {e}"))?;
-        if !init.success() {
-            return Err("git init --bare failed".into());
+    fn verify_project_dir(&self, project_dir: &Path) -> Result<(), String> {
+        if let Some(parent) = project_dir.parent() {
+            os::verify_dir_owner_and_mode(parent, self.expected_uid, 0o022)
+                .map_err(|e| format!("verify {}: {}", parent.display(), e.detail()))?;
         }
+        os::verify_dir_owner_and_mode(project_dir, self.expected_uid, 0o022)
+            .map_err(|e| format!("verify {}: {}", project_dir.display(), e.detail()))?;
+        os::verify_dir_owner_and_mode(&project_dir.join(".git"), self.expected_uid, 0o022).map_err(
+            |e| {
+                format!(
+                    "{} must be a Git checkout with a safe .git directory: {}",
+                    project_dir.display(),
+                    e.detail()
+                )
+            },
+        )
+    }
 
-        if let Some(branch) = &target.branch {
-            let fetch = Self::git_fetch_branch_cmd(git_dir, &target.repo, branch)
-                .output()
-                .map_err(|e| format!("start git fetch: {e}"))?;
-            if !fetch.status.success() {
-                return Err(format!(
-                    "failed to fetch reviewed branch '{branch}' from '{}': {}",
-                    target.repo,
-                    String::from_utf8_lossy(&fetch.stderr).trim()
-                ));
-            }
-            let verify_obj = Command::new("git")
-                .arg("-C")
-                .arg(git_dir)
-                .args([
-                    "rev-parse",
-                    "--verify",
-                    &format!("{}^{{commit}}", target.rev),
-                ])
-                .output()
-                .map_err(|e| format!("git rev-parse: {e}"))?;
-            if !verify_obj.status.success()
-                || String::from_utf8_lossy(&verify_obj.stdout).trim() != target.rev
-            {
-                return Err(format!(
-                    "commit {} is not reachable from reviewed branch '{branch}'",
-                    target.rev
-                ));
-            }
-            let anc = Self::git_ancestor_cmd(git_dir, &target.rev)
-                .status()
-                .map_err(|e| format!("git merge-base: {e}"))?;
-            if !anc.success() {
-                return Err(format!(
-                    "commit {} is not an ancestor of reviewed branch '{branch}'",
-                    target.rev
-                ));
-            }
-        } else {
-            let fetch = Command::new("git")
-                .arg("-C")
-                .arg(git_dir)
-                .args([
-                    "fetch",
-                    "--quiet",
-                    "--no-tags",
-                    "--depth=1",
-                    "--",
-                    &target.repo,
-                    &target.rev,
-                ])
-                .output()
-                .map_err(|e| format!("start git fetch: {e}"))?;
-            if !fetch.status.success() {
-                return Err(format!(
-                    "commit {} not found in '{}': {}",
-                    target.rev,
-                    target.repo,
-                    String::from_utf8_lossy(&fetch.stderr).trim()
-                ));
-            }
-            let verify = Command::new("git")
-                .arg("-C")
-                .arg(git_dir)
-                .args(["rev-parse", "--verify", "FETCH_HEAD^{commit}"])
-                .output()
-                .map_err(|e| format!("git rev-parse: {e}"))?;
-            if !verify.status.success()
-                || String::from_utf8_lossy(&verify.stdout).trim() != target.rev
-            {
-                return Err("fetched revision did not match requested commit".into());
-            }
-        }
-        Ok(())
+    fn inspect_upstream(&self, project_dir: &Path) -> Result<UpstreamSpec, String> {
+        self.verify_project_dir(project_dir)?;
+
+        let local_branch = Self::git_stdout(
+            project_dir,
+            &["symbolic-ref", "--quiet", "--short", "HEAD"],
+            &format!(
+                "{} must have a checked-out Git branch (detached HEAD is not permitted)",
+                project_dir.display()
+            ),
+        )?;
+        validate_branch(&local_branch)?;
+
+        let remote_key = format!("branch.{local_branch}.remote");
+        let remote_name = Self::git_stdout(
+            project_dir,
+            &["config", "--get", &remote_key],
+            &format!(
+                "branch '{local_branch}' in {} has no configured upstream remote",
+                project_dir.display()
+            ),
+        )?;
+        validate_remote_name(&remote_name)?;
+
+        let merge_key = format!("branch.{local_branch}.merge");
+        let merge_ref = Self::git_stdout(
+            project_dir,
+            &["config", "--get", &merge_key],
+            &format!(
+                "branch '{local_branch}' in {} has no configured upstream merge ref",
+                project_dir.display()
+            ),
+        )?;
+        let remote_branch = merge_ref
+            .strip_prefix("refs/heads/")
+            .ok_or_else(|| format!("upstream merge ref '{merge_ref}' must start with refs/heads/"))?
+            .to_owned();
+        validate_branch(&remote_branch)?;
+
+        let repo_url = Self::git_stdout(
+            project_dir,
+            &["remote", "get-url", "--", &remote_name],
+            &format!("read URL for remote '{remote_name}'"),
+        )?;
+        validate_repo(&repo_url)?;
+
+        Ok(UpstreamSpec {
+            local_branch,
+            remote_name,
+            remote_branch,
+            repo_url,
+        })
     }
 }
 
@@ -671,41 +676,88 @@ pub fn validate_lockfile_hygiene(lock_text: &str) -> Result<(), String> {
 }
 
 impl Environment for LiveEnv<'_> {
-    fn prebuild(&self, target: &Target, attempt: &Path) -> Result<PathBuf, String> {
-        let git_dir = attempt.join("git");
-        Self::verify_commit_in_repo(target, &git_dir)?;
+    fn sync_project(&self, policy: &Policy) -> Result<Target, String> {
+        let project_dir = &policy.project_dir;
+        let spec = self.inspect_upstream(project_dir)?;
 
+        let fetch =
+            Self::git_fetch_upstream_cmd(project_dir, &spec.remote_name, &spec.remote_branch)
+                .output()
+                .map_err(|e| format!("start git fetch: {e}"))?;
+        if !fetch.status.success() {
+            return Err(format!(
+                "failed to fetch '{}/{}' from '{}': {}",
+                spec.remote_name,
+                spec.remote_branch,
+                spec.repo_url,
+                String::from_utf8_lossy(&fetch.stderr).trim()
+            ));
+        }
+
+        let tracking_ref = format!(
+            "refs/remotes/{}/{}^{{commit}}",
+            spec.remote_name, spec.remote_branch
+        );
+        let raw_rev = Self::git_stdout(
+            project_dir,
+            &["rev-parse", "--verify", &tracking_ref],
+            "resolve fetched upstream commit",
+        )?;
+        let rev = validate_rev(&raw_rev)?;
+
+        let reset = Self::git_hard_reset_cmd(project_dir, &rev)
+            .output()
+            .map_err(|e| format!("start git reset: {e}"))?;
+        if !reset.status.success() {
+            return Err(format!(
+                "git reset --hard {rev} failed: {}",
+                String::from_utf8_lossy(&reset.stderr).trim()
+            ));
+        }
+
+        let head = Self::git_stdout(
+            project_dir,
+            &["rev-parse", "--verify", "HEAD^{commit}"],
+            "verify HEAD after reset",
+        )?;
+        if validate_rev(&head)? != rev {
+            return Err("HEAD did not match upstream revision after reset".into());
+        }
+
+        let lock_bytes = os::read_owned_file(
+            &project_dir.join("flake.lock"),
+            self.expected_uid,
+            0o022,
+            MAX_LOCKFILE_BYTES,
+        )
+        .map_err(|e| format!("read {}/flake.lock: {}", project_dir.display(), e.detail()))?;
+        let lock_text =
+            String::from_utf8(lock_bytes).map_err(|_| "flake.lock must be valid UTF-8")?;
+        validate_lockfile_hygiene(&lock_text)?;
+
+        Ok(Target {
+            repo: spec.repo_url,
+            branch: spec.remote_branch,
+            rev,
+            host: policy.host.clone(),
+        })
+    }
+
+    fn build_generation(
+        &self,
+        policy: &Policy,
+        target: &Target,
+        attempt: &Path,
+    ) -> Result<PathBuf, String> {
         let nix_home = attempt.join("home");
         DirBuilder::new()
             .mode(0o700)
             .create(&nix_home)
             .map_err(|e| format!("create nix cache dir: {e}"))?;
 
-        let flake_ref = target.flake();
-        let output = Self::nix_source_command(&flake_ref)
-            .env("HOME", &nix_home)
-            .env("XDG_CACHE_HOME", &nix_home)
-            .output()
-            .map_err(|e| format!("start nix eval: {e}"))?;
-        if !output.status.success() {
-            eprint!("{}", String::from_utf8_lossy(&output.stderr));
-            return Err(format!("nix source resolution failed: {}", output.status));
-        }
-        let source =
-            String::from_utf8(output.stdout).map_err(|_| "nix returned a non-UTF-8 source path")?;
-        let source = store_path(source.trim())?;
-        let lock_path = source.join("flake.lock");
-        let lock_meta = fs::symlink_metadata(&lock_path)
-            .map_err(|e| format!("pinned source must contain flake.lock: {e}"))?;
-        if !lock_meta.is_file() {
-            return Err("pinned flake.lock must be a regular file".into());
-        }
-        let lock_text =
-            fs::read_to_string(&lock_path).map_err(|e| format!("read flake.lock: {e}"))?;
-        validate_lockfile_hygiene(&lock_text)?;
-
+        let installable = target.installable(&policy.project_dir)?;
         let result_link = attempt.join("result");
-        let status = Self::nix_build_command(&target.installable(), &result_link)
+        let status = Self::nix_build_command(&installable, &result_link)
             .env("HOME", &nix_home)
             .env("XDG_CACHE_HOME", &nix_home)
             .status()
@@ -749,6 +801,19 @@ impl Environment for LiveEnv<'_> {
         wire::write_frame(&mut stream, &req.encode()).map_err(|e| e.detail())?;
         let raw = wire::read_frame(&mut stream).map_err(|e| e.detail())?;
         UpdaterResponse::decode(&raw).map_err(|e| e.detail())
+    }
+
+    fn start_updater_service(&self) -> Result<(), String> {
+        let status = Command::new("/run/current-system/sw/bin/systemctl")
+            .args(["--no-block", "start", "boreal-updater.service"])
+            .status()
+            .map_err(|e| format!("start boreal-updater.service: {e}"))?;
+        if !status.success() {
+            return Err(format!(
+                "systemctl --no-block start boreal-updater.service exited with {status}"
+            ));
+        }
+        Ok(())
     }
 
     fn stop_workers(&self, units: &[String]) -> Result<(), String> {
@@ -835,62 +900,44 @@ impl Environment for LiveEnv<'_> {
     }
 }
 
-fn schedule_locked(dir: &Path, policy: &Policy, rev: &str) -> Result<State, String> {
-    if let Some(existing) = load_opt(dir)?
-        && matches!(
+fn update_locked(dir: &Path, policy: &Policy, env: &impl Environment) -> Result<State, String> {
+    if let Some(existing) = load_opt(dir)? {
+        if matches!(
             existing.phase,
-            Phase::Building | Phase::Draining | Phase::Activating
-        )
-    {
-        return Err(format!(
-            "cannot replace update '{}' while phase is '{}'",
-            existing.update_id,
-            existing.phase.name()
-        ));
+            Phase::Building | Phase::Scheduled | Phase::Draining | Phase::Activating
+        ) {
+            return Err(format!(
+                "cannot run update while '{}' is in phase '{}'",
+                existing.update_id,
+                existing.phase.name()
+            ));
+        }
+        if existing.phase == Phase::Blocked
+            && !matches!(
+                env.broker_call(&UpdaterRequest::GateStatus),
+                Ok(UpdaterResponse::GateStatus { open: true, .. })
+            )
+        {
+            return Err(format!(
+                "previous update '{}' is blocked ({}); run 'boreal-updater recover' first",
+                existing.update_id, existing.reason
+            ));
+        }
     }
-    let target = Target::from_policy_and_rev(policy, rev)?;
-    let state = State {
+
+    let target = env.sync_project(policy)?;
+    let mut state = State {
         update_id: new_update_id()?,
         target,
-        phase: Phase::Scheduled,
+        phase: Phase::Building,
         result: None,
         gc_root: None,
         reason: String::new(),
     };
     save(dir, &state)?;
-    Ok(state)
-}
-
-fn prebuild_locked(dir: &Path, policy: &Policy, env: &impl Environment) -> Result<State, String> {
-    let mut state = load(dir)?;
-    state.target.verify_matches_policy(policy)?;
-    if state.phase == Phase::Blocked {
-        return Err(format!("activation blocked: {}", state.reason));
-    }
-    if matches!(
-        state.phase,
-        Phase::Draining | Phase::Activating | Phase::Activated
-    ) {
-        return Err(format!(
-            "cannot prebuild while update is in phase '{}'",
-            state.phase.name()
-        ));
-    }
-    if state.phase == Phase::Prebuilt {
-        if let (Some(root), Some(res)) = (&state.gc_root, &state.result) {
-            env.verify_prebuilt(root, res)?;
-        }
-        return Ok(state);
-    }
-
-    state.phase = Phase::Building;
-    state.result = None;
-    state.gc_root = None;
-    state.reason.clear();
-    save(dir, &state)?;
 
     let attempt = attempt_dir(dir)?;
-    match env.prebuild(&state.target, &attempt) {
+    match env.build_generation(policy, &state.target, &attempt) {
         Ok(path) => {
             let gc_root = attempt.join("result");
             state.result = Some(path.clone());
@@ -920,6 +967,91 @@ fn prebuild_locked(dir: &Path, policy: &Policy, env: &impl Environment) -> Resul
     }
 }
 
+fn prepare_schedule_locked(
+    dir: &Path,
+    policy: &Policy,
+    env: &impl Environment,
+) -> Result<State, String> {
+    let mut state = load(dir)?;
+    state.target.verify_matches_policy(policy)?;
+
+    match state.phase {
+        Phase::Blocked => return Err(format!("activation blocked: {}", state.reason)),
+        Phase::Activated => {
+            return Err(format!(
+                "generation {} is already activated; run 'boreal-updater update' first",
+                state.target.rev
+            ));
+        }
+        Phase::Draining | Phase::Activating => {
+            return Err(format!(
+                "update '{}' is already in phase '{}'",
+                state.update_id,
+                state.phase.name()
+            ));
+        }
+        Phase::Building | Phase::Failed => {
+            return Err(format!(
+                "no prebuilt generation ready (phase is '{}'); run 'boreal-updater update' first",
+                state.phase.name()
+            ));
+        }
+        Phase::Prebuilt | Phase::Scheduled => {}
+    }
+
+    if !policy.allow_switch {
+        block_update(
+            dir,
+            &mut state,
+            "system.switch.enable is false on this configuration",
+        )?;
+    }
+
+    let (Some(gc_root), Some(result_path)) = (state.gc_root.clone(), state.result.clone()) else {
+        block_update(dir, &mut state, "missing prebuilt store closure")?;
+        unreachable!();
+    };
+    if let Err(err) = env.verify_prebuilt(&gc_root, &result_path) {
+        block_update(dir, &mut state, err)?;
+    }
+
+    match env.broker_call(&UpdaterRequest::GateStatus) {
+        Ok(UpdaterResponse::GateStatus { open: true, .. }) => {}
+        Ok(UpdaterResponse::GateStatus {
+            open: false,
+            update_id,
+            ..
+        }) => {
+            return Err(format!(
+                "admission gate is already closed by update '{}'",
+                update_id.unwrap_or_default()
+            ));
+        }
+        Ok(UpdaterResponse::Error(msg)) | Err(msg) => {
+            return Err(format!("verify broker gate status: {msg}"));
+        }
+        Ok(other) => {
+            return Err(format!(
+                "unexpected broker response on GateStatus: {other:?}"
+            ));
+        }
+    }
+
+    state.phase = Phase::Scheduled;
+    state.reason = "scheduled to switch when no pipeline is running".into();
+    save(dir, &state)?;
+    Ok(state)
+}
+
+fn schedule_update(dir: &Path, policy: &Policy, env: &impl Environment) -> Result<State, String> {
+    let state = {
+        let _guard = lock(dir)?;
+        prepare_schedule_locked(dir, policy, env)?
+    };
+    env.start_updater_service()?;
+    Ok(state)
+}
+
 fn block_update(dir: &Path, state: &mut State, reason: impl Into<String>) -> Result<(), String> {
     let msg = reason.into();
     state.phase = Phase::Blocked;
@@ -929,25 +1061,27 @@ fn block_update(dir: &Path, state: &mut State, reason: impl Into<String>) -> Res
 }
 
 fn run_locked(dir: &Path, policy: &Policy, env: &impl Environment) -> Result<(), String> {
-    let current = load(dir)?;
-    current.target.verify_matches_policy(policy)?;
+    let mut state = load(dir)?;
+    state.target.verify_matches_policy(policy)?;
 
-    match current.phase {
+    match state.phase {
         Phase::Activated => return Ok(()),
-        Phase::Blocked => return Err(format!("activation blocked: {}", current.reason)),
+        Phase::Blocked => return Err(format!("activation blocked: {}", state.reason)),
         Phase::Activating => {
             return Err(
                 "previous update was interrupted during activation; run 'boreal-updater recover' first"
                     .into(),
             );
         }
-        Phase::Scheduled | Phase::Failed | Phase::Building => {
-            prebuild_locked(dir, policy, env)?;
+        Phase::Building | Phase::Failed => {
+            return Err(format!(
+                "cannot activate while update is in phase '{}'; run 'boreal-updater update' first",
+                state.phase.name()
+            ));
         }
-        Phase::Prebuilt | Phase::Draining => {}
+        Phase::Scheduled | Phase::Prebuilt | Phase::Draining => {}
     }
 
-    let mut state = load(dir)?;
     if !policy.allow_switch {
         return block_update(
             dir,
@@ -1109,7 +1243,7 @@ fn run_locked(dir: &Path, policy: &Policy, env: &impl Environment) -> Result<(),
     }
 
     state.phase = Phase::Activated;
-    state.reason = "activated prebuilt downstream revision".into();
+    state.reason = "activated prebuilt downstream generation".into();
     save(dir, &state)
 }
 
@@ -1176,50 +1310,26 @@ fn recover_locked(dir: &Path, policy: &Policy, env: &impl Environment) -> Result
     }
 }
 
-const USAGE: &str = "usage: boreal-updater schedule [<https-repo>] <40-digit-commit> [<host>] | prebuild | run | recover | status";
+const USAGE: &str = "usage: boreal-updater <update | schedule | run | recover | status>";
 
 fn execute(args: &[String], dir: &Path) -> Result<(), String> {
     if os::current_euid() != 0 {
         return Err("boreal-updater must run as root".into());
     }
-    match args.first().map(String::as_str) {
-        Some("schedule") if args.len() == 2 || args.len() == 4 => {
+    match args {
+        [cmd] if cmd == "update" => {
             let policy = Policy::load_system()?;
-            let rev = if args.len() == 2 {
-                &args[1]
-            } else {
-                if args[1] != policy.repository {
-                    return Err(format!(
-                        "repository '{}' is not permitted; configured repository is '{}'",
-                        args[1], policy.repository
-                    ));
-                }
-                if args[3] != policy.host {
-                    return Err(format!(
-                        "host '{}' is not permitted; configured host is '{}'",
-                        args[3], policy.host
-                    ));
-                }
-                &args[2]
+            prepare_dir(dir)?;
+            let _lock = lock(dir)?;
+            let env = LiveEnv {
+                policy: &policy,
+                expected_uid: Some(0),
             };
-            prepare_dir(dir)?;
-            let _lock = lock(dir)?;
-            let state = schedule_locked(dir, &policy, rev)?;
+            let state = update_locked(dir, &policy, &env)?;
             println!(
-                "Scheduled {} ({}) for {}.",
-                state.target.rev, state.update_id, state.target.host
-            );
-            Ok(())
-        }
-        Some("prebuild") if args.len() == 1 => {
-            let policy = Policy::load_system()?;
-            prepare_dir(dir)?;
-            let _lock = lock(dir)?;
-            let env = LiveEnv { policy: &policy };
-            let state = prebuild_locked(dir, &policy, &env)?;
-            println!(
-                "Prebuilt {} -> {}",
+                "Updated {} ({}) -> {}",
                 state.target.rev,
+                state.target.branch,
                 state
                     .result
                     .as_deref()
@@ -1227,11 +1337,33 @@ fn execute(args: &[String], dir: &Path) -> Result<(), String> {
             );
             Ok(())
         }
-        Some("run") if args.len() == 1 => {
+        [cmd] if cmd == "schedule" => {
+            let policy = Policy::load_system()?;
+            prepare_dir(dir)?;
+            let env = LiveEnv {
+                policy: &policy,
+                expected_uid: Some(0),
+            };
+            let state = schedule_update(dir, &policy, &env)?;
+            println!(
+                "Scheduled {} ({}) -> {}",
+                state.target.rev,
+                state.update_id,
+                state
+                    .result
+                    .as_deref()
+                    .map_or("", |p| p.to_str().unwrap_or(""))
+            );
+            Ok(())
+        }
+        [cmd] if cmd == "run" => {
             let policy = Policy::load_system()?;
             prepare_dir(dir)?;
             let _lock = lock(dir)?;
-            let env = LiveEnv { policy: &policy };
+            let env = LiveEnv {
+                policy: &policy,
+                expected_uid: Some(0),
+            };
             run_locked(dir, &policy, &env)?;
             let state = load(dir)?;
             println!(
@@ -1244,19 +1376,24 @@ fn execute(args: &[String], dir: &Path) -> Result<(), String> {
             );
             Ok(())
         }
-        Some("recover") if args.len() == 1 => {
+        [cmd] if cmd == "recover" => {
             let policy = Policy::load_system()?;
             prepare_dir(dir)?;
             let _lock = lock(dir)?;
-            let env = LiveEnv { policy: &policy };
+            let env = LiveEnv {
+                policy: &policy,
+                expected_uid: Some(0),
+            };
             recover_locked(dir, &policy, &env)?;
             println!("Recovery check completed.");
             Ok(())
         }
-        Some("status") if args.len() == 1 => {
+        [cmd] if cmd == "status" => {
             prepare_dir(dir)?;
-            let state = load(dir)?;
-            print!("{}", state.encode());
+            match load_opt(dir)? {
+                Some(state) => print!("{}", state.encode()),
+                None => println!("phase=idle"),
+            }
             Ok(())
         }
         _ => Err(USAGE.into()),
@@ -1290,11 +1427,12 @@ mod tests {
     use std::cell::{Cell, RefCell};
     use std::os::unix::fs::symlink;
 
+    const VALID_REV: &str = "0123456789abcdef0123456789abcdef01234567";
+
     fn sample_policy(allow_switch: bool) -> Policy {
         Policy::from_yaml(&format!(
             "\
-repository: https://github.com/example/demo-lab.git
-branch: downstreams/demo-lab
+projectDir: /etc/nixos
 host: lab-1
 allowSwitch: {allow_switch}
 workerUnits:
@@ -1314,7 +1452,7 @@ workerUnits:
                 .as_nanos();
             let dir =
                 env::temp_dir().join(format!("boreal-updater-test-{}-{id}", std::process::id()));
-            fs::create_dir_all(&dir).unwrap();
+            DirBuilder::new().mode(0o700).create(&dir).unwrap();
             Self(dir)
         }
     }
@@ -1325,7 +1463,9 @@ workerUnits:
     }
 
     struct FakeEnv {
+        state_dir: Option<PathBuf>,
         prebuilt_path: PathBuf,
+        fail_sync: Cell<bool>,
         fail_build: Cell<bool>,
         drain_polls_before_quiescent: Cell<usize>,
         fail_drain: Cell<bool>,
@@ -1333,13 +1473,16 @@ workerUnits:
         switched: Cell<bool>,
         gate_open: Cell<bool>,
         workers_stopped: Cell<bool>,
+        service_started: Cell<bool>,
         events: RefCell<Vec<&'static str>>,
     }
 
     impl FakeEnv {
         fn new() -> Self {
             Self {
+                state_dir: None,
                 prebuilt_path: PathBuf::from("/nix/store/0123456789abcdef-nixos-system-lab-1"),
+                fail_sync: Cell::new(false),
                 fail_build: Cell::new(false),
                 drain_polls_before_quiescent: Cell::new(1),
                 fail_drain: Cell::new(false),
@@ -1347,14 +1490,38 @@ workerUnits:
                 switched: Cell::new(false),
                 gate_open: Cell::new(true),
                 workers_stopped: Cell::new(false),
+                service_started: Cell::new(false),
                 events: RefCell::new(Vec::new()),
             }
+        }
+
+        fn with_state_dir(mut self, dir: &Path) -> Self {
+            self.state_dir = Some(dir.to_path_buf());
+            self
         }
     }
 
     impl Environment for FakeEnv {
-        fn prebuild(&self, _: &Target, attempt: &Path) -> Result<PathBuf, String> {
-            self.events.borrow_mut().push("prebuild");
+        fn sync_project(&self, policy: &Policy) -> Result<Target, String> {
+            self.events.borrow_mut().push("sync");
+            if self.fail_sync.get() {
+                return Err("git fetch failed".into());
+            }
+            Ok(Target {
+                repo: "https://github.com/example/demo-lab.git".into(),
+                branch: "downstreams/demo-lab".into(),
+                rev: VALID_REV.into(),
+                host: policy.host.clone(),
+            })
+        }
+
+        fn build_generation(
+            &self,
+            _: &Policy,
+            _: &Target,
+            attempt: &Path,
+        ) -> Result<PathBuf, String> {
+            self.events.borrow_mut().push("build");
             if self.fail_build.get() {
                 return Err("build failed".into());
             }
@@ -1374,8 +1541,8 @@ workerUnits:
             match req {
                 UpdaterRequest::GateStatus => Ok(UpdaterResponse::GateStatus {
                     open: self.gate_open.get(),
-                    update_id: None,
-                    rev: None,
+                    update_id: (!self.gate_open.get()).then(|| "upd-prev".into()),
+                    rev: (!self.gate_open.get()).then(|| VALID_REV.into()),
                 }),
                 UpdaterRequest::CloseGate { .. } => {
                     self.events.borrow_mut().push("close_gate");
@@ -1405,6 +1572,16 @@ workerUnits:
                     Ok(UpdaterResponse::GateReopened)
                 }
             }
+        }
+
+        fn start_updater_service(&self) -> Result<(), String> {
+            if let Some(dir) = &self.state_dir {
+                let guard = lock(dir).expect("lock must be released before starting systemd unit");
+                drop(guard);
+            }
+            self.events.borrow_mut().push("start_service");
+            self.service_started.set(true);
+            Ok(())
         }
 
         fn stop_workers(&self, _: &[String]) -> Result<(), String> {
@@ -1447,30 +1624,53 @@ workerUnits:
     }
 
     #[test]
-    fn test_validates_policy_git_ancestry_commands_and_lockfile_hygiene() {
-        let policy = sample_policy(true);
-        let t = Target::from_policy_and_rev(&policy, "0123456789abcdef0123456789ABCDEF01234567")
-            .unwrap();
-        assert_eq!(
-            t.flake(),
-            "git+https://github.com/example/demo-lab.git?ref=refs/heads/downstreams/demo-lab&rev=0123456789abcdef0123456789abcdef01234567"
-        );
-        let mut wrong_repo = policy.clone();
-        wrong_repo.repository = "https://github.com/evil/fork.git".into();
-        assert!(t.verify_matches_policy(&wrong_repo).is_err());
+    fn test_validates_policy_git_commands_upstream_inspection_and_lockfile_hygiene() {
+        let default_pol = Policy::from_yaml("host: lab-1\nallowSwitch: true\n").unwrap();
+        assert_eq!(default_pol.project_dir, PathBuf::from("/etc/nixos"));
 
-        let fetch = LiveEnv::git_fetch_branch_cmd(
-            Path::new("/tmp/g"),
-            &policy.repository,
-            policy.branch.as_deref().unwrap(),
+        for bad_dir in ["etc/nixos", "/etc/../nixos", "/etc/nixos/", "/etc/nix?os"] {
+            assert!(validate_project_dir(bad_dir).is_err(), "{bad_dir}");
+        }
+
+        let target = Target {
+            repo: "https://github.com/example/demo-lab.git".into(),
+            branch: "downstreams/demo-lab".into(),
+            rev: VALID_REV.into(),
+            host: "lab-1".into(),
+        };
+        assert_eq!(
+            target.installable(&default_pol.project_dir).unwrap(),
+            format!(
+                "git+file:///etc/nixos?rev={VALID_REV}#nixosConfigurations.lab-1.config.system.build.toplevel"
+            )
+        );
+        let mut wrong_host = default_pol.clone();
+        wrong_host.host = "other-host".into();
+        assert!(target.verify_matches_policy(&wrong_host).is_err());
+
+        let fetch = LiveEnv::git_fetch_upstream_cmd(
+            Path::new("/etc/nixos"),
+            "origin",
+            "downstreams/demo-lab",
         );
         let f_args: Vec<_> = fetch.get_args().map(|a| a.to_str().unwrap()).collect();
-        assert!(f_args.contains(&"+refs/heads/downstreams/demo-lab:refs/remotes/origin/reviewed"));
+        assert!(f_args.contains(&"core.hooksPath=/dev/null"));
+        assert!(f_args.contains(
+            &"+refs/heads/downstreams/demo-lab:refs/remotes/origin/downstreams/demo-lab"
+        ));
 
-        let eval = LiveEnv::nix_source_command(&t.flake());
-        let e_args: Vec<_> = eval.get_args().map(|a| a.to_str().unwrap()).collect();
-        assert!(e_args.contains(&"--no-update-lock-file"));
-        assert!(e_args.contains(&"--no-write-lock-file"));
+        let reset = LiveEnv::git_hard_reset_cmd(Path::new("/etc/nixos"), VALID_REV);
+        let r_args: Vec<_> = reset.get_args().map(|a| a.to_str().unwrap()).collect();
+        assert!(r_args.contains(&"--hard"));
+        assert!(r_args.contains(&VALID_REV));
+
+        let build = LiveEnv::nix_build_command(
+            &target.installable(&default_pol.project_dir).unwrap(),
+            Path::new("/tmp/result"),
+        );
+        let b_args: Vec<_> = build.get_args().map(|a| a.to_str().unwrap()).collect();
+        assert!(b_args.contains(&"--no-update-lock-file"));
+        assert!(b_args.contains(&"--no-write-lock-file"));
 
         assert!(
             validate_lockfile_hygiene(r#"{"nodes":{"boreal":{"locked":{"type":"github"}}}}"#)
@@ -1484,27 +1684,123 @@ workerUnits:
             validate_lockfile_hygiene(r#"{"nodes":{"boreal":{"locked":{"type":"path"}}}}"#)
                 .is_err()
         );
+
+        // Verify inspect_upstream against a real Git checkout with a slash-containing branch.
+        let repo_dir = TempDir::new();
+        let checkout = repo_dir.0.join("nixos");
+        DirBuilder::new().mode(0o700).create(&checkout).unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "-q"])
+                .arg(&checkout)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(&checkout)
+                .args(["checkout", "-q", "-b", "downstreams/demo-lab"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(&checkout)
+                .args([
+                    "remote",
+                    "add",
+                    "origin",
+                    "https://github.com/example/demo-lab.git"
+                ])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(&checkout)
+                .args(["config", "branch.downstreams/demo-lab.remote", "origin"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(&checkout)
+                .args([
+                    "config",
+                    "branch.downstreams/demo-lab.merge",
+                    "refs/heads/downstreams/demo-lab",
+                ])
+                .status()
+                .unwrap()
+                .success()
+        );
+
+        let live = LiveEnv {
+            policy: &default_pol,
+            expected_uid: None,
+        };
+        let spec = live.inspect_upstream(&checkout).unwrap();
+        assert_eq!(
+            spec,
+            UpstreamSpec {
+                local_branch: "downstreams/demo-lab".into(),
+                remote_name: "origin".into(),
+                remote_branch: "downstreams/demo-lab".into(),
+                repo_url: "https://github.com/example/demo-lab.git".into(),
+            }
+        );
+
+        // Non-HTTPS remote URL must be rejected.
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(&checkout)
+                .args(["remote", "set-url", "origin", "file:///tmp/evil"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(live.inspect_upstream(&checkout).is_err());
     }
 
     #[test]
     fn test_blocks_when_allow_switch_is_disabled() {
         let dir = TempDir::new();
         let policy = sample_policy(false);
-        let env = FakeEnv::new();
-        schedule_locked(&dir.0, &policy, "0123456789abcdef0123456789abcdef01234567").unwrap();
-        let err = run_locked(&dir.0, &policy, &env).unwrap_err();
+        let env = FakeEnv::new().with_state_dir(&dir.0);
+        let err = update_locked(&dir.0, &policy, &env).unwrap_err();
         assert!(err.contains("activation blocked"));
         assert_eq!(load(&dir.0).unwrap().phase, Phase::Blocked);
+        assert!(schedule_update(&dir.0, &policy, &env).is_err());
+        assert!(!env.service_started.get());
         assert!(env.gate_open.get());
         assert!(!env.switched.get());
     }
 
     #[test]
-    fn test_full_admission_barrier_drain_stop_recheck_activate_and_reopen() {
+    fn test_update_schedule_and_run_complete_full_drain_and_switch() {
         let dir = TempDir::new();
         let policy = sample_policy(true);
-        let env = FakeEnv::new();
-        schedule_locked(&dir.0, &policy, "0123456789abcdef0123456789abcdef01234567").unwrap();
+        let env = FakeEnv::new().with_state_dir(&dir.0);
+
+        // Scheduling before update must fail cleanly.
+        assert!(schedule_update(&dir.0, &policy, &env).is_err());
+
+        let updated = update_locked(&dir.0, &policy, &env).unwrap();
+        assert_eq!(updated.phase, Phase::Prebuilt);
+
+        let scheduled = schedule_update(&dir.0, &policy, &env).unwrap();
+        assert_eq!(scheduled.phase, Phase::Scheduled);
+        assert!(env.service_started.get());
+
         run_locked(&dir.0, &policy, &env).unwrap();
 
         let state = load(&dir.0).unwrap();
@@ -1515,7 +1811,9 @@ workerUnits:
         assert_eq!(
             *env.events.borrow(),
             vec![
-                "prebuild",
+                "sync",
+                "build",
+                "start_service",
                 "close_gate",
                 "check_drain",
                 "check_drain",
@@ -1528,25 +1826,26 @@ workerUnits:
     }
 
     #[test]
-    fn test_uncertain_drain_blocks_activation_and_keeps_gate_closed() {
+    fn test_uncertain_drain_blocks_activation_and_prevents_overwriting_closed_gate() {
         let dir = TempDir::new();
         let policy = sample_policy(true);
-        let env = FakeEnv::new();
+        let env = FakeEnv::new().with_state_dir(&dir.0);
         env.fail_drain.set(true);
-        schedule_locked(&dir.0, &policy, "0123456789abcdef0123456789abcdef01234567").unwrap();
+        update_locked(&dir.0, &policy, &env).unwrap();
+        schedule_update(&dir.0, &policy, &env).unwrap();
         assert!(run_locked(&dir.0, &policy, &env).is_err());
         assert_eq!(load(&dir.0).unwrap().phase, Phase::Blocked);
         assert!(!env.switched.get());
         assert!(!env.gate_open.get());
+        assert!(update_locked(&dir.0, &policy, &env).is_err());
     }
 
     #[test]
     fn test_interrupted_update_recovery_handles_draining_and_activating_states() {
         let dir = TempDir::new();
         let policy = sample_policy(true);
-        let env = FakeEnv::new();
-        schedule_locked(&dir.0, &policy, "0123456789abcdef0123456789abcdef01234567").unwrap();
-        let mut st = prebuild_locked(&dir.0, &policy, &env).unwrap();
+        let env = FakeEnv::new().with_state_dir(&dir.0);
+        let mut st = update_locked(&dir.0, &policy, &env).unwrap();
 
         // Simulate crash mid-Draining with gate closed and workers stopped.
         st.phase = Phase::Draining;
