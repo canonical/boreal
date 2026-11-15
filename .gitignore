@@ -2,6 +2,9 @@
 /result-*
 /*.qcow2
 /worker/target/
+/common/target/
+/broker/target/
+/admin/target/
 /shell/target/
 /updater/target/
 /templates/default/.boreal/
