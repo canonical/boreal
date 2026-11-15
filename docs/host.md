@@ -6,9 +6,14 @@ authentication or runtime permissions**. Any local user who can reach a
 development server can still access any namespace until host and server
 isolation are configured. Use it only in an isolated test environment.
 
-A downstream flake can take `boreal` as an input, define a shared `lab.nix`
-for both its disposable test VM and bare-metal hosts, and wire host-specific
-settings separately:
+A downstream flake (bootstrapped with `nix flake new my-lab -t github:canonical/boreal`
+or maintained on a `downstreams/<name>` orphan branch) takes `boreal` as an
+input, defines a shared `lab.nix` for both its disposable test VM and
+bare-metal hosts, and wires host-specific settings separately. Both
+`boreal.lib.buildRustWorker` and `boreal.lib.mkDevShell` automatically link
+`${boreal}/worker` at `.boreal/boreal-worker` from the revision locked in
+`flake.lock`, so downstream Rust crates only pin `boreal` in `flake.nix` /
+`flake.lock`:
 
 ```nix
 # lab.nix
@@ -81,6 +86,16 @@ using `boreal.lib.mkHost` and validate the policy in CI with
 `boreal.lib.mkLabCheck`:
 
 ```nix
+# flake.nix (excerpt)
+inputs = {
+  nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
+  boreal = {
+    url = "github:canonical/boreal";
+    inputs.nixpkgs.follows = "nixpkgs";
+  };
+};
+
+# Inside outputs:
 nixosConfigurations.lab-metal-01 = boreal.lib.mkHost {
   system = "x86_64-linux";
   specialArgs = { inherit self; };
@@ -98,11 +113,15 @@ For user `<user>` and worker `<worker>`, Boreal configures
 `TEMPORAL_NAMESPACE=<user>`, and `LAB_TASK_QUEUE=<user>-<worker>`. Do not mix
 differently registered worker packages on the same queue.
 
-The updater's scheduling command accepts a public HTTPS Git repository, a full
-commit, and a NixOS configuration name:
+Because `main` only provides the Boreal framework (no `nixosConfigurations`),
+the updater always targets the **downstream lab repository and 40-digit
+downstream commit** (whether in a standalone repo or on a `downstreams/<name>`
+branch), whose committed `flake.lock` pins the exact `boreal` `main` commit.
+Keep local `--override-input boreal` (`file://`) overrides out of committed
+`flake.lock` files by passing `--no-write-lock-file` during local testing:
 
 ```text
-sudo boreal-schedule-update <repository-url> <full-commit> <configuration-name>
+sudo boreal-schedule-update <downstream-https-repo-url> <40-digit-downstream-commit> <configuration-name>
 sudo boreal-updater status
 ```
 

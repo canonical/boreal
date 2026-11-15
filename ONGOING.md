@@ -3,11 +3,13 @@
 ## Current state
 
 - `main` is a reusable Boreal flake framework (`boreal.lib`,
-  `boreal.nixosModules.{default,boreal,vm}`, `boreal-worker`, `boreal-shell`,
-  and `boreal-updater`). Downstream lab deployments live on
-  `downstreams/<name>` orphan branches checked out inside gitignored
-  `downstreams/` (such as `downstreams/demo-lab`, preserving the `greet` and
-  `count` workflows, `alice`/`bob` namespaces, and `<user>-<worker>` queues).
+  `boreal.nixosModules.{default,boreal,vm}`, `templates.default`,
+  `boreal-worker`, `boreal-shell`, and `boreal-updater`). Concrete lab
+  deployments live in standalone downstream flakes initialized from
+  `templates.default` or on `downstreams/<name>` orphan branches checked out
+  inside gitignored `downstreams/` (such as `downstreams/demo-lab`, preserving
+  the `greet` and `count` workflows, `alice`/`bob` namespaces, and
+  `<user>-<worker>` queues).
 - Downstream labs register worker derivations and typed flat argument schemas in
   `boreal.workerPackages` and declare users, SSH keys, worker instances, and
   permissions in `boreal.users.<user>`.

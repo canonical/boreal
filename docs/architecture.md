@@ -1,11 +1,12 @@
 # Architecture and security boundaries
 
 Boreal separates reusable lab infrastructure (on `main`) from concrete lab
-deployments (in downstream flakes or `downstreams/<name>` orphan-branch
-worktrees under `downstreams/`). Downstream labs register their Temporal worker
-derivations and typed flat argument schemas in `boreal.workerPackages` and
-declare accounts, SSH public keys, worker instances, and permissions in
-`boreal.users`.
+deployments (in standalone downstream flakes initialized from
+`templates.default` or on `downstreams/<name>` orphan-branch worktrees under
+`downstreams/`). Downstream labs pin `boreal` in `flake.lock`, register their
+Temporal worker derivations and typed flat argument schemas in
+`boreal.workerPackages`, and declare accounts, SSH public keys, worker
+instances, and permissions in `boreal.users`.
 
 Nix generates two protected, group-readable catalogs under `/etc/boreal/`
 (`0750`, `root:boreal`):
@@ -37,9 +38,11 @@ workflow types and deterministic history compatibility when migrating existing
 work. Activities can be retried after interruptions, so their effects must be
 safe to repeat.
 
-The scheduled updater must not run a system switch merely because a Temporal
-list or count query reports zero: Visibility is eventually consistent, and a
-new workflow can start concurrently. Safe automatic switching requires an
-enforced admission barrier, tracked and reconciled work, coordinated schedules,
-and tests for outages and interrupted updates. Until those exist, the updater
-must fail closed and does not assert that a host is idle.
+The scheduled updater prebuilds a pinned downstream lab commit (whose committed
+`flake.lock` locks the `main` Boreal framework revision), and must not run a
+system switch merely because a Temporal list or count query reports zero:
+Visibility is eventually consistent, and a new workflow can start concurrently.
+Safe automatic switching requires an enforced admission barrier, tracked and
+reconciled work, coordinated schedules, and tests for outages and interrupted
+updates. Until those exist, the updater must fail closed and does not assert
+that a host is idle.

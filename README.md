@@ -2,11 +2,11 @@
 
 A NixOS and Temporal Rust framework for SSH-managed multi-user labs. `main`
 provides the reusable NixOS modules, Nix builder library (`boreal.lib`),
-`boreal-worker` Rust runtime crate, interactive `boreal-shell` prototype, and
-fail-closed `boreal-updater` service. Downstream lab deployments live on
-`downstreams/<name>` orphan branches checked out as worktrees under gitignored
-`downstreams/` (for example, `downstreams/demo-lab` on orphan branch
-`downstreams/demo-lab`).
+starter flake template (`templates.default`), `boreal-worker` Rust runtime
+crate, interactive `boreal-shell` prototype, and fail-closed `boreal-updater`
+service. Concrete lab deployments consume Boreal as a flake input—either in a
+standalone repository or on `downstreams/<name>` orphan branches checked out as
+worktrees under gitignored `downstreams/` (for example, `downstreams/demo-lab`).
 
 The root flake tracks `nixos-26.05`; `flake.lock` pins the selected revision.
 Update lock files deliberately rather than resolving moving branches during
@@ -50,22 +50,35 @@ nix run .#boreal-shell
 Commands in `boreal-shell` currently display parsed mock arguments only; they
 never connect to Temporal, run programs, or enforce security boundaries.
 
-## Downstream lab worktrees
+## Create or mount a downstream lab
 
-Downstream projects consume Boreal as a flake input and live on independent
+End users can bootstrap a standalone lab repository directly from Boreal's
+starter template, with `boreal` prewired as a flake input and
+`${boreal}/worker` linked automatically at `.boreal/boreal-worker`:
+
+```sh
+nix flake new my-lab -t github:canonical/boreal
+cd my-lab
+git init && git add .
+nix flake check
+```
+
+Inside a Boreal checkout, downstream deployments can also live on independent
 `downstreams/<name>` orphan branches mounted inside gitignored
 `downstreams/<name>/`:
 
 ```sh
-# Start a new downstream lab from the starter template:
-git worktree add -b downstreams/my-lab downstreams/my-lab downstreams/template
+# Start a new downstream orphan worktree from the local starter template:
+git worktree add --orphan -b downstreams/my-lab downstreams/my-lab
+(cd downstreams/my-lab && nix flake init -t ../.. && git add .)
 
 # Or mount the reference downstreams/demo-lab orphan branch:
 git worktree add downstreams/demo-lab downstreams/demo-lab
 
-# Check or run the downstream VM against local framework commits on main:
-nix flake check ./downstreams/demo-lab --override-input boreal .
-nix run ./downstreams/demo-lab#boreal-vm --override-input boreal .
+# Check or run the downstream VM against local unpushed commits on main
+# (--no-write-lock-file keeps local file:// paths out of flake.lock):
+nix flake check ./downstreams/demo-lab --override-input boreal . --no-write-lock-file
+nix run ./downstreams/demo-lab#boreal-vm --override-input boreal . --no-write-lock-file
 ```
 
 Note that Git remotes do not enforce per-branch read permissions: keep public
@@ -74,6 +87,7 @@ to separate private Git remotes.
 
 ## Flake outputs
 
+- `templates.default` — starter downstream lab flake (`nix flake new my-lab -t github:canonical/boreal`).
 - `lib`:
   - `mkHost { system, modules, specialArgs ? {} }` — NixOS system preloaded with
     `nixosModules.default`.
