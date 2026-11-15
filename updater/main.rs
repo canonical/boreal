@@ -675,8 +675,16 @@ impl Environment for LiveEnv<'_> {
         let git_dir = attempt.join("git");
         Self::verify_commit_in_repo(target, &git_dir)?;
 
+        let nix_home = attempt.join("home");
+        DirBuilder::new()
+            .mode(0o700)
+            .create(&nix_home)
+            .map_err(|e| format!("create nix cache dir: {e}"))?;
+
         let flake_ref = target.flake();
         let output = Self::nix_source_command(&flake_ref)
+            .env("HOME", &nix_home)
+            .env("XDG_CACHE_HOME", &nix_home)
             .output()
             .map_err(|e| format!("start nix eval: {e}"))?;
         if !output.status.success() {
@@ -698,6 +706,8 @@ impl Environment for LiveEnv<'_> {
 
         let result_link = attempt.join("result");
         let status = Self::nix_build_command(&target.installable(), &result_link)
+            .env("HOME", &nix_home)
+            .env("XDG_CACHE_HOME", &nix_home)
             .status()
             .map_err(|e| format!("start nix build: {e}"))?;
         if !status.success() {
@@ -773,6 +783,7 @@ impl Environment for LiveEnv<'_> {
 
     fn activate_closure(&self, result: &Path) -> Result<(), String> {
         let profile_status = Command::new("/run/current-system/sw/bin/nix-env")
+            .env("HOME", "/root")
             .args(["-p", "/nix/var/nix/profiles/system", "--set"])
             .arg(result)
             .status()
