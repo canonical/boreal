@@ -66,6 +66,11 @@
             templateOutputs.checks.${system}.lab
           );
         }
+        // nixpkgs.lib.optionalAttrs (system == "x86_64-linux") {
+          vm = import ./tests/vm.nix {
+            inherit self pkgs;
+          };
+        }
       );
 
       formatter = forAllSystems (pkgs: pkgs.nixfmt);

@@ -9,5 +9,8 @@
 /updater/target/
 /templates/default/.boreal/
 /templates/default/temporal/target/
+/tests/vm-worker/.boreal/
+/tests/vm-worker/target/
 /downstreams/
 /.direnv/
+__pycache__/
