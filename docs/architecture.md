@@ -76,17 +76,19 @@ values.
 `NOPASSWD` `sudo` rule permitting only `/nix/store/.../bin/boreal-admin-ctl`.
 `boreal-admin-ctl` clears its environment, sets `umask 077` and `chdir /`, and
 permits only status/start/stop/restart on `temporal.service` and configured
-`boreal-worker-*` units, updater subcommands (`schedule`, `prebuild`, `apply`,
-`status`, `recover`), and optional VM `poweroff`. It never reads user home
-directories, secrets, or service logs. This model assumes no alternate console,
-hypervisor, recovery-mode, or unrestricted root session.
+`boreal-worker-*` units, zero-argument `updater` subcommands (`update`,
+`schedule`, `status`, `recover`), and optional VM `poweroff`. It never reads
+user home directories, secrets, or service logs. This model assumes no alternate
+console, hypervisor, recovery-mode, or unrestricted root session.
 
-`boreal-updater` reads `/etc/boreal/updater.yaml` (`0400 root:root`) to bind
-updates to the downstream HTTPS Git repository, optional reviewed `branch`
-(verified via `git fetch` and `git merge-base --is-ancestor`), and host
-configuration name, rejecting local `file://` or `path` overrides in committed
-`flake.lock`. Before switching, `boreal-updater` closes the durable admission
-gate in `boreal-broker`, pauses unpaused Temporal schedules, drains all tracked
+`boreal-updater` reads `/etc/boreal/updater.yaml` (`0400 root:root`) and
+enforces the `/etc/nixos` downstream checkout contract: `update` verifies
+`/etc/nixos` root ownership, fetches and hard-resets to its upstream `https://`
+tracking branch, rejects local `file://` or `path` overrides in committed
+`flake.lock`, and prebuilds `nixosConfigurations.<networking.hostName>` to a GC
+root; `schedule` queues `boreal-updater.service` asynchronously. Before
+switching, `boreal-updater` closes the durable admission gate in
+`boreal-broker`, pauses unpaused Temporal schedules, drains all tracked
 executions, schedule runs, child/continue-as-new descendants, worker task
 leases, and PostgreSQL `current_executions` rows, stops worker units, rechecks
 quiescence, and activates the exact prebuilt store closure. Uncertain states

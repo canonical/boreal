@@ -19,11 +19,7 @@ nixosConfigurations.boreal-vm = boreal.lib.mkVm {
   modules = [
     ./lab.nix
     {
-      boreal.updater = {
-        enable = true;
-        repository = "https://github.com/example/my-lab.git";
-        branch = "main";
-      };
+      boreal.updater.enable = true;
       boreal.vm = {
         diskImage = "./boreal-vm.qcow2";
         sshPort = 2222;

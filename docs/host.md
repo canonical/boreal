@@ -103,12 +103,7 @@ nixosConfigurations.lab-metal-01 = boreal.lib.mkHost {
         enable = true;
         keys = [ "ssh-ed25519 AAAAC3Nza..." ];
       };
-      boreal.updater = {
-        enable = true;
-        repository = "https://github.com/example/my-lab.git";
-        branch = "main";
-        configurationName = "lab-metal-01";
-      };
+      boreal.updater.enable = true;
     }
   ];
 };
@@ -132,19 +127,20 @@ ssh alice@lab-metal-01 "secrets set api_token" < ./api_token
 ssh alice@lab-metal-01
 ```
 
-Because `main` only provides the Boreal framework (no `nixosConfigurations`),
-`boreal.updater` always targets a **40-digit commit on the downstream lab
-repository** (and reviewed `branch` when set) whose committed `flake.lock` pins
-`boreal` without local `file://` or `path` overrides. Administrators operate
-allowlisted services and gated updates through the restricted `admin` SSH
+By contract, the downstream lab repository is cloned at `/etc/nixos` (owned by
+`root`, tracking an `https://` upstream branch, with committed `flake.lock`
+free of local `file://` or `path` overrides) and defines
+`nixosConfigurations.<networking.hostName>`. Administrators operate allowlisted
+services and two-step updates (`updater update` to hard-reset `/etc/nixos` to
+upstream and prebuild the generation, then `updater schedule` to switch in the
+background once no pipeline is running) through the restricted `admin` SSH
 interface:
 
 ```sh
 ssh admin@lab-metal-01 services
-ssh admin@lab-metal-01 "update schedule <40-digit-downstream-commit>"
-ssh admin@lab-metal-01 "update prebuild"
-ssh admin@lab-metal-01 "update apply"
-ssh admin@lab-metal-01 "update status"
+ssh admin@lab-metal-01 "updater update"
+ssh admin@lab-metal-01 "updater schedule"
+ssh admin@lab-metal-01 "updater status"
 ```
 
 See [the updater documentation](../updater/README.md) for drain and recovery

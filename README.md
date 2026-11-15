@@ -43,9 +43,10 @@ deployment.
   to `boreal-admin`, delegating via sanitized `sudo` only to `boreal-admin-ctl`
   for allowlisted Temporal/worker unit control and updater commands without
   access to user homes, secrets, or logs (assuming no console, hypervisor, or
-  unrestricted root session). `boreal-updater` binds updates to the configured
-  HTTPS repository (and reviewed branch), enforces an admission barrier and
-  schedule/descendant/lease/PostgreSQL drain protocol, activates the exact
+  unrestricted root session). `boreal-updater` syncs `/etc/nixos` to its
+  upstream `https://` tracking branch and prebuilds the host generation on
+  `updater update`, queues an admission-gated drain-and-switch on
+  `updater schedule` once no pipelines are running, activates the exact
   prebuilt closure, fails closed on uncertainty, and never runs automatic GC.
 
 See [architecture](docs/architecture.md) and [updater](updater/README.md).

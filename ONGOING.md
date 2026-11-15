@@ -45,8 +45,11 @@
     `temporal.service` / `boreal-worker-*` control and updater operations under
     a sanitized root environment with zero access to user homes, secrets, or
     logs (assuming no console, hypervisor, or unrestricted root session).
-  - `boreal-updater` enforces `/etc/boreal/updater.yaml` repository/branch/host
-    bounds and `flake.lock` hygiene, coordinates a durable admission barrier and
+  - `boreal-updater` enforces the `/etc/nixos` + `networking.hostName` contract
+    (`updater update` hard-resets `/etc/nixos` to its upstream `https://`
+    branch, verifies `flake.lock` hygiene, and prebuilds the generation;
+    `updater schedule` queues `boreal-updater.service` asynchronously),
+    coordinates a durable admission barrier and
     schedule/descendant/lease/PostgreSQL `current_executions` drain protocol,
     activates the exact prebuilt closure when `system.switch.enable = true`,
     fails closed (`phase=blocked`) on uncertainty, reconciles interrupted updates
