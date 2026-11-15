@@ -217,7 +217,115 @@ def main():
                     process.wait()
             os.close(master)
 
-    print("PTY styles, cursor, completion, history, confirmation, and secrets: passed")
+        def run_rc_pty_session(rc_contents: str, steps):
+            rc_file = tmp_path / ".borealrc"
+            rc_file.write_text(rc_contents, encoding="utf-8")
+            rc_file.chmod(0o600)
+
+            rc_master, rc_slave = pty.openpty()
+            fcntl.ioctl(rc_slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+            proc = subprocess.Popen(
+                sys.argv[1:], stdin=rc_slave, stdout=rc_slave, stderr=rc_slave, env=env
+            )
+            os.close(rc_slave)
+
+            def expect(*needles):
+                buf = bytearray()
+                limit = time.monotonic() + 10
+                replies = 0
+                while not all(n in buf for n in needles):
+                    rem = limit - time.monotonic()
+                    if rem <= 0 or not select.select([rc_master], [], [], rem)[0]:
+                        raise AssertionError(f"missing {needles!r} in {bytes(buf)!r}")
+                    try:
+                        part = os.read(rc_master, 8192)
+                    except OSError as err:
+                        raise AssertionError(f"closed before {needles!r}: {bytes(buf)!r}") from err
+                    if not part:
+                        raise AssertionError(f"closed before {needles!r}: {bytes(buf)!r}")
+                    buf.extend(part)
+                    reqs = buf.count(b"\x1b[6n")
+                    for _ in range(reqs - replies):
+                        os.write(rc_master, b"\x1b[1;1R")
+                    replies = reqs
+                return bytes(buf)
+
+            try:
+                steps(rc_master, expect)
+                os.write(rc_master, b"exit\r")
+                tail = bytearray()
+                replies = 0
+                limit = time.monotonic() + 10
+                while True:
+                    rem = limit - time.monotonic()
+                    if rem <= 0:
+                        raise AssertionError(f"shell did not exit: {bytes(tail)!r}")
+                    if not select.select([rc_master], [], [], rem)[0]:
+                        if proc.poll() is not None:
+                            break
+                        continue
+                    try:
+                        part = os.read(rc_master, 8192)
+                    except OSError:
+                        break
+                    if not part:
+                        break
+                    tail.extend(part)
+                    reqs = tail.count(b"\x1b[6n")
+                    for _ in range(reqs - replies):
+                        os.write(rc_master, b"\x1b[1;1R")
+                    replies = reqs
+                assert proc.wait(timeout=5) == 0, bytes(tail)
+                assert b"\x1b[0 q" in tail
+            finally:
+                if proc.poll() is None:
+                    proc.terminate()
+                    proc.wait(timeout=5)
+                os.close(rc_master)
+
+        # ~/.borealrc edit_mode: vi (bar cursor in insert, block cursor in normal, 0dw + A<Tab>).
+        def verify_vi(fd, expect):
+            expect(b"mock-only", b": ", b"\x1b[6 q")
+            os.write(fd, b"bad work")
+            expect(b"work")
+            os.write(fd, b"\x1b")
+            expect(b"\x1b[2 q")
+            os.write(fd, b"0dwA")
+            expect(b"\x1b[6 q")
+            os.write(fd, b"\t")
+            expect(b"\x1b[32mworkers\x1b[0m ")
+            os.write(fd, b"\x1b")
+            expect(b"\x1b[2 q")
+            os.write(fd, b"\r")
+            expect(b"[mock] alice/greet (DemoWorkflow)")
+
+        run_rc_pty_session("edit_mode: vi\n", verify_vi)
+
+        # ~/.borealrc edit_mode: helix (selection-first gh + w + d, gl + a<Tab>, normal Enter).
+        def verify_helix(fd, expect):
+            expect(b"mock-only", b": ", b"\x1b[6 q")
+            os.write(fd, b"bad work")
+            expect(b"work")
+            os.write(fd, b"\x1b")
+            expect(b"\x1b[2 q")
+            os.write(fd, b"ghwdgla")
+            expect(b"\x1b[6 q")
+            os.write(fd, b"\t")
+            expect(b"\x1b[32mworkers\x1b[0m ")
+            os.write(fd, b"\x1b")
+            expect(b"\x1b[2 q")
+            os.write(fd, b"\r")
+            expect(b"[mock] alice/greet (DemoWorkflow)")
+
+        run_rc_pty_session("edit_mode: helix\n", verify_helix)
+
+        # Invalid ~/.borealrc warns and falls back safely to emacs mode without locking out login.
+        def verify_fallback(fd, expect):
+            expect(b"warning: invalid ~/.borealrc", b"falling back to emacs mode", b"\x1b[6 q")
+
+        run_rc_pty_session("edit_mode: unsupported\n", verify_fallback)
+
+    print("PTY styles, cursor, edit modes, completion, history, confirmation, and secrets: passed")
 
 
 if __name__ == "__main__":
