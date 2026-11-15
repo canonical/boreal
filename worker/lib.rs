@@ -158,8 +158,9 @@ pub fn task_queue(default_queue: &str) -> Result<String> {
 
 /// Connects using Temporal's standard TEMPORAL_ADDRESS, TEMPORAL_NAMESPACE, and TLS settings.
 pub async fn connect() -> Result<Client> {
-    let (connection_options, client_options) =
+    let (mut connection_options, client_options) =
         ClientOptions::load_from_config(LoadClientConfigProfileOptions::default())?;
+    connection_options.grpc_compression = temporalio_client::GrpcCompression::None;
     let connection = Connection::connect(connection_options).await?;
     Ok(Client::new(connection, client_options)?)
 }
