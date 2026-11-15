@@ -13,6 +13,7 @@ import pty
 import pwd
 import re
 import select
+import shutil
 import socket
 import ssl
 import struct
@@ -618,7 +619,49 @@ def start_https_git_repo() -> tuple[str, str, http.server.ThreadingHTTPServer]:
     (work / "flake.lock").write_text(
         json.dumps({"nodes": {"root": {}}, "root": "root", "version": 7}) + "\n"
     )
+    (work / "flake.nix").write_text("{ outputs = { self }: { }; }\n")
 
+    subprocess.run(["git", "-C", str(work), "init", "--quiet"], check=True)
+    subprocess.run(["git", "-C", str(work), "config", "user.name", "Test"], check=True)
+    subprocess.run(["git", "-C", str(work), "config", "user.email", "test@example.org"], check=True)
+    subprocess.run(["git", "-C", str(work), "checkout", "-q", "-b", "downstreams/demo-lab"], check=True)
+    subprocess.run(["git", "-C", str(work), "add", "flake.nix", "flake.lock"], check=True)
+    subprocess.run(["git", "-C", str(work), "commit", "-q", "-m", "Initial v1"], check=True)
+    rev_v1 = subprocess.check_output(
+        ["git", "-C", str(work), "rev-parse", "HEAD"], text=True
+    ).strip()
+    subprocess.run(
+        ["git", "-C", str(work), "push", "--quiet", str(srv_repo), "downstreams/demo-lab"],
+        check=True,
+    )
+    subprocess.run(["git", "-C", str(srv_repo), "update-server-info"], check=True)
+
+    handler = functools.partial(
+        http.server.SimpleHTTPRequestHandler, directory=str(git_root / "srv")
+    )
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 8443), handler)
+    tls_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    tls_ctx.load_cert_chain(str(ca_crt), str(srv_key))
+    httpd.socket = tls_ctx.wrap_socket(httpd.socket, server_side=True)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+
+    # Provision /etc/nixos as a root-owned clone tracking https://git.lab.internal:8443/demo-lab.git
+    shutil.rmtree("/etc/nixos", ignore_errors=True)
+    subprocess.run(
+        [
+            "git",
+            "clone",
+            "--quiet",
+            "--branch",
+            "downstreams/demo-lab",
+            "https://git.lab.internal:8443/demo-lab.git",
+            "/etc/nixos",
+        ],
+        check=True,
+    )
+
+    # Publish v2 upstream so `updater update` syncs /etc/nixos forward and builds v2.
     builder_sh = "\n".join(
         [
             "set -eu",
@@ -644,51 +687,80 @@ def start_https_git_repo() -> tuple[str, str, http.server.ThreadingHTTPServer]:
         "}; }; }\n"
     )
     (work / "flake.nix").write_text(flake_nix)
-
-    subprocess.run(["git", "-C", str(work), "init", "--quiet"], check=True)
-    subprocess.run(["git", "-C", str(work), "config", "user.name", "Test"], check=True)
-    subprocess.run(["git", "-C", str(work), "config", "user.email", "test@example.org"], check=True)
-    subprocess.run(["git", "-C", str(work), "checkout", "-q", "-b", "downstreams/demo-lab"], check=True)
-    subprocess.run(["git", "-C", str(work), "add", "flake.nix", "flake.lock"], check=True)
+    subprocess.run(["git", "-C", str(work), "add", "flake.nix"], check=True)
     subprocess.run(["git", "-C", str(work), "commit", "-q", "-m", "Reviewed v2"], check=True)
-    rev_reviewed = subprocess.check_output(
+    rev_v2 = subprocess.check_output(
         ["git", "-C", str(work), "rev-parse", "HEAD"], text=True
     ).strip()
     subprocess.run(
         ["git", "-C", str(work), "push", "--quiet", str(srv_repo), "downstreams/demo-lab"],
         check=True,
     )
-
-    subprocess.run(["git", "-C", str(work), "checkout", "-q", "-b", "unreviewed"], check=True)
-    with open(work / "flake.nix", "a") as f:
-        f.write("# unreviewed\n")
-    subprocess.run(["git", "-C", str(work), "add", "flake.nix"], check=True)
-    subprocess.run(["git", "-C", str(work), "commit", "-q", "-m", "Unreviewed"], check=True)
-    rev_unreviewed = subprocess.check_output(
-        ["git", "-C", str(work), "rev-parse", "HEAD"], text=True
-    ).strip()
-    subprocess.run(
-        ["git", "-C", str(work), "push", "--quiet", str(srv_repo), "unreviewed"],
-        check=True,
-    )
     subprocess.run(["git", "-C", str(srv_repo), "update-server-info"], check=True)
-
-    handler = functools.partial(
-        http.server.SimpleHTTPRequestHandler, directory=str(git_root / "srv")
-    )
-    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 8443), handler)
-    tls_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    tls_ctx.load_cert_chain(str(ca_crt), str(srv_key))
-    httpd.socket = tls_ctx.wrap_socket(httpd.socket, server_side=True)
-    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
-    thread.start()
-    return rev_reviewed, rev_unreviewed, httpd
+    return rev_v1, rev_v2, httpd
 
 
 def test_safe_updates_drain_switch_and_recovery(temporal_cli: str) -> None:
-    print("[vm-suite] 4/4 verifying HTTPS repo/branch bounds, drain barrier, switch, & recovery...")
-    rev_reviewed, rev_unreviewed, httpd = start_https_git_repo()
+    print("[vm-suite] 4/4 verifying /etc/nixos sync, drain barrier, switch, & recovery...")
+    rev_v1, rev_v2, httpd = start_https_git_repo()
     try:
+        assert (
+            subprocess.check_output(["git", "-C", "/etc/nixos", "rev-parse", "HEAD"], text=True).strip()
+            == rev_v1
+        )
+        idle_st = subprocess.check_output(ssh_cmd("admin", "updater status"), text=True)
+        assert "phase=idle" in idle_st, idle_st
+
+        # Scheduling before `updater update` builds a generation must fail cleanly.
+        premature = subprocess.run(
+            ssh_cmd("admin", "updater schedule"), capture_output=True, text=True
+        )
+        assert premature.returncode != 0
+
+        # Extra arguments or legacy `update` commands must be rejected.
+        for bad_admin_cmd in [
+            f"updater schedule {rev_v2}",
+            "updater update extra",
+            "updater run",
+            "update status",
+        ]:
+            bad = subprocess.run(ssh_cmd("admin", bad_admin_cmd), capture_output=True, text=True)
+            assert bad.returncode != 0, f"unexpectedly accepted {bad_admin_cmd!r}"
+
+        # Non-HTTPS upstream URL on /etc/nixos must be rejected.
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                "/etc/nixos",
+                "remote",
+                "set-url",
+                "origin",
+                "file:///tmp/git-https/srv/demo-lab.git",
+            ],
+            check=True,
+        )
+        bad_remote = subprocess.run(
+            ssh_cmd("admin", "updater update"), capture_output=True, text=True
+        )
+        assert bad_remote.returncode != 0, "file:// upstream URL unexpectedly passed updater update"
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                "/etc/nixos",
+                "remote",
+                "set-url",
+                "origin",
+                "https://git.lab.internal:8443/demo-lab.git",
+            ],
+            check=True,
+        )
+
+        # Dirty tracked edits in /etc/nixos must be wiped via hard reset to upstream on `updater update`.
+        with open("/etc/nixos/flake.nix", "a") as dirty:
+            dirty.write("# dirty-local-modification\n")
+
         subprocess.run(
             [
                 "ip",
@@ -719,27 +791,14 @@ def test_safe_updates_drain_switch_and_recovery(temporal_cli: str) -> None:
             capture_output=True,
         )
 
-        bad_repo = subprocess.run(
-            [
-                "boreal-updater",
-                "schedule",
-                "https://github.com/evil/fork.git",
-                rev_reviewed,
-                "lab-vm",
-            ],
-            capture_output=True,
-            text=True,
+        subprocess.run(ssh_cmd("admin", "updater update"), check=True)
+        assert (
+            subprocess.check_output(["git", "-C", "/etc/nixos", "rev-parse", "HEAD"], text=True).strip()
+            == rev_v2
         )
-        assert bad_repo.returncode != 0
-
-        subprocess.run(ssh_cmd("admin", f"update schedule {rev_unreviewed}"), check=True)
-        unrev = subprocess.run(ssh_cmd("admin", "update prebuild"), capture_output=True, text=True)
-        assert unrev.returncode != 0, "unreviewed commit unexpectedly passed prebuild"
-
-        subprocess.run(ssh_cmd("admin", f"update schedule {rev_reviewed}"), check=True)
-        subprocess.run(ssh_cmd("admin", "update prebuild"), check=True)
-        pre_st = subprocess.check_output(ssh_cmd("admin", "update status"), text=True)
-        assert "phase=prebuilt" in pre_st, pre_st
+        assert "dirty-local-modification" not in pathlib.Path("/etc/nixos/flake.nix").read_text()
+        pre_st = subprocess.check_output(ssh_cmd("admin", "updater status"), text=True)
+        assert "phase=prebuilt" in pre_st and f"rev={rev_v2}" in pre_st, pre_st
         assert not pathlib.Path("/etc/boreal-updated-generation").exists()
 
         alice = SshPtySession("alice")
@@ -749,12 +808,8 @@ def test_safe_updates_drain_switch_and_recovery(temporal_cli: str) -> None:
             alice.send(b"start greet drain-parent-1 'child:Grace' 15\r")
             alice.wait_for(b"started DemoWorkflow 'drain-parent-1'")
 
-            apply_proc = subprocess.Popen(
-                ssh_cmd("admin", "update apply"),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
+            # `updater schedule` enqueues boreal-updater.service asynchronously and returns immediately.
+            subprocess.run(ssh_cmd("admin", "updater schedule"), check=True, timeout=15)
 
             cur_st = ""
             for _ in range(50):
@@ -801,16 +856,22 @@ def test_safe_updates_drain_switch_and_recovery(temporal_cli: str) -> None:
             paused_during = sched_during.get("schedule", sched_during)["state"].get("paused", False)
             assert paused_during is True, sched_during
 
-            out, err = apply_proc.communicate(timeout=90)
-            assert apply_proc.returncode == 0, f"update apply failed: {out}\n{err}"
+            post_st = ""
+            for _ in range(180):
+                post_st = subprocess.check_output(ssh_cmd("admin", "updater status"), text=True)
+                if "phase=activated" in post_st:
+                    break
+                assert "phase=blocked" not in post_st and "phase=failed" not in post_st, post_st
+                time.sleep(0.5)
+            else:
+                raise AssertionError(f"updater did not complete activation: {post_st}")
         finally:
             alice.close()
 
-        # Re-bind merged CA if /etc was switched by switch-to-configuration
         assert (
             pathlib.Path("/etc/boreal-updated-generation").read_text().strip() == "v2-activated"
         )
-        post_st = subprocess.check_output(ssh_cmd("admin", "update status"), text=True)
+        post_st = subprocess.check_output(ssh_cmd("admin", "updater status"), text=True)
         assert "phase=activated" in post_st, post_st
 
         sched_after = json.loads(
@@ -865,7 +926,7 @@ def test_safe_updates_drain_switch_and_recovery(temporal_cli: str) -> None:
             "result=/nix/store/00000000000000000000000000000000-",
         )
         state_file.write_text(unswitched)
-        rec = subprocess.run(ssh_cmd("admin", "update recover"), capture_output=True, text=True)
+        rec = subprocess.run(ssh_cmd("admin", "updater recover"), capture_output=True, text=True)
         assert rec.returncode != 0
         assert "phase=blocked" in state_file.read_text()
     finally:

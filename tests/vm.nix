@@ -129,12 +129,7 @@ pkgs.testers.runNixOSTest {
           carol = { };
         };
 
-        updater = {
-          enable = true;
-          repository = "https://git.lab.internal:8443/demo-lab.git";
-          branch = "downstreams/demo-lab";
-          configurationName = "lab-vm";
-        };
+        updater.enable = true;
       };
 
       specialisation.v2.configuration = {
