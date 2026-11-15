@@ -524,6 +524,10 @@ impl<B: Backend> Engine<B> {
             }
         }
 
+        if let Err(err) = self.coordinator.retire_runs(&to_retire) {
+            return UpdaterResponse::Error(err.detail());
+        }
+
         let active_leases = self.coordinator.active_lease_count() as u32;
         if active_workflows > 0 || active_leases > 0 {
             return UpdaterResponse::DrainBusy {
@@ -538,9 +542,6 @@ impl<B: Backend> Engine<B> {
             };
         }
 
-        if let Err(err) = self.coordinator.retire_runs(&to_retire) {
-            return UpdaterResponse::Error(err.detail());
-        }
         UpdaterResponse::DrainQuiescent
     }
 }

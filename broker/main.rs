@@ -260,8 +260,7 @@ fn chown_recursive(dir: &Path, uid: u32, gid: u32) -> Result<(), String> {
     Ok(())
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cfg = Config::from_env();
     let expected_owner = if os::current_euid() == 0 {
         Some(0)
@@ -271,8 +270,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let catalog = Catalog::load_from_dir(&cfg.etc_dir, expected_owner)
         .map_err(|e| format!("load catalog {}: {}", cfg.etc_dir.display(), e.detail()))?;
 
+    // Bind sockets, enter boreal-internal netns, and drop privileges while single-threaded
+    // before spawning any Tokio runtime threads.
     let bound = setup_and_bind(&cfg, &catalog)?;
 
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(run_broker(cfg, catalog, bound))
+}
+
+async fn run_broker(
+    cfg: Config,
+    catalog: Catalog,
+    bound: BoundSockets,
+) -> Result<(), Box<dyn std::error::Error>> {
     let coordinator = Arc::new(
         Coordinator::open(&cfg.state_dir)
             .map_err(|e| format!("open state {}: {}", cfg.state_dir.display(), e.detail()))?,

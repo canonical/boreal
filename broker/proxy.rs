@@ -79,6 +79,10 @@ impl Body for GrpcBody {
         }
         Poll::Ready(None)
     }
+
+    fn is_end_stream(&self) -> bool {
+        self.data.is_none() && self.trailers.is_none()
+    }
 }
 
 struct UpstreamPool {
@@ -171,6 +175,10 @@ fn grpc_error(code: u8, message: &str) -> Response<GrpcBody> {
         HeaderValue::from_static("application/grpc"),
     );
     headers.insert(
+        "grpc-accept-encoding",
+        HeaderValue::from_static("identity"),
+    );
+    headers.insert(
         "grpc-status",
         HeaderValue::from_str(&code.to_string()).unwrap_or_else(|_| HeaderValue::from_static("13")),
     );
@@ -193,7 +201,10 @@ fn unpack_unary_grpc(bytes: &[u8]) -> Result<&[u8], (u8, &'static str)> {
         return Err((3, "malformed gRPC frame"));
     }
     if bytes[0] != 0 {
-        return Err((3, "compressed gRPC frames are not permitted on worker gate"));
+        return Err((
+            12,
+            "unsupported grpc-encoding: compressed frames are not permitted",
+        ));
     }
     let len = u32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]) as usize;
     if bytes.len() != 5 + len {
@@ -285,6 +296,9 @@ fn authorize_worker_request(
                     Some(CommandAttrs::StartChildWorkflowExecutionCommandAttributes(attr)) => {
                         if !attr.namespace.is_empty() && attr.namespace != binding.owner {
                             return Err(deny("cross-namespace child workflow denied"));
+                        }
+                        if attr.workflow_id.starts_with("temporal-sys-") {
+                            return Err(deny("reserved temporal-sys- child workflow ID denied"));
                         }
                         if !attr.workflow_id.is_empty() {
                             child_keys.push(TrackedKey {
@@ -427,8 +441,13 @@ async fn handle_worker_rpc(
     let Some(method) = path.strip_prefix(WORKFLOW_SERVICE_PREFIX) else {
         return grpc_error(7, "service is not permitted on Boreal worker gate");
     };
-    if req.headers().contains_key("grpc-encoding") {
-        return grpc_error(3, "compressed requests are not permitted");
+    if let Some(enc_hdr) = req.headers().get("grpc-encoding") {
+        let is_identity = enc_hdr
+            .to_str()
+            .is_ok_and(|s| s.trim().eq_ignore_ascii_case("identity"));
+        if !is_identity {
+            return grpc_error(12, "unsupported grpc-encoding: only identity is supported");
+        }
     }
     if let Some(ns_hdr) = req.headers().get("temporal-namespace") {
         let Ok(ns_str) = ns_hdr.to_str() else {
@@ -618,10 +637,19 @@ mod tests {
             .await
             .unwrap();
 
-        client
-            .get_system_info(GetSystemInfoRequest::default())
-            .await
-            .unwrap();
+        let mut gzip_req = tonic::Request::new(GetSystemInfoRequest::default());
+        gzip_req
+            .metadata_mut()
+            .insert("grpc-encoding", "gzip".parse().unwrap());
+        let enc_err = client.get_system_info(gzip_req).await.unwrap_err();
+        assert_eq!(enc_err.code(), Code::Unimplemented);
+        assert!(enc_err.message().contains("grpc-encoding"));
+
+        let mut id_req = tonic::Request::new(GetSystemInfoRequest::default());
+        id_req
+            .metadata_mut()
+            .insert("grpc-encoding", "identity".parse().unwrap());
+        client.get_system_info(id_req).await.unwrap();
 
         let poll = client
             .poll_workflow_task_queue(PollWorkflowTaskQueueRequest {

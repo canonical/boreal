@@ -32,7 +32,9 @@ pub fn query_running_executions(
     let sql = "SELECT n.name, c.workflow_id, encode(c.run_id, 'hex') \
                FROM current_executions c \
                JOIN namespaces n ON n.id = c.namespace_id \
-               WHERE c.status IN (1, 8) AND n.name <> 'temporal-system';";
+               WHERE c.status IN (1, 8) \
+                 AND n.name <> 'temporal-system' \
+                 AND c.workflow_id NOT LIKE 'temporal-sys-%';";
     send_simple_query(&mut stream, sql)?;
     let rows = read_query_rows(&mut stream)?;
     let _ = send_terminate(&mut stream);

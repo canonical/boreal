@@ -421,7 +421,10 @@ impl Backend for LiveBackend {
                     .map_err(BackendError::from_status)?
                     .into_inner();
                 for info in resp.executions {
-                    out.push(info_to_raw(info, false, Vec::new()));
+                    let raw = info_to_raw(info, false, Vec::new());
+                    if !raw.workflow_id.starts_with("temporal-sys-") {
+                        out.push(raw);
+                    }
                 }
                 if resp.next_page_token.is_empty() {
                     break;
@@ -718,7 +721,7 @@ impl Backend for LiveBackend {
                             workflow_id: workflow_id.to_owned(),
                             run_id: run_id.to_owned(),
                         }),
-                        maximum_page_size: 500,
+                        maximum_page_size: 200,
                         next_page_token: token,
                         wait_new_event: false,
                         history_event_filter_type: HistoryEventFilterType::AllEvent as i32,
@@ -836,6 +839,7 @@ impl Backend for LiveBackend {
                     for info in resp.executions {
                         if let Some(exec) = info.execution
                             && !exec.workflow_id.is_empty()
+                            && !exec.workflow_id.starts_with("temporal-sys-")
                         {
                             out.push(TrackedKey {
                                 namespace: ns.clone(),
