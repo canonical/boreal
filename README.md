@@ -2,7 +2,10 @@
 
 Reference downstream lab consuming `github:canonical/boreal`. This orphan
 branch (`downstreams/demo-lab`) lives in gitignored `downstreams/demo-lab`
-inside a Boreal checkout (or standalone with `--override-input boreal <url>`).
+inside a Boreal checkout (or standalone with
+`--override-input boreal <url> --no-write-lock-file`; ensure committed
+`flake.lock` files resolve remote URLs rather than local `file://` overrides
+before staging updates with `boreal-updater`).
 
 **This is a development example, not a secure shared lab.** Runtime permission
 enforcement and Temporal isolation are not wired up yet, and `boreal-vm` shares
