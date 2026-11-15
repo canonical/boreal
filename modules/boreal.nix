@@ -56,6 +56,12 @@ let
     }) userCfg.workers;
   };
 
+  mkUserRc =
+    user: userCfg:
+    yamlFormat.generate (lib.strings.sanitizeDerivationName "boreal-rc-${user}.yaml") {
+      edit_mode = userCfg.editMode;
+    };
+
   mkArgSpec =
     arg:
     {
@@ -303,6 +309,16 @@ in
               description = "Public SSH authorized keys; never place private keys here.";
             };
 
+            editMode = mkOption {
+              type = types.enum [
+                "emacs"
+                "vi"
+                "helix"
+              ];
+              default = "emacs";
+              description = "Interactive line-editing mode written to ~/.borealrc for boreal-shell.";
+            };
+
             permissions = {
               read = mkOption {
                 type = permissionType;
@@ -479,45 +495,80 @@ in
       }
     ) cfg.users;
 
-    systemd.services = builtins.listToAttrs (
-      map (entry: {
-        name = "boreal-worker-${entry.unitKey}";
-        value = {
-          description = "Boreal worker ${entry.unitKey}";
+    systemd.services =
+      (lib.mapAttrs' (
+        user: userCfg:
+        let
+          rcSource = mkUserRc user userCfg;
+          homeDir = config.users.users.${user}.home;
+        in
+        lib.nameValuePair "boreal-user-rc-${user}" {
+          description = "Provision ~/.borealrc for Boreal user ${user}";
           wantedBy = [ "multi-user.target" ];
-          after = [
-            "boreal-netns-worker-${entry.unitKey}.service"
-            "boreal-temporal-namespaces.service"
-            "boreal-broker.service"
-          ];
-          requires = [ "boreal-netns-worker-${entry.unitKey}.service" ];
-          wants = [
-            "boreal-temporal-namespaces.service"
-            "boreal-broker.service"
-          ];
-          environment = {
-            TEMPORAL_ADDRESS = cfg.temporalAddress;
-            TEMPORAL_NAMESPACE = entry.user;
-            LAB_TASK_QUEUE = entry.unitKey;
-          };
+          before = [ "sshd.service" ];
+          after = [ "local-fs.target" ];
+          restartTriggers = [ rcSource ];
           serviceConfig = {
-            User = entry.user;
-            NetworkNamespacePath = "/run/netns/boreal-worker-${entry.unitKey}";
-            ExecStart =
-              if builtins.hasAttr entry.cfg.package cfg.workerPackages then
-                lib.getExe cfg.workerPackages.${entry.cfg.package}.package
-              else
-                "/bin/false";
-            Restart = "on-failure";
-            RestartSec = lib.mkDefault 2;
-            TimeoutStopSec = "infinity";
+            Type = "oneshot";
+            RemainAfterExit = true;
+            User = user;
+            UMask = "0077";
             NoNewPrivileges = true;
             PrivateTmp = true;
+            PrivateNetwork = true;
             ProtectSystem = "strict";
             ProtectProc = "invisible";
+            ReadWritePaths = [ homeDir ];
+            ExecStart = pkgs.writeShellScript "boreal-user-rc-${user}" ''
+              set -eu
+              home=${lib.escapeShellArg homeDir}
+              tmp="$home/.borealrc.tmp.$$"
+              ${pkgs.coreutils}/bin/rm -f -- "$tmp"
+              ${pkgs.coreutils}/bin/install -m 0600 ${rcSource} "$tmp"
+              ${pkgs.coreutils}/bin/mv -fT -- "$tmp" "$home/.borealrc"
+            '';
           };
-        };
-      }) workerEntries
-    );
+        }
+      ) cfg.users)
+      // builtins.listToAttrs (
+        map (entry: {
+          name = "boreal-worker-${entry.unitKey}";
+          value = {
+            description = "Boreal worker ${entry.unitKey}";
+            wantedBy = [ "multi-user.target" ];
+            after = [
+              "boreal-netns-worker-${entry.unitKey}.service"
+              "boreal-temporal-namespaces.service"
+              "boreal-broker.service"
+            ];
+            requires = [ "boreal-netns-worker-${entry.unitKey}.service" ];
+            wants = [
+              "boreal-temporal-namespaces.service"
+              "boreal-broker.service"
+            ];
+            environment = {
+              TEMPORAL_ADDRESS = cfg.temporalAddress;
+              TEMPORAL_NAMESPACE = entry.user;
+              LAB_TASK_QUEUE = entry.unitKey;
+            };
+            serviceConfig = {
+              User = entry.user;
+              NetworkNamespacePath = "/run/netns/boreal-worker-${entry.unitKey}";
+              ExecStart =
+                if builtins.hasAttr entry.cfg.package cfg.workerPackages then
+                  lib.getExe cfg.workerPackages.${entry.cfg.package}.package
+                else
+                  "/bin/false";
+              Restart = "on-failure";
+              RestartSec = lib.mkDefault 2;
+              TimeoutStopSec = "infinity";
+              NoNewPrivileges = true;
+              PrivateTmp = true;
+              ProtectSystem = "strict";
+              ProtectProc = "invisible";
+            };
+          };
+        }) workerEntries
+      );
   };
 }

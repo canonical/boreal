@@ -119,6 +119,7 @@ let
         };
         bob = {
           keys = [ "ssh-ed25519 BBBB bob-test-key" ];
+          editMode = "helix";
           workers.eval.package = "eval-worker";
         };
       };
@@ -475,7 +476,25 @@ let
       };
     }
   );
+
+  viHost = mkHost {
+    boreal = {
+      enable = true;
+      users.alice.editMode = "vi";
+    };
+  };
+  aliceRcSource = builtins.head configured.systemd.services.boreal-user-rc-alice.restartTriggers;
+  bobRcSource = builtins.head configured.systemd.services.boreal-user-rc-bob.restartTriggers;
 in
+assert configured.boreal.users.alice.editMode == "emacs";
+assert configured.boreal.users.bob.editMode == "helix";
+assert viHost.boreal.users.alice.editMode == "vi";
+assert configured.systemd.services.boreal-user-rc-alice.serviceConfig.User == "alice";
+assert configured.systemd.services.boreal-user-rc-alice.serviceConfig.Type == "oneshot";
+assert configured.systemd.services.boreal-user-rc-alice.serviceConfig.RemainAfterExit;
+assert configured.systemd.services.boreal-user-rc-alice.serviceConfig.UMask == "0077";
+assert builtins.elem "sshd.service" configured.systemd.services.boreal-user-rc-alice.before;
+assert configured.systemd.services.boreal-user-rc-bob.serviceConfig.User == "bob";
 assert configured.nix.settings.substituters == [ "https://cache.nixos.org/" ];
 assert !configured.nix.gc.automatic;
 assert builtins.hasAttr "boreal" configured.users.groups;
@@ -631,6 +650,8 @@ pkgs.runCommand "boreal-module-tests"
     remarshal --if yaml --of json ${workersEtc.source} > workers.json
     remarshal --if yaml --of json ${alicePermsEtc.source} > alice.json
     remarshal --if yaml --of json ${bobPermsEtc.source} > bob.json
+    remarshal --if yaml --of json ${aliceRcSource} > alice-rc.json
+    remarshal --if yaml --of json ${bobRcSource} > bob-rc.json
     python3 - <<'PY'
     import json, pathlib
 
@@ -642,6 +663,9 @@ pkgs.runCommand "boreal-module-tests"
         actual = json.loads(pathlib.Path(actual_path).read_text())
         expected = json.loads(pathlib.Path(expected_path).read_text())
         assert actual == expected, f"mismatch for {actual_path}: {actual!r} != {expected!r}"
+
+    assert json.loads(pathlib.Path("alice-rc.json").read_text()) == {"edit_mode": "emacs"}
+    assert json.loads(pathlib.Path("bob-rc.json").read_text()) == {"edit_mode": "helix"}
     PY
     touch "$out"
   ''
