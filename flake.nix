@@ -60,10 +60,11 @@
                 "https://mirrors.bfsu.edu.cn/nix-channels/store"
                 "https://mirror.sjtu.edu.cn/nix-channels/store"
               ];
-              environment.systemPackages = [
-                self.packages.${pkgs.stdenv.hostPlatform.system}.lab-client
-              ];
-              boreal.updater.enable = true;
+              boreal.updater = {
+                enable = true;
+                repository = "https://github.com/canonical/boreal.git";
+                branch = "downstreams/demo-lab";
+              };
               boreal.vm.adminKeys = [ publicKey ];
             }
           )

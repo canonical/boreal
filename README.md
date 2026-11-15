@@ -7,33 +7,56 @@ inside a Boreal checkout (or standalone with
 `flake.lock` files resolve remote URLs rather than local `file://` overrides
 before staging updates with `boreal-updater`).
 
-**This is a development example, not a secure shared lab.** Runtime permission
-enforcement and Temporal isolation are not wired up yet, and `boreal-vm` shares
-a test SSH public key across `alice`, `bob`, and `admin`.
+Note: `downstreams/demo-lab` shares a disposable demo SSH public key across
+`alice`, `bob`, and `admin` for local VM testing; replace those keys with
+distinct per-user public keys in any real deployment.
 
 ## Development and checks
 
 ```sh
-nix develop
+nix develop --override-input boreal ../.. --no-write-lock-file
 cargo test --manifest-path temporal/Cargo.toml --workspace --locked
-nix flake check
+nix flake check --override-input boreal ../.. --no-write-lock-file
 ```
 
 ## Run the disposable VM
 
 ```sh
 mkdir -p "$HOME/boreal-vm"
-NIX_DISK_IMAGE="$HOME/boreal-vm/boreal-vm.qcow2" nix run .#boreal-vm
+NIX_DISK_IMAGE="$HOME/boreal-vm/boreal-vm.qcow2" \
+  nix run .#boreal-vm --override-input boreal ../.. --no-write-lock-file
 ```
 
-In another terminal on the host:
+Connect interactively to `boreal-shell` as `alice` or `bob`:
 
 ```sh
-ssh -i ~/.ssh/self -p 2222 alice@127.0.0.1
-cat /etc/boreal/workers.yaml
-cat /etc/boreal/users/alice/perms.yaml
-export TEMPORAL_ADDRESS=127.0.0.1:7233
-export TEMPORAL_NAMESPACE=alice
-LAB_TASK_QUEUE=alice-greet lab-client start greet alice-run-1 'Alice Smith' 5
-LAB_TASK_QUEUE=alice-greet lab-client status alice-run-1
+ssh -p 2222 alice@127.0.0.1
+# Inside boreal-shell:
+workers
+permissions
+start greet alice-run-1 'Alice Smith' 5
+status alice-run-1
+result alice-run-1
+secrets set api_token
+secrets list
+exit
+```
+
+Or pipe a secret over stdin without putting secret contents in arguments or
+history:
+
+```sh
+ssh -p 2222 alice@127.0.0.1 'secrets set api_token' < ./my-token-file
+```
+
+Connect to the restricted admin interface (`boreal-admin`) as `admin`:
+
+```sh
+ssh -p 2222 admin@127.0.0.1
+# Inside boreal-admin:
+services
+service status temporal
+service restart boreal-worker-alice-greet
+update status
+poweroff
 ```
