@@ -1,0 +1,66 @@
+# Boreal downstream lab starter
+
+Starter flake consuming `github:canonical/boreal`. `boreal.lib.buildRustWorker`
+and `boreal.lib.mkDevShell` automatically link `${boreal}/worker` at
+`.boreal/boreal-worker`, so `flake.lock` is the single source of truth for the
+Boreal framework revision.
+
+## Quick start
+
+1. Create a new lab project (standalone repository):
+
+   ```sh
+   nix flake new my-lab -t github:canonical/boreal
+   cd my-lab
+   git init && git add .
+   ```
+
+   *(Or inside a Boreal checkout as an orphan worktree:
+   `git worktree add --orphan -b downstreams/my-lab downstreams/my-lab`, then
+   `cd downstreams/my-lab && nix flake init -t ../.. && git add .`.)*
+
+2. Customize workflows and users:
+   - Replace or add Temporal worker crates under `temporal/`.
+   - Register worker derivations and typed `args` schemas under
+     `boreal.workerPackages` in `lab.nix`.
+   - Declare lab users, public SSH keys, worker instances, and permissions under
+     `boreal.users` in `lab.nix`.
+
+3. Run checks and tests:
+
+   ```sh
+   nix flake check
+   nix develop
+   cargo test --manifest-path temporal/Cargo.toml --workspace --locked
+   ```
+
+   *(When testing against local unpushed commits on Boreal's `main` branch, pass
+   `--override-input boreal ../.. --no-write-lock-file` to `nix` commands so
+   local `file://` paths are not written into `flake.lock`.)*
+
+4. Test in the disposable QEMU VM:
+   - Set `boreal.vm.devAuthorizedKeys` in `flake.nix` (or `users.<user>.keys` in
+     `lab.nix`) to your public SSH key, then launch:
+
+     ```sh
+     nix run .#vm
+     ```
+
+   - SSH into the guest on `127.0.0.1:2222`:
+
+     ```sh
+     ssh -p 2222 alice@127.0.0.1
+     ```
+
+5. Deploy and stage updates:
+   - Add `./hosts/<hostname>.nix` (importing `hardware-configuration.nix` and
+     host networking/SSH settings) and wire `nixosConfigurations.<hostname>` in
+     `flake.nix` using `boreal.lib.mkHost`.
+   - Commit a remote-resolved `flake.lock` (via `nix flake lock` or
+     `nix flake update boreal`) and push to your repository. On the host, stage
+     the downstream commit with
+     `sudo boreal-schedule-update <https-repo-url> <40-digit-commit> <hostname>`.
+
+**Security note:** Runtime permission enforcement and Temporal server/host
+isolation are still under active development in Boreal. Never place secrets in
+Git, the Nix store, command-line arguments, or Temporal history.

@@ -4,5 +4,7 @@
 /worker/target/
 /shell/target/
 /updater/target/
+/templates/default/.boreal/
+/templates/default/temporal/target/
 /downstreams/
 /.direnv/

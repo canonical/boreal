@@ -22,6 +22,11 @@
         vm = import ./modules/vm.nix;
       };
 
+      templates.default = {
+        path = ./templates/default;
+        description = "Starter Boreal downstream lab with Temporal Rust worker and QEMU VM";
+      };
+
       packages = forAllSystems (pkgs: import ./packages { inherit pkgs; });
 
       devShells = forAllSystems (pkgs: {
@@ -40,11 +45,28 @@
         };
       });
 
-      checks = forAllSystems (pkgs: {
-        modules = import ./tests/modules.nix {
-          inherit self nixpkgs pkgs;
-        };
-      });
+      checks = forAllSystems (
+        pkgs:
+        let
+          system = pkgs.stdenv.hostPlatform.system;
+          templateOutputs = nixpkgs.lib.fix (
+            templateSelf:
+            (import ./templates/default/flake.nix).outputs {
+              self = templateSelf;
+              boreal = self;
+              inherit nixpkgs;
+            }
+          );
+        in
+        {
+          modules = import ./tests/modules.nix {
+            inherit self nixpkgs pkgs;
+          };
+          template = builtins.seq templateOutputs.packages.${system}.example-worker.drvPath (
+            templateOutputs.checks.${system}.lab
+          );
+        }
+      );
 
       formatter = forAllSystems (pkgs: pkgs.nixfmt);
     };
