@@ -427,6 +427,11 @@ pub fn validate_workflow_id(id: &str) -> Result<(), Error> {
             "workflow ID must be 1..=255 printable non-control characters".into(),
         ));
     }
+    if id.starts_with("temporal-sys-") {
+        return Err(Error::InvalidArgument(
+            "workflow ID prefix 'temporal-sys-' is reserved for Temporal system workflows".into(),
+        ));
+    }
     Ok(())
 }
 
