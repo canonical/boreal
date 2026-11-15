@@ -509,7 +509,7 @@ in
               else
                 "/bin/false";
             Restart = "on-failure";
-            RestartSec = 2;
+            RestartSec = lib.mkDefault 2;
             TimeoutStopSec = "infinity";
             NoNewPrivileges = true;
             PrivateTmp = true;
