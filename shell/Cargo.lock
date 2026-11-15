@@ -77,9 +77,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "boreal-common"
+version = "0.1.0"
+
+[[package]]
 name = "boreal-shell"
 version = "0.1.0"
 dependencies = [
+ "boreal-common",
  "clap",
  "clap_complete",
  "crossterm",

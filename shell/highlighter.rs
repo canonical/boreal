@@ -1,17 +1,21 @@
+use std::sync::Arc;
 use std::{iter::Peekable, str::CharIndices};
 
 use nu_ansi_term::{Color, Style};
 use reedline::{Completer as _, StyledText};
 
-/// Highlights the mock shell's command words and option-like arguments.
+use crate::command::Context;
+use crate::completion::Completer;
+
+/// Highlights the shell's command words and option-like arguments.
 pub struct Highlighter {
+    ctx: Arc<Context>,
     commands: Vec<String>,
 }
 
 impl Highlighter {
-    pub fn new() -> Self {
-        let mut cli = crate::command::cli();
-        // Building also adds clap's generated help subcommand.
+    pub fn new(ctx: Arc<Context>) -> Self {
+        let mut cli = ctx.cli(None);
         cli.build();
         let commands = cli
             .get_subcommands()
@@ -20,13 +24,7 @@ impl Highlighter {
             })
             .map(str::to_owned)
             .collect();
-        Self { commands }
-    }
-}
-
-impl Default for Highlighter {
-    fn default() -> Self {
-        Self::new()
+        Self { ctx, commands }
     }
 }
 
@@ -48,7 +46,7 @@ impl reedline::Highlighter for Highlighter {
                     .iter()
                     .any(|name| name.starts_with(&command.value))
                     || (command.start..=command.end).contains(&cursor)
-                        && crate::completion::Completer
+                        && Completer::new(Arc::clone(&self.ctx))
                             .complete(line, cursor)
                             .iter()
                             .any(|candidate| {
@@ -91,8 +89,6 @@ impl reedline::Highlighter for Highlighter {
                     );
                     options = false;
                 } else if options && word.value.starts_with('-') && word.value.len() > 1 {
-                    // The first '=' in the raw word is also the first decoded
-                    // '=': shlex never removes or transforms that character.
                     let end = line[word.start..word.end]
                         .find('=')
                         .map_or(word.end, |offset| word.start + offset);
@@ -144,8 +140,6 @@ struct Word {
     value: String,
 }
 
-// Follow shlex's word, quote, escape and comment rules while retaining raw
-// byte boundaries. Unfinished words are decoded as far as possible.
 struct Words<'a> {
     chars: Peekable<CharIndices<'a>>,
     len: usize,
@@ -216,6 +210,10 @@ mod tests {
     use super::*;
     use reedline::Highlighter as _;
 
+    fn mock_highlighter() -> Highlighter {
+        Highlighter::new(Arc::new(Context::mock()))
+    }
+
     #[test]
     fn test_highlighting() {
         let d = Style::new();
@@ -227,6 +225,7 @@ mod tests {
             ("", &[]),
             (" \t\n", &[(d, " \t\n")]),
             ("workers", &[(g, "workers")]),
+            ("secrets", &[(g, "secrets")]),
             ("help", &[(g, "help")]),
             ("--help", &[(y, "--help")]),
             ("-h", &[(y, "-h")]),
@@ -311,7 +310,7 @@ mod tests {
                 ],
             ),
         ];
-        let highlighter = Highlighter::new();
+        let highlighter = mock_highlighter();
         for (line, expected) in cases {
             let actual = highlighter.highlight(line, line.len());
             let expected: Vec<_> = expected
@@ -325,7 +324,7 @@ mod tests {
 
     #[test]
     fn test_grammar_commands_and_word_decoding() {
-        let highlighter = Highlighter::new();
+        let highlighter = mock_highlighter();
         for name in &highlighter.commands {
             let actual = highlighter.highlight(name, 0);
             assert_eq!(
@@ -347,7 +346,8 @@ mod tests {
 
     #[test]
     fn test_parser_preservation() {
-        let highlighter = Highlighter::new();
+        let ctx = Arc::new(Context::mock());
+        let highlighter = Highlighter::new(Arc::clone(&ctx));
         for line in [
             "start greet run-1 'Alice Smith' 5 --owner bob",
             "list --owner=alice # comment\n",
@@ -359,16 +359,13 @@ mod tests {
             let raw = highlighter.highlight(line, 0).raw_string();
             assert_eq!(raw, line);
             assert_eq!(shlex::split(&raw), shlex::split(line));
-            assert_eq!(
-                crate::command::parse(&raw).is_ok(),
-                crate::command::parse(line).is_ok()
-            );
+            assert_eq!(ctx.parse(&raw).is_ok(), ctx.parse(line).is_ok());
         }
     }
 
     #[test]
     fn test_partial_command_matching_at_cursor() {
-        let highlighter = Highlighter::new();
+        let highlighter = mock_highlighter();
         let incomplete = Style::new().underline();
         let invalid = Style::new().fg(Color::Red);
         assert_eq!(

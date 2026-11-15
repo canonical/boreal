@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise the local mock shell's terminal interactions with a disposable PTY."""
+"""Exercise the Boreal shell's terminal interactions, confirmation prompts, and secret safety."""
 
 import fcntl
 import os
@@ -21,10 +21,47 @@ def main():
     preferred_tmp = pathlib.Path("/tmp/opencode")
     tmp_dir = preferred_tmp if preferred_tmp.is_dir() else None
     with tempfile.TemporaryDirectory(prefix="boreal-shell-test-", dir=tmp_dir) as tmp:
-        marker = pathlib.Path(tmp) / "must-not-exist"
+        tmp_path = pathlib.Path(tmp)
+        marker = tmp_path / "must-not-exist"
+        base_env = {
+            k: v
+            for k, v in os.environ.items()
+            if not k.startswith("SSH_")
+        }
+        env = {
+            **base_env,
+            "TERM": "xterm-256color",
+            "HOME": tmp,
+            "BOREAL_TEST_HOME": tmp,
+        }
+
+        # Unsupported SSH -c commands and inline secret args must fail closed.
+        for bad_cmd in ["/bin/sh", "sftp-server", "workers", "secrets set tok inline"]:
+            res = subprocess.run(
+                [*sys.argv[1:], "-c", bad_cmd],
+                input=b"data",
+                capture_output=True,
+                env=env,
+            )
+            assert res.returncode != 0, f"expected failure for -c {bad_cmd!r}"
+
+        # Non-interactive stdin secret upload writes 0700 dir + 0600 file without echoing value.
+        piped = subprocess.run(
+            [*sys.argv[1:], "-c", "secrets set piped_item"],
+            input=b"non-echoed-test-payload",
+            capture_output=True,
+            env=env,
+            check=True,
+        )
+        assert b"non-echoed-test-payload" not in piped.stdout
+        assert b"non-echoed-test-payload" not in piped.stderr
+        secrets_dir = tmp_path / ".config/boreal/secrets"
+        piped_file = secrets_dir / "piped_item"
+        assert (secrets_dir.stat().st_mode & 0o777) == 0o700
+        assert (piped_file.stat().st_mode & 0o777) == 0o600
+
         master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
-        env = {**os.environ, "TERM": "xterm-256color", "HOME": tmp}
         process = subprocess.Popen(sys.argv[1:], stdin=slave, stdout=slave, stderr=slave, env=env)
         os.close(slave)
 
@@ -41,7 +78,7 @@ def main():
                 except OSError as err:
                     raise AssertionError(f"shell closed before {needles!r}: {bytes(data)!r}") from err
                 if not chunk:
-                    raise AssertionError(f"shell closed before {needles!r}: {bytes(data)!r}")
+                    raise AssertionError(f"shell closed before {needles!r}: {bytes(data)!r}") from err
                 data.extend(chunk)
                 # Crossterm asks the terminal for its cursor position; the PTY
                 # is not a terminal emulator, so answer the query ourselves.
@@ -99,24 +136,50 @@ def main():
             os.write(master, b"\t")
             wait_for(b"workers")
             os.write(master, b"\r\r")
-            wait_for(b"[mock] Workers")
+            wait_for(b"[mock] alice/greet (DemoWorkflow)")
 
             # The previous command is available through Up and as a right-arrow hint.
             os.write(master, b"\x1b[A\r")
-            wait_for(b"[mock] Workers")
+            wait_for(b"[mock] alice/greet (DemoWorkflow)")
             os.write(master, b"wo")
             wait_for(b"rkers")
             os.write(master, b"\x1b[C\r")
-            wait_for(b"[mock] Workers")
+            wait_for(b"[mock] alice/greet (DemoWorkflow)")
 
             # Even shell metacharacters passed as an argument have no side effects.
             line = f"start greet test '$(touch {marker})' 5\r".encode()
             os.write(master, line)
-            wait_for(b"no action performed")
+            wait_for(b"[mock] started DemoWorkflow 'test'")
             assert not marker.exists(), "a shell metacharacter was executed"
 
+            # Cancel requires confirmation: 'n' aborts, 'y' proceeds.
             os.write(master, b"cancel run-1 --owner bob\r")
-            wait_for(b"[mock] Cancel")
+            wait_for(b"Cancel DemoWorkflow 'run-1'", b"[y/N]: ")
+            os.write(master, b"n\r")
+            wait_for(b"cancellation aborted.")
+
+            os.write(master, b"cancel run-1 --owner bob\r")
+            wait_for(b"Cancel DemoWorkflow 'run-1'", b"[y/N]: ")
+            os.write(master, b"y\r")
+            wait_for(b"[mock] cancellation requested for DemoWorkflow 'run-1'")
+
+            # Interactive secret entry disables echo and never prints secret contents.
+            os.write(master, b"secrets set tty_item\r")
+            wait_for(b"input hidden): ")
+            os.write(master, b"quiet-tty-value\n")
+            secret_out = wait_for(b"Stored secret 'tty_item' (15 bytes).")
+            assert b"quiet-tty-value" not in secret_out, "secret value was echoed to terminal"
+            assert ((secrets_dir / "tty_item").stat().st_mode & 0o777) == 0o600
+
+            os.write(master, b"secrets list\r")
+            list_out = wait_for(b"piped_item (23 bytes, mode 0600)", b"tty_item (15 bytes, mode 0600)")
+            assert b"quiet-tty-value" not in list_out
+
+            os.write(master, b"secrets remove tty_item\r")
+            wait_for(b"Remove secret 'tty_item'? [y/N]: ")
+            os.write(master, b"y\r")
+            wait_for(b"Removed secret 'tty_item'.")
+            assert not (secrets_dir / "tty_item").exists()
 
             os.write(master, b"exit\r")
             data = bytearray()
@@ -153,7 +216,7 @@ def main():
                     process.wait()
             os.close(master)
 
-    print("PTY styles, cursor, completion, history, and mock execution: passed")
+    print("PTY styles, cursor, completion, history, confirmation, and secrets: passed")
 
 
 if __name__ == "__main__":
