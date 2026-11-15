@@ -17,6 +17,7 @@ use boreal_common::os;
 use boreal_common::secret::{self, MAX_SECRET_BYTES, Store};
 use boreal_common::wire::{BROKER_SOCKET, Request, Response};
 use crossterm::cursor::SetCursorStyle;
+use nu_ansi_term::Color;
 use reedline::{
     CursorConfig, DefaultHinter, DefaultPrompt, DefaultPromptSegment, Emacs, KeyCode, KeyModifiers,
     Reedline, ReedlineEvent, ReedlineMenu, Signal, default_emacs_keybindings,
@@ -346,8 +347,11 @@ fn run_interactive() -> Result<(), Box<dyn Error>> {
     );
     let mut editor = Reedline::create()
         .with_completer(Box::new(completion::Completer::new(Arc::clone(&ctx))))
+        .with_quick_completions(true)
         .with_highlighter(Box::new(highlighter::Highlighter::new(Arc::clone(&ctx))))
-        .with_hinter(Box::new(DefaultHinter::default()))
+        .with_hinter(Box::new(
+            DefaultHinter::default().with_style(Color::DarkGray.normal()),
+        ))
         .with_menu(ReedlineMenu::EngineCompleter(Box::new(menu::Menu::new())))
         .with_cursor_config(CursorConfig {
             emacs: Some(SetCursorStyle::SteadyBar),

@@ -130,19 +130,20 @@ def main():
             os.write(master, b"\x03")
             wait_for(b"boreal\x1b", b"\x1b[6 q")
 
-            # Tab completes a command; Enter handles either menu acceptance or submission.
+            # Single-candidate Tab immediately applies completion without opening the menu.
             os.write(master, b"work")
-            wait_for(b"work")
+            wait_for(b"\x1b[4mwork", b"\x1b[6 q")
             os.write(master, b"\t")
-            wait_for(b"workers")
-            os.write(master, b"\r\r")
+            single_tab = wait_for(b"\x1b[32mworkers\x1b[0m ", b"\x1b[6 q")
+            assert b"List available workers" not in single_tab
+            os.write(master, b"\r")
             wait_for(b"[mock] alice/greet (DemoWorkflow)")
 
-            # The previous command is available through Up and as a right-arrow hint.
+            # The previous command is available through Up and as a light-black right-arrow hint.
             os.write(master, b"\x1b[A\r")
             wait_for(b"[mock] alice/greet (DemoWorkflow)")
             os.write(master, b"wo")
-            wait_for(b"rkers")
+            wait_for(b"\x1b[90mrkers")
             os.write(master, b"\x1b[C\r")
             wait_for(b"[mock] alice/greet (DemoWorkflow)")
 
