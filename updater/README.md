@@ -14,6 +14,24 @@ barrier that accounts for in-flight admissions and work, and keep the gate
 closed through activation and recovery. The necessary trust boundaries and
 operational recovery procedure have not been implemented here.
 
+## Target model (`main` + downstream flake)
+
+Boreal's `main` branch only ships the reusable framework (`lib`, `nixosModules`,
+`packages`, `templates`, `worker`) and defines no `nixosConfigurations`.
+Deployable hosts live in a **downstream lab flake**—either a standalone
+repository created from `templates.default` or a `downstreams/<project>` orphan
+branch—that declares `inputs.boreal` in `flake.nix` and pins the exact `main`
+framework commit in its committed `flake.lock`.
+
+`boreal-updater` therefore always targets the **downstream repository and
+40-digit downstream commit**, never Boreal's `main` branch directly. To roll out
+a framework change from `main`, update the `boreal` input in the downstream
+project (`nix flake update boreal`), review and commit the updated
+`flake.lock`, push, and schedule that new downstream commit. Never commit local
+`--override-input boreal` (`file://` or `path:`) overrides into `flake.lock`
+(use `--no-write-lock-file` during local testing), because the updater builds
+strictly from the committed lock file without modifying it.
+
 ## Interface
 
 Build with `cargo build --release --manifest-path updater/Cargo.toml`. All
@@ -25,10 +43,11 @@ boreal-updater status
 boreal-updater run
 ```
 
-For example, after a trusted administrator has chosen and reviewed a revision:
+For example, after a trusted administrator has chosen and reviewed a downstream
+lab revision (in a standalone lab repo or on a `downstreams/<project>` branch):
 
 ```text
-boreal-updater schedule https://github.com/example/lab.git 0123456789abcdef0123456789abcdef01234567 lab-1
+boreal-updater schedule https://github.com/example/my-lab.git 0123456789abcdef0123456789abcdef01234567 lab-1
 boreal-updater status
 # Start the configured service, or invoke the worker directly:
 boreal-updater run
