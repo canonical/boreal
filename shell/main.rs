@@ -1,10 +1,10 @@
 mod client;
 mod command;
 mod completion;
-#[cfg_attr(not(test), allow(dead_code))]
 mod helix;
 mod highlighter;
 mod menu;
+mod rc;
 
 use std::env;
 use std::error::Error;
@@ -21,12 +21,15 @@ use boreal_common::wire::{BROKER_SOCKET, Request, Response};
 use crossterm::cursor::SetCursorStyle;
 use nu_ansi_term::Color;
 use reedline::{
-    CursorConfig, DefaultHinter, DefaultPrompt, DefaultPromptSegment, Emacs, KeyCode, KeyModifiers,
-    Reedline, ReedlineEvent, ReedlineMenu, Signal, default_emacs_keybindings,
+    CursorConfig, DefaultHinter, DefaultPrompt, DefaultPromptSegment, EditMode, Emacs, KeyCode,
+    KeyModifiers, Keybindings, Reedline, ReedlineEvent, ReedlineMenu, Signal, Vi,
+    default_emacs_keybindings, default_vi_insert_keybindings, default_vi_normal_keybindings,
 };
 
 use crate::client::Mode;
 use crate::command::{Action, Context, SecretAction};
+use crate::helix::Helix;
+use crate::rc::Config;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -322,11 +325,85 @@ fn execute_action(action: Action, mode: &Mode) -> Result<(), String> {
     }
 }
 
+fn load_rc_config() -> Config {
+    let uid = os::current_euid();
+    let home = if !Path::new(DEFAULT_ETC_DIR).exists()
+        && !is_ssh_session()
+        && let Ok(test_home) = env::var("BOREAL_TEST_HOME")
+    {
+        PathBuf::from(test_home)
+    } else {
+        match os::user_by_uid(uid) {
+            Ok(user) => PathBuf::from(user.home()),
+            Err(err) => {
+                eprintln!(
+                    "boreal-shell: warning: {}; falling back to emacs mode",
+                    err.detail()
+                );
+                return Config::default();
+            }
+        }
+    };
+    match rc::load_from_home(&home, uid) {
+        Ok(cfg) => cfg,
+        Err(err) => {
+            eprintln!(
+                "boreal-shell: warning: invalid ~/.borealrc ({}); falling back to emacs mode",
+                err.detail()
+            );
+            Config::default()
+        }
+    }
+}
+
+fn bind_completion_keys(keys: &mut Keybindings) {
+    keys.add_binding(
+        KeyModifiers::NONE,
+        KeyCode::Tab,
+        ReedlineEvent::UntilFound(vec![
+            ReedlineEvent::Menu("completion".into()),
+            ReedlineEvent::MenuNext,
+        ]),
+    );
+    keys.add_binding(
+        KeyModifiers::SHIFT,
+        KeyCode::BackTab,
+        ReedlineEvent::MenuPrevious,
+    );
+    keys.add_binding(
+        KeyModifiers::NONE,
+        KeyCode::BackTab,
+        ReedlineEvent::MenuPrevious,
+    );
+}
+
+fn build_edit_mode(mode: rc::Mode) -> Box<dyn EditMode> {
+    match mode {
+        rc::Mode::Emacs => {
+            let mut keys = default_emacs_keybindings();
+            bind_completion_keys(&mut keys);
+            Box::new(Emacs::new(keys))
+        }
+        rc::Mode::Vi => {
+            let mut insert_keys = default_vi_insert_keybindings();
+            bind_completion_keys(&mut insert_keys);
+            let normal_keys = default_vi_normal_keybindings();
+            Box::new(Vi::new(insert_keys, normal_keys))
+        }
+        rc::Mode::Helix => {
+            let mut insert_keys = default_vi_insert_keybindings();
+            bind_completion_keys(&mut insert_keys);
+            Box::new(Helix::new(insert_keys))
+        }
+    }
+}
+
 fn run_interactive() -> Result<(), Box<dyn Error>> {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         return Err("boreal-shell requires an interactive terminal".into());
     }
     let (ctx, mode) = load_runtime()?;
+    let rc_cfg = load_rc_config();
 
     if mode.is_mock() {
         println!("Boreal shell preview: standalone mock-only mode (/etc/boreal not present).");
@@ -338,15 +415,6 @@ fn run_interactive() -> Result<(), Box<dyn Error>> {
         );
     }
 
-    let mut keys = default_emacs_keybindings();
-    keys.add_binding(
-        KeyModifiers::NONE,
-        KeyCode::Tab,
-        ReedlineEvent::UntilFound(vec![
-            ReedlineEvent::Menu("completion".into()),
-            ReedlineEvent::MenuNext,
-        ]),
-    );
     let mut editor = Reedline::create()
         .with_completer(Box::new(completion::Completer::new(Arc::clone(&ctx))))
         .with_quick_completions(true)
@@ -357,9 +425,10 @@ fn run_interactive() -> Result<(), Box<dyn Error>> {
         .with_menu(ReedlineMenu::EngineCompleter(Box::new(menu::Menu::new())))
         .with_cursor_config(CursorConfig {
             emacs: Some(SetCursorStyle::SteadyBar),
-            ..CursorConfig::default()
+            vi_insert: Some(SetCursorStyle::SteadyBar),
+            vi_normal: Some(SetCursorStyle::SteadyBlock),
         })
-        .with_edit_mode(Box::new(Emacs::new(keys)));
+        .with_edit_mode(build_edit_mode(rc_cfg.edit_mode()));
     let prompt = DefaultPrompt::new(
         DefaultPromptSegment::Basic("boreal".into()),
         DefaultPromptSegment::Empty,
