@@ -50,7 +50,11 @@
           modules = [
             ./lab.nix
             {
-              boreal.updater.enable = true;
+              boreal.updater = {
+                enable = true;
+                repository = "https://github.com/example/my-lab.git";
+                branch = "main";
+              };
               boreal.vm = {
                 systemName = "lab";
                 hostName = "lab-vm";

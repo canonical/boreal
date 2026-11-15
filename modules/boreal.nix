@@ -19,6 +19,15 @@ let
   nonEmpty = text: builtins.match "^[[:space:]]*$" text == null;
   validName = name: builtins.match "^[a-z][a-z0-9_-]*$" name != null;
   validArgName = name: builtins.match "^[a-z][a-z0-9_]*$" name != null;
+  reservedUsers = [
+    "root"
+    "admin"
+    "temporal"
+    "postgres"
+    "boreal-broker"
+    "sshd"
+    "nobody"
+  ];
 
   normalizeGrant = grant: if builtins.isList grant then lib.unique grant else grant;
   grantUsers = grant: if builtins.isList grant then grant else [ ];
@@ -233,7 +242,21 @@ in
     temporalAddress = mkOption {
       type = types.str;
       default = "127.0.0.1:7233";
-      description = "Temporal frontend address configured on Boreal workers.";
+      description = "Temporal frontend address configured on Boreal workers inside their isolated netns.";
+    };
+
+    shellPackage = mkOption {
+      type = types.package;
+      default = pkgs.callPackage ../packages/shell.nix { };
+      defaultText = lib.literalExpression "pkgs.callPackage ../packages/shell.nix { }";
+      description = "Restricted Boreal shell package assigned to lab user accounts.";
+    };
+
+    brokerPackage = mkOption {
+      type = types.package;
+      default = pkgs.callPackage ../packages/broker.nix { };
+      defaultText = lib.literalExpression "pkgs.callPackage ../packages/broker.nix { }";
+      description = "Boreal policy broker and worker gRPC gate package.";
     };
 
     workerPackages = mkOption {
@@ -377,8 +400,8 @@ in
         message = "Worker argument default values must match their declared type, choices, and min/max bounds.";
       }
       {
-        assertion = lib.all (user: user != "root" && validName user) userNames;
-        message = "Every boreal.users account name must match ^[a-z][a-z0-9_-]*$ and must not be root.";
+        assertion = lib.all (user: !(builtins.elem user reservedUsers) && validName user) userNames;
+        message = "Every boreal.users account name must match ^[a-z][a-z0-9_-]*$ and must not be root or a reserved service account.";
       }
       {
         assertion = lib.all (entry: validName entry.worker) workerEntries;
@@ -398,10 +421,33 @@ in
       }
     ];
 
+    nix.gc.automatic = lib.mkForce false;
+    boot.kernel.sysctl = lib.mkIf (!config.boot.isContainer) {
+      "kernel.yama.ptrace_scope" = lib.mkDefault 2;
+    };
+
+    services.openssh = {
+      allowSFTP = lib.mkForce false;
+      settings = {
+        PasswordAuthentication = lib.mkDefault false;
+        KbdInteractiveAuthentication = lib.mkDefault false;
+        PermitRootLogin = lib.mkForce "no";
+        AllowTcpForwarding = lib.mkForce "no";
+        AllowStreamLocalForwarding = lib.mkForce "no";
+        AllowAgentForwarding = lib.mkForce "no";
+        X11Forwarding = lib.mkForce false;
+        PermitTunnel = lib.mkForce "no";
+        PermitUserRC = lib.mkForce false;
+        PermitUserEnvironment = lib.mkForce false;
+      };
+    };
+
     users.groups.boreal = { };
 
     users.users = lib.mapAttrs (_: userCfg: {
       isNormalUser = true;
+      homeMode = "0700";
+      shell = "${cfg.shellPackage}/bin/boreal-shell";
       extraGroups = [ "boreal" ];
       openssh.authorizedKeys.keys = userCfg.keys;
     }) cfg.users;
@@ -409,6 +455,7 @@ in
     systemd.tmpfiles.rules = [
       "d /etc/boreal 0750 root boreal -"
       "d /etc/boreal/users 0750 root boreal -"
+      "d /run/netns 0700 root root -"
     ]
     ++ map (user: "d /etc/boreal/users/${user} 0750 root boreal -") userNames;
 
@@ -438,8 +485,16 @@ in
         value = {
           description = "Boreal worker ${entry.unitKey}";
           wantedBy = [ "multi-user.target" ];
-          after = [ "network-online.target" ];
-          wants = [ "network-online.target" ];
+          after = [
+            "boreal-netns-worker-${entry.unitKey}.service"
+            "boreal-temporal-namespaces.service"
+            "boreal-broker.service"
+          ];
+          requires = [ "boreal-netns-worker-${entry.unitKey}.service" ];
+          wants = [
+            "boreal-temporal-namespaces.service"
+            "boreal-broker.service"
+          ];
           environment = {
             TEMPORAL_ADDRESS = cfg.temporalAddress;
             TEMPORAL_NAMESPACE = entry.user;
@@ -447,6 +502,7 @@ in
           };
           serviceConfig = {
             User = entry.user;
+            NetworkNamespacePath = "/run/netns/boreal-worker-${entry.unitKey}";
             ExecStart =
               if builtins.hasAttr entry.cfg.package cfg.workerPackages then
                 lib.getExe cfg.workerPackages.${entry.cfg.package}.package
@@ -454,6 +510,11 @@ in
                 "/bin/false";
             Restart = "on-failure";
             TimeoutStopSec = "infinity";
+            NoNewPrivileges = true;
+            PrivateTmp = true;
+            ProtectSystem = "strict";
+            ProtectProc = "invisible";
+            ProcSubset = "pid";
           };
         };
       }) workerEntries

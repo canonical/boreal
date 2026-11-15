@@ -1,0 +1,102 @@
+{
+  config,
+  lib,
+  pkgs,
+  ...
+}:
+
+let
+  borealCfg = config.boreal;
+  cfg = borealCfg.admin;
+  yamlFormat = pkgs.formats.yaml { };
+
+  workerUnits = lib.concatLists (
+    lib.mapAttrsToList (
+      user: userCfg:
+      map (worker: "boreal-worker-${user}-${worker}.service") (builtins.attrNames userCfg.workers)
+    ) borealCfg.users
+  );
+
+  allowedServices = [ "temporal.service" ] ++ workerUnits;
+
+  adminPolicy = {
+    services = allowedServices;
+    updaterEnabled = borealCfg.updater.enable;
+    allowPoweroff = cfg.allowPoweroff;
+    ctlBin = "${cfg.package}/bin/boreal-admin-ctl";
+  }
+  // lib.optionalAttrs borealCfg.updater.enable {
+    updaterBin = lib.getExe borealCfg.updater.package;
+  };
+in
+{
+  options.boreal.admin = {
+    enable = lib.mkOption {
+      type = lib.types.bool;
+      default = borealCfg.enable;
+      defaultText = lib.literalExpression "config.boreal.enable";
+      description = "Enable the restricted Boreal admin account and root helper.";
+    };
+
+    package = lib.mkOption {
+      type = lib.types.package;
+      default = pkgs.callPackage ../packages/admin.nix { };
+      defaultText = lib.literalExpression "pkgs.callPackage ../packages/admin.nix { }";
+      description = "Package providing boreal-admin and boreal-admin-ctl.";
+    };
+
+    keys = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ ];
+      description = "Public SSH keys authorized for the restricted admin account.";
+    };
+
+    allowPoweroff = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = "Allow boreal-admin to power off the system (intended for disposable VMs).";
+    };
+  };
+
+  config = lib.mkIf (borealCfg.enable && cfg.enable) {
+    users.groups.boreal-admin = { };
+
+    users.users = {
+      root.hashedPassword = lib.mkDefault "!";
+      admin = {
+        isNormalUser = true;
+        homeMode = "0700";
+        shell = "${cfg.package}/bin/boreal-admin";
+        extraGroups = [ "boreal-admin" ];
+        openssh.authorizedKeys.keys = cfg.keys;
+      };
+    };
+
+    systemd.tmpfiles.rules = [
+      "d /etc/boreal-admin 0750 root boreal-admin -"
+    ];
+
+    environment.etc."boreal-admin/policy.yaml" = {
+      source = yamlFormat.generate "boreal-admin-policy.yaml" adminPolicy;
+      user = "root";
+      group = "boreal-admin";
+      mode = "0440";
+    };
+
+    security.sudo = {
+      enable = true;
+      wheelNeedsPassword = lib.mkForce true;
+      extraRules = [
+        {
+          users = [ "admin" ];
+          commands = [
+            {
+              command = "${cfg.package}/bin/boreal-admin-ctl";
+              options = [ "NOPASSWD" ];
+            }
+          ];
+        }
+      ];
+    };
+  };
+}

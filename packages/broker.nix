@@ -9,13 +9,18 @@ let
   fs = lib.fileset;
   src = fs.toSource {
     root = ../.;
-    fileset = fs.difference (fs.unions [
-      ../common
-      ../broker
-    ]) (fs.unions [
-      (fs.maybeMissing ../common/target)
-      (fs.maybeMissing ../broker/target)
-    ]);
+    fileset =
+      fs.difference
+        (fs.unions [
+          ../common
+          ../broker
+        ])
+        (
+          fs.unions [
+            (fs.maybeMissing ../common/target)
+            (fs.maybeMissing ../broker/target)
+          ]
+        );
   };
 in
 rustPlatform.buildRustPackage {

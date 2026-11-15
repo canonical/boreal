@@ -4,13 +4,18 @@ let
   fs = lib.fileset;
   src = fs.toSource {
     root = ../.;
-    fileset = fs.difference (fs.unions [
-      ../common
-      ../admin
-    ]) (fs.unions [
-      (fs.maybeMissing ../common/target)
-      (fs.maybeMissing ../admin/target)
-    ]);
+    fileset =
+      fs.difference
+        (fs.unions [
+          ../common
+          ../admin
+        ])
+        (
+          fs.unions [
+            (fs.maybeMissing ../common/target)
+            (fs.maybeMissing ../admin/target)
+          ]
+        );
   };
 in
 rustPlatform.buildRustPackage {

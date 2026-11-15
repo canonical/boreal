@@ -2,19 +2,12 @@
   config,
   lib,
   modulesPath,
-  pkgs,
   ...
 }:
 
 let
   vmCfg = config.boreal.vm;
   inherit (lib) mkOption types;
-
-  userNames = builtins.attrNames config.boreal.users;
-  namespaces = if userNames == [ ] then [ "default" ] else userNames;
-  namespaceFlags = lib.concatMapStringsSep " " (
-    ns: "--namespace ${lib.escapeShellArg ns}"
-  ) namespaces;
 
   workerUnits = lib.concatLists (
     lib.mapAttrsToList (
@@ -86,72 +79,36 @@ in
     networking.firewall.enable = lib.mkDefault true;
     system.name = lib.mkDefault vmCfg.systemName;
     system.stateVersion = lib.mkDefault "26.05";
-    system.switch.enable = false;
+    system.switch.enable = lib.mkDefault false;
 
-    users.users = {
-      root.initialHashedPassword = "!";
-      admin = {
-        isNormalUser = true;
-        extraGroups = [ "wheel" ];
-        openssh.authorizedKeys.keys = lib.unique (vmCfg.adminKeys ++ vmCfg.devAuthorizedKeys);
-      };
-    }
-    // lib.mapAttrs (_: _: {
+    boreal.admin = {
+      enable = lib.mkDefault true;
+      allowPoweroff = lib.mkDefault true;
+      keys = lib.unique (vmCfg.adminKeys ++ vmCfg.devAuthorizedKeys);
+    };
+
+    users.users = lib.mapAttrs (_: _: {
       openssh.authorizedKeys.keys = vmCfg.devAuthorizedKeys;
     }) config.boreal.users;
-
-    security.sudo = {
-      enable = true;
-      wheelNeedsPassword = false;
-    };
 
     services.openssh = {
       enable = true;
       openFirewall = true;
-      settings = {
-        PasswordAuthentication = false;
-        KbdInteractiveAuthentication = false;
-        AuthenticationMethods = "publickey";
-        PermitRootLogin = "no";
-        AllowTcpForwarding = "no";
-        X11Forwarding = false;
-      };
+      settings.AuthenticationMethods = "publickey";
     };
 
     nix.settings.experimental-features = [
       "nix-command"
       "flakes"
     ];
-    environment.systemPackages = [ pkgs.temporal-cli ];
 
-    systemd.services =
-      (lib.genAttrs workerUnits (_: {
-        after = [ "temporal-dev.service" ];
-        wants = [ "temporal-dev.service" ];
-        unitConfig = {
-          StartLimitIntervalSec = 300;
-          StartLimitBurst = 12;
-        };
-        serviceConfig.RestartSec = 5;
-      }))
-      // {
-        temporal-dev = {
-          description = "Local-only Temporal development server";
-          wantedBy = [ "multi-user.target" ];
-          unitConfig = {
-            StartLimitIntervalSec = 300;
-            StartLimitBurst = 6;
-          };
-          serviceConfig = {
-            DynamicUser = true;
-            StateDirectory = "temporal-dev";
-            StateDirectoryMode = "0700";
-            ExecStart = "${lib.getExe pkgs.temporal-cli} server start-dev --headless --ip 127.0.0.1 --port 7233 ${namespaceFlags} --db-filename /var/lib/temporal-dev/temporal.sqlite";
-            Restart = "on-failure";
-            RestartSec = 5;
-          };
-        };
+    systemd.services = lib.genAttrs workerUnits (_: {
+      unitConfig = {
+        StartLimitIntervalSec = 300;
+        StartLimitBurst = 12;
       };
+      serviceConfig.RestartSec = 5;
+    });
 
     virtualisation = {
       diskImage = vmCfg.diskImage;
