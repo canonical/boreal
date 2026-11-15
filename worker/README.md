@@ -11,6 +11,10 @@ downstream Boreal Rust workers:
   handlers before connecting, builds a `Worker` on the current Tokio runtime,
   and continues driving `Worker::run` after shutdown so in-flight work can drain
   within `DEFAULT_SHUTDOWN_GRACE` (30 seconds).
+- `read_secret(name)` / `read_secret_bytes(name)` — loads a user-managed secret
+  from `~/.config/boreal/secrets/<name>` after verifying `0700` directory and
+  `0600` regular-file ownership. Never place returned secret values in Temporal
+  inputs, results, errors, heartbeats, or logs.
 - Re-exports `temporalio_client`, `temporalio_common`, `temporalio_macros`,
   `temporalio_sdk`, and `temporalio_workflow`.
 
