@@ -126,8 +126,6 @@ let
       updater = {
         enable = true;
         package = updaterStub;
-        repository = "https://github.com/example/demo-lab.git";
-        branch = "downstreams/demo-lab";
       };
     };
   };
@@ -334,20 +332,29 @@ let
       temporalAddress = "   ";
     };
   };
-  missingUpdaterRepo = mkHost {
+  removedUpdaterRepo = mkHost {
+    boreal = {
+      enable = true;
+      updater.repository = "https://github.com/example/lab.git";
+    };
+  };
+  removedUpdaterBranch = mkHost {
+    boreal = {
+      enable = true;
+      updater.branch = "main";
+    };
+  };
+  removedUpdaterConfigName = mkHost {
+    boreal = {
+      enable = true;
+      updater.configurationName = "lab-1";
+    };
+  };
+  invalidUpdaterHost = mkHost {
+    networking.hostName = lib.mkForce "bad_host";
     boreal = {
       enable = true;
       updater.enable = true;
-    };
-  };
-  invalidUpdaterBranch = mkHost {
-    boreal = {
-      enable = true;
-      updater = {
-        enable = true;
-        repository = "https://github.com/example/lab.git";
-        branch = "../bad";
-      };
     };
   };
   removedPocOption = mkHost { boreal.poc.enable = true; };
@@ -477,6 +484,20 @@ let
     }
   );
 
+  expectedUpdaterPolicy = pkgs.writeText "expected-updater.json" (
+    builtins.toJSON {
+      projectDir = "/etc/nixos";
+      host = "boreal-container";
+      allowSwitch = configured.system.switch.enable;
+      brokerSocket = "/run/boreal/updater.sock";
+      workerUnits = [
+        "boreal-worker-alice-eval.service"
+        "boreal-worker-alice-train.service"
+        "boreal-worker-bob-eval.service"
+      ];
+    }
+  );
+
   viHost = mkHost {
     boreal = {
       enable = true;
@@ -579,8 +600,10 @@ assert assertionFailed adminCollisionUser "reserved";
 assert assertionFailed invalidWorkerName "worker name must match";
 assert assertionFailed collidingUnitKey "must be unique";
 assert assertionFailed emptyTemporalAddress "temporalAddress";
-assert assertionFailed missingUpdaterRepo "boreal.updater.repository";
-assert assertionFailed invalidUpdaterBranch "boreal.updater.branch";
+assert assertionFailed removedUpdaterRepo "boreal.updater.repository";
+assert assertionFailed removedUpdaterBranch "boreal.updater.branch";
+assert assertionFailed removedUpdaterConfigName "boreal.updater.configurationName";
+assert assertionFailed invalidUpdaterHost "networking.hostName";
 assert assertionFailed removedPocOption "boreal.poc";
 assert vm.boreal.enable;
 assert vm.boreal.updater.enable;
@@ -650,6 +673,7 @@ pkgs.runCommand "boreal-module-tests"
     remarshal --if yaml --of json ${workersEtc.source} > workers.json
     remarshal --if yaml --of json ${alicePermsEtc.source} > alice.json
     remarshal --if yaml --of json ${bobPermsEtc.source} > bob.json
+    remarshal --if yaml --of json ${updaterEtc.source} > updater.json
     remarshal --if yaml --of json ${aliceRcSource} > alice-rc.json
     remarshal --if yaml --of json ${bobRcSource} > bob-rc.json
     python3 - <<'PY'
@@ -659,6 +683,7 @@ pkgs.runCommand "boreal-module-tests"
         ("workers.json", "${expectedWorkersCatalog}"),
         ("alice.json", "${expectedAlicePolicy}"),
         ("bob.json", "${expectedBobPolicy}"),
+        ("updater.json", "${expectedUpdaterPolicy}"),
     ]:
         actual = json.loads(pathlib.Path(actual_path).read_text())
         expected = json.loads(pathlib.Path(expected_path).read_text())
