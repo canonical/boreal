@@ -367,7 +367,7 @@ def test_ssh_shell_permissions_secrets_and_recovery() -> None:
     # Interactive SSH PTY as alice
     alice = SshPtySession("alice")
     try:
-        banner = alice.wait_for(b"Boreal lab shell (alice)", b"alice@")
+        banner = alice.wait_for(b"Boreal lab shell (alice)", "alice on 󰇅 ".encode())
         assert b"mock-only" not in banner
 
         alice.send(b"permissions ")
@@ -433,14 +433,17 @@ def test_ssh_shell_permissions_secrets_and_recovery() -> None:
             raise AssertionError("rec-wf-1 did not recover after worker restart")
 
         alice.send(b"start count slow-count-1 'Hold' 120\r")
-        alice.wait_for(b"started CountWorkflow 'slow-count-1' on alice/count", b"1 running")
+        alice.wait_for(
+            b"started CountWorkflow 'slow-count-1' on alice/count",
+            "[ 1]".encode(),
+        )
     finally:
         alice.close()
 
     # Interactive SSH PTY as bob: delegated start/read/cancel + denied start/cancel
     bob = SshPtySession("bob")
     try:
-        bob.wait_for(b"Boreal lab shell (bob)", b"bob@")
+        bob.wait_for(b"Boreal lab shell (bob)", "bob on 󰇅 ".encode())
         bob.send(b"permissions alice\r")
         bob.wait_for(b"greet (package lab-worker): read=allowed, write=allowed")
 
@@ -473,7 +476,7 @@ def test_ssh_shell_permissions_secrets_and_recovery() -> None:
     # Interactive SSH PTY as carol: list filtering & denied read on alice/count and bob
     carol = SshPtySession("carol")
     try:
-        carol.wait_for(b"Boreal lab shell (carol)", b"carol@")
+        carol.wait_for(b"Boreal lab shell (carol)", "carol on 󰇅 ".encode())
         for _ in range(20):
             carol.send(b"list --owner alice\r")
             listing = carol.wait_for(b"list --owner alice")

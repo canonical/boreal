@@ -94,14 +94,15 @@ def main():
         err_arrow = "\x1b[1;31m❯\x1b[0m ".encode()
         norm_arrow = "\x1b[1;36m❮\x1b[0m ".encode()
         sel_arrow = "\x1b[1;35m❮\x1b[0m ".encode()
+        drain_badge = "\x1b[31m󰞴\x1b[0m ".encode()
 
         try:
             wait_for(
                 b"mock-only",
                 b"\x1b[22;0t\x1b]0;Boreal alice@mock\x07",
-                b"\x1b[1;36malice\x1b[0m",
-                b"\x1b[1;35mmock\x1b[0m",
-                b"\x1b[1;32m1 running\x1b[0m",
+                "\x1b[36malice\x1b[0m on \x1b[35m󰇅 mock\x1b[0m".encode(),
+                "\x1b[90m[\x1b[0m\x1b[92m 1\x1b[0m\x1b[90m]\x1b[0m".encode(),
+                " is \u2744\ufe0f \x1b[36mv0.1.0\x1b[0m".encode(),
                 ok_arrow,
                 b"\x1b[6 q",
             )
@@ -171,12 +172,12 @@ def main():
             wait_for(b"[mock] alice/greet (DemoWorkflow)", ok_arrow)
 
             # Even shell metacharacters passed as an argument have no side effects;
-            # starting a workflow updates the prompt status bar to '2 running'.
+            # starting a workflow updates the prompt status bracket to '[ 2]'.
             line = f"start greet test '$(touch {marker})' 5\r".encode()
             os.write(master, line)
             wait_for(
                 b"[mock] started DemoWorkflow 'test'",
-                b"\x1b[1;32m2 running\x1b[0m",
+                "\x1b[90m[\x1b[0m\x1b[92m 2\x1b[0m\x1b[90m]\x1b[0m".encode(),
                 ok_arrow,
             )
             assert not marker.exists(), "a shell metacharacter was executed"
@@ -192,18 +193,25 @@ def main():
             os.write(master, b"y\r")
             wait_for(b"[mock] cancellation requested for DemoWorkflow 'run-1'", ok_arrow)
 
-            # Cancelling alice's sample-1 with >=1s delay drops count back to '1 running'
-            # and renders the Starship 'took 1.'s duration segment.
+            # Cancelling both of alice's workflows drops the count to 0 and omits '[...]'.
             os.write(master, b"cancel sample-1\r")
             wait_for(b"Cancel DemoWorkflow 'sample-1'", b"[y/N]: ")
-            time.sleep(1.05)
             os.write(master, b"y\r")
             wait_for(
                 b"[mock] cancellation requested for DemoWorkflow 'sample-1'",
-                b"\x1b[1;32m1 running\x1b[0m",
-                b"took 1.",
+                "\x1b[90m[\x1b[0m\x1b[92m 1\x1b[0m\x1b[90m]\x1b[0m".encode(),
                 ok_arrow,
             )
+
+            os.write(master, b"cancel test\r")
+            wait_for(b"Cancel DemoWorkflow 'test'", b"[y/N]: ")
+            os.write(master, b"y\r")
+            zero_out = wait_for(
+                b"[mock] cancellation requested for DemoWorkflow 'test'",
+                "\x1b[35m󰇅 mock\x1b[0m is \u2744\ufe0f \x1b[36mv0.1.0\x1b[0m".encode(),
+                ok_arrow,
+            )
+            assert "".encode() not in zero_out.split(b"cancellation requested")[-1]
 
             # Interactive secret entry disables echo and never prints secret contents.
             os.write(master, b"secrets set tty_item\r")
@@ -378,6 +386,9 @@ def main():
         etc_dir.chmod(0o700)
         (etc_dir / "users").chmod(0o700)
         (etc_dir / "users" / "alice").chmod(0o700)
+        version_file = etc_dir / "version"
+        version_file.write_text("0.2.0\n", encoding="utf-8")
+        version_file.chmod(0o400)
         workers_yaml = etc_dir / "workers.yaml"
         workers_yaml.write_text(
             "lab-worker:\n  workflowType: DemoWorkflow\n  args:\n  - name: name\n    type: string\n",
@@ -402,24 +413,24 @@ def main():
                 "BOREAL_TEST_BROKER_SOCKET": str(sock_path),
             }
 
-            # 1) Offline broker socket degrades silently to alice@demo-lab without hanging.
+            # 1) Offline broker socket degrades silently to alice on 󰇅 demo-lab is ❄️ v0.2.0.
             orig_env = env
             env = live_env
             def verify_offline_broker(_fd, expect):
                 out = expect(
                     b"Boreal lab shell (alice)",
                     b"\x1b[22;0t\x1b]0;Boreal alice@demo-lab\x07",
-                    b"\x1b[1;36malice\x1b[0m",
-                    b"\x1b[1;34mdemo-lab\x1b[0m",
+                    "\x1b[36malice\x1b[0m on \x1b[35m󰇅 demo-lab\x1b[0m is \u2744\ufe0f \x1b[36mv0.2.0\x1b[0m".encode(),
                     ok_arrow,
                 )
-                assert b"running" not in out
-                assert b"draining" not in out
+                assert "".encode() not in out
+                assert "".encode() not in out
+                assert "󰞴".encode() not in out
                 assert b"connect broker" not in out
 
             run_rc_pty_session("edit_mode: emacs\n", verify_offline_broker)
 
-            # 2) Mock Unix-socket broker serves Request::Summary (tag 9) -> 3 running + draining.
+            # 2) Mock Unix-socket broker serves Request::Summary (tag 9) -> [ 1  2] + line-2 󰞴.
             stop_server = threading.Event()
             srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             srv.bind(str(sock_path))
@@ -440,8 +451,8 @@ def main():
                             (plen,) = struct.unpack(">I", hdr)
                             payload = conn.recv(plen)
                             if payload == b"\x09":
-                                # Response::Summary(PromptSummary { running_workflows: Some(3), draining: true })
-                                body = b"\x0a\x01\x00\x00\x00\x03\x01"
+                                # Response::Summary(PromptSummary { workflows: Some({ paused: 1, running: 2 }), draining: true })
+                                body = b"\x0a\x01\x00\x00\x00\x01\x00\x00\x00\x02\x01"
                                 conn.sendall(struct.pack(">I", len(body)) + body)
 
             thread = threading.Thread(target=serve_summary, daemon=True)
@@ -449,11 +460,10 @@ def main():
             try:
                 def verify_live_summary(_fd, expect):
                     expect(
-                        b"\x1b[1;36malice\x1b[0m",
-                        b"\x1b[1;34mdemo-lab\x1b[0m",
-                        b"\x1b[1;32m3 running\x1b[0m",
-                        b"\x1b[1;33mdraining\x1b[0m",
-                        ok_arrow,
+                        "\x1b[36malice\x1b[0m on \x1b[35m󰇅 demo-lab\x1b[0m".encode(),
+                        "\x1b[90m[\x1b[0m\x1b[94m 1\x1b[0m \x1b[92m 2\x1b[0m\x1b[90m]\x1b[0m".encode(),
+                        " is \u2744\ufe0f \x1b[36mv0.2.0\x1b[0m".encode(),
+                        b"\r\n" + drain_badge + b"\x1b[39m" + ok_arrow,
                     )
 
                 run_rc_pty_session("edit_mode: emacs\n", verify_live_summary)
@@ -463,6 +473,7 @@ def main():
                 thread.join(timeout=2)
                 env = orig_env
         finally:
+            version_file.chmod(0o600)
             workers_yaml.chmod(0o600)
             perms_yaml.chmod(0o600)
 
