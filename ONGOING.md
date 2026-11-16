@@ -32,7 +32,10 @@
     per-worker HTTP/2 gRPC gate restricting RPC methods, `namespace`, and
     `task_queue`.
 - **Data-driven `boreal-shell` and user secrets (`shell/` & `worker/`)**:
-  - `boreal-shell` dynamically builds `clap`/`reedline` commands and
+  - `boreal-shell` renders a two-line Starship-style status prompt
+    (`<user>@<host>` or `<user>@mock`, caller-scoped running workflow count,
+    update drain badge, slow command duration, and status/modal `❯`/`❮`
+    indicators), dynamically builds `clap`/`reedline` commands and
     permission-filtered completions from `/etc/boreal/` (falling back to a local
     mock preview only outside SSH when `/etc/boreal` is absent), requires `[y/N]`
     confirmation before `cancel`, and rejects unsupported SSH commands, SFTP,

@@ -34,8 +34,10 @@ deployment.
   `result`, `list`, and `permissions`, and verifies registered `workflowType`
   and pinned `run_id` on existing executions.
 - **Restricted SSH shell & user secrets**: OpenSSH disables SFTP, TCP/Unix/agent
-  forwarding, tunnels, and `~/.ssh/rc`. `boreal-shell` drives commands and
-  permission-filtered completions from `/etc/boreal/`, requires `[y/N]`
+  forwarding, tunnels, and `~/.ssh/rc`. `boreal-shell` renders a two-line
+  Starship-style status prompt (`<user>@<host>`, active workflow count, update
+  drain badge, command duration, and modal `❯`/`❮` indicators), drives commands
+  and permission-filtered completions from `/etc/boreal/`, requires `[y/N]`
   confirmation before `cancel`, rejects unsupported non-interactive SSH
   commands, and stores secrets under `~/.config/boreal/secrets` (`0700`/`0600`)
   via hidden TTY prompt or `ssh <user>@<host> "secrets set <name>" < file`.
