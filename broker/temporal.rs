@@ -2,16 +2,16 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use temporalio_common::protos::temporal::api::{
     common::v1::{Payload, Payloads, WorkflowExecution, WorkflowType},
     enums::v1::{HistoryEventFilterType, TaskQueueKind, WorkflowExecutionStatus},
     failure::v1::Failure,
-    history::v1::history_event::Attributes as EventAttrs,
+    history::v1::{HistoryEvent, history_event::Attributes as EventAttrs},
     schedule::v1::SchedulePatch,
     taskqueue::v1::TaskQueue,
-    workflow::v1::WorkflowExecutionInfo,
+    workflow::v1::{PendingActivityInfo, WorkflowExecutionInfo},
     workflowservice::v1::{
         DescribeScheduleRequest, DescribeWorkflowExecutionRequest,
         GetWorkflowExecutionHistoryRequest, ListNamespacesRequest, ListSchedulesRequest,
@@ -25,7 +25,7 @@ use tonic::{
 };
 use uuid::Uuid;
 
-use boreal_common::wire::WorkflowCounts;
+use boreal_common::wire::{self, StepState, WorkflowCounts, WorkflowEvent, WorkflowStep};
 
 use crate::ledger::TrackedKey;
 use crate::pg::{self, ActiveDbExecution};
@@ -139,6 +139,28 @@ pub struct SchedulePauseOutcome {
     pub discovered_runs: Vec<TrackedKey>,
 }
 
+#[derive(Clone, Debug)]
+pub struct RawStep {
+    pub step: WorkflowStep,
+    pub child_queue: Option<(String, String)>,
+}
+
+#[derive(Clone, Debug)]
+pub struct RawEvent {
+    pub event: WorkflowEvent,
+    pub child_queue: Option<(String, String)>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct RawInspection {
+    pub elapsed: String,
+    pub input: String,
+    pub task_warning: String,
+    pub steps: Vec<RawStep>,
+    pub events: Vec<RawEvent>,
+    pub outcome: Option<CloseOutcome>,
+}
+
 pub trait Backend: Send + Sync {
     fn start_workflow<'a>(
         &'a self,
@@ -164,6 +186,13 @@ pub trait Backend: Send + Sync {
         workflow_id: &'a str,
         run_id: &'a str,
     ) -> BoxFuture<'a, CloseOutcome>;
+
+    fn inspect_workflow<'a>(
+        &'a self,
+        namespace: &'a str,
+        workflow_id: &'a str,
+        run_id: &'a str,
+    ) -> BoxFuture<'a, RawInspection>;
 
     fn cancel_workflow<'a>(
         &'a self,
@@ -262,11 +291,53 @@ impl LiveBackend {
 
 fn format_ts(ts: Option<(i64, i32)>) -> String {
     match ts {
-        Some((seconds, nanos)) if seconds > 0 => {
-            format!("{seconds}.{:03}s", (nanos.unsigned_abs()) / 1_000_000)
-        }
+        Some((seconds, nanos)) if seconds > 0 => wire::format_utc_timestamp(seconds, nanos),
         _ => "-".into(),
     }
+}
+
+fn ts_to_ms(ts: Option<(i64, i32)>) -> Option<u64> {
+    ts.filter(|(s, _)| *s > 0)
+        .map(|(s, n)| (s as u64) * 1_000 + u64::from(n.unsigned_abs() / 1_000_000))
+}
+
+fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
+}
+
+fn span_label(start_ms: Option<u64>, end_ms: Option<u64>) -> String {
+    match (start_ms, end_ms) {
+        (Some(s), Some(e)) => wire::format_duration_ms(e.saturating_sub(s)),
+        _ => String::new(),
+    }
+}
+
+fn truncate_chars(s: &str, max: usize) -> String {
+    let mut out = String::new();
+    for (idx, ch) in s.chars().enumerate() {
+        if idx >= max {
+            out.push('…');
+            break;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+fn one_line_preview(s: &str, max: usize) -> String {
+    let flat: String = s
+        .chars()
+        .map(|c| {
+            if matches!(c, '\n' | '\r' | '\t') {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect();
+    truncate_chars(flat.trim(), max)
 }
 
 fn info_to_raw(
@@ -514,6 +585,69 @@ impl Backend for LiveBackend {
                 }
                 _ => Ok(CloseOutcome::Running),
             }
+        })
+    }
+
+    fn inspect_workflow<'a>(
+        &'a self,
+        namespace: &'a str,
+        workflow_id: &'a str,
+        run_id: &'a str,
+    ) -> BoxFuture<'a, RawInspection> {
+        Box::pin(async move {
+            let mut client = self.client().await?;
+            let desc = client
+                .describe_workflow_execution(DescribeWorkflowExecutionRequest {
+                    namespace: namespace.to_owned(),
+                    execution: Some(WorkflowExecution {
+                        workflow_id: workflow_id.to_owned(),
+                        run_id: run_id.to_owned(),
+                    }),
+                })
+                .await
+                .map_err(BackendError::from_status)?
+                .into_inner();
+            let info = desc
+                .workflow_execution_info
+                .ok_or_else(|| BackendError::Internal("missing workflow_execution_info".into()))?;
+
+            let mut history_events = Vec::new();
+            let mut token = Vec::new();
+            for _ in 0..10 {
+                let resp = client
+                    .get_workflow_execution_history(GetWorkflowExecutionHistoryRequest {
+                        namespace: namespace.to_owned(),
+                        execution: Some(WorkflowExecution {
+                            workflow_id: workflow_id.to_owned(),
+                            run_id: run_id.to_owned(),
+                        }),
+                        maximum_page_size: 200,
+                        next_page_token: token,
+                        wait_new_event: false,
+                        history_event_filter_type: HistoryEventFilterType::AllEvent as i32,
+                        skip_archival: true,
+                    })
+                    .await
+                    .map_err(BackendError::from_status)?
+                    .into_inner();
+                if let Some(h) = resp.history {
+                    history_events.extend(h.events);
+                }
+                if resp.next_page_token.is_empty() {
+                    break;
+                }
+                token = resp.next_page_token;
+            }
+
+            let task_attempt = desc.pending_workflow_task.map_or(0, |pwt| pwt.attempt);
+            Ok(build_inspection(
+                namespace,
+                &info,
+                task_attempt,
+                desc.pending_activities,
+                history_events,
+                now_unix_ms(),
+            ))
         })
     }
 
@@ -927,5 +1061,468 @@ fn collect_schedule_runs(
                 },
             });
         }
+    }
+}
+
+struct StepSlot {
+    kind: &'static str,
+    name: String,
+    activity_id: String,
+    state: StepState,
+    start_ms: Option<u64>,
+    duration: String,
+    detail: String,
+    child_queue: Option<(String, String)>,
+}
+
+fn build_inspection(
+    namespace: &str,
+    info: &WorkflowExecutionInfo,
+    task_attempt: i32,
+    pending_activities: Vec<PendingActivityInfo>,
+    history_events: Vec<HistoryEvent>,
+    now_ms: u64,
+) -> RawInspection {
+    let wf_start_ms = ts_to_ms(info.start_time.as_ref().map(|t| (t.seconds, t.nanos)));
+    let wf_close_ms = ts_to_ms(info.close_time.as_ref().map(|t| (t.seconds, t.nanos)));
+    let elapsed = match (wf_start_ms, wf_close_ms) {
+        (Some(s), Some(e)) => wire::format_duration_ms(e.saturating_sub(s)),
+        (Some(s), None) => wire::format_duration_ms(now_ms.saturating_sub(s)),
+        _ => "-".into(),
+    };
+    let task_warning = if task_attempt > 1 {
+        format!("workflow task retrying (attempt {task_attempt})")
+    } else {
+        String::new()
+    };
+
+    let mut input = String::new();
+    let mut outcome = None;
+    let mut slots: Vec<StepSlot> = Vec::new();
+    let mut by_event: HashMap<i64, usize> = HashMap::new();
+    let mut by_timer_id: HashMap<String, usize> = HashMap::new();
+    let mut events: Vec<RawEvent> = Vec::new();
+
+    for ev in history_events {
+        let ev_id = ev.event_id.max(0) as u64;
+        let ev_ts = ev.event_time.as_ref().map(|t| (t.seconds, t.nanos));
+        let ev_ms = ts_to_ms(ev_ts);
+        let ts_str = ev_ts.map_or_else(
+            || "--:--:--.---".into(),
+            |(s, n)| wire::format_utc_hms(s, n),
+        );
+        let Some(attrs) = ev.attributes else {
+            continue;
+        };
+
+        let mut push_ev = |kind: &str, summary: String, child_queue: Option<(String, String)>| {
+            events.push(RawEvent {
+                event: WorkflowEvent {
+                    id: ev_id,
+                    timestamp: ts_str.clone(),
+                    kind: kind.to_owned(),
+                    summary,
+                },
+                child_queue,
+            });
+        };
+
+        match attrs {
+            EventAttrs::WorkflowExecutionStartedEventAttributes(a) => {
+                input = truncate_chars(&decode_payloads(a.input), 2048);
+                let wf_name = a.workflow_type.map(|w| w.name).unwrap_or_default();
+                let tq_name = a.task_queue.map(|q| q.name).unwrap_or_default();
+                push_ev(
+                    "WorkflowStarted",
+                    one_line_preview(&format!("{wf_name} on {tq_name}"), 160),
+                    None,
+                );
+            }
+            EventAttrs::TimerStartedEventAttributes(a) => {
+                let target_ms = a.start_to_fire_timeout.map_or(0, |d| {
+                    (d.seconds.max(0) as u64) * 1_000
+                        + u64::from(d.nanos.unsigned_abs() / 1_000_000)
+                });
+                let target_label = wire::format_duration_ms(target_ms);
+                let idx = slots.len();
+                slots.push(StepSlot {
+                    kind: "timer",
+                    name: format!("#{} ({target_label})", a.timer_id),
+                    activity_id: String::new(),
+                    state: StepState::Running,
+                    start_ms: ev_ms,
+                    duration: String::new(),
+                    detail: String::new(),
+                    child_queue: None,
+                });
+                by_event.insert(ev.event_id, idx);
+                if !a.timer_id.is_empty() {
+                    by_timer_id.insert(a.timer_id.clone(), idx);
+                }
+                push_ev(
+                    "TimerStarted",
+                    format!("timer #{} ({target_label})", a.timer_id),
+                    None,
+                );
+            }
+            EventAttrs::TimerFiredEventAttributes(a) => {
+                let slot_idx = by_event
+                    .get(&a.started_event_id)
+                    .or_else(|| by_timer_id.get(&a.timer_id))
+                    .copied();
+                if let Some(idx) = slot_idx {
+                    slots[idx].state = StepState::Completed;
+                    slots[idx].duration = span_label(slots[idx].start_ms, ev_ms);
+                }
+                push_ev("TimerFired", format!("timer #{}", a.timer_id), None);
+            }
+            EventAttrs::TimerCanceledEventAttributes(a) => {
+                let slot_idx = by_event
+                    .get(&a.started_event_id)
+                    .or_else(|| by_timer_id.get(&a.timer_id))
+                    .copied();
+                if let Some(idx) = slot_idx {
+                    slots[idx].state = StepState::Cancelled;
+                    slots[idx].duration = span_label(slots[idx].start_ms, ev_ms);
+                }
+                push_ev("TimerCancelled", format!("timer #{}", a.timer_id), None);
+            }
+            EventAttrs::ActivityTaskScheduledEventAttributes(a) => {
+                let act_name = a
+                    .activity_type
+                    .map(|t| t.name)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| a.activity_id.clone());
+                let idx = slots.len();
+                slots.push(StepSlot {
+                    kind: "activity",
+                    name: act_name.clone(),
+                    activity_id: a.activity_id,
+                    state: StepState::Pending,
+                    start_ms: ev_ms,
+                    duration: String::new(),
+                    detail: String::new(),
+                    child_queue: None,
+                });
+                by_event.insert(ev.event_id, idx);
+                push_ev("ActivityScheduled", act_name, None);
+            }
+            EventAttrs::ActivityTaskStartedEventAttributes(a) => {
+                let mut label = format!("attempt {}", a.attempt);
+                if let Some(&idx) = by_event.get(&a.scheduled_event_id) {
+                    slots[idx].state = StepState::Running;
+                    slots[idx].start_ms = ev_ms.or(slots[idx].start_ms);
+                    if a.attempt > 1 {
+                        slots[idx].detail = format!("attempt {}", a.attempt);
+                    }
+                    label = format!("{} (attempt {})", slots[idx].name, a.attempt);
+                }
+                push_ev("ActivityStarted", label, None);
+            }
+            EventAttrs::ActivityTaskCompletedEventAttributes(a) => {
+                let res_preview = one_line_preview(&decode_payloads(a.result), 120);
+                let mut label = res_preview;
+                if let Some(&idx) = by_event.get(&a.scheduled_event_id) {
+                    slots[idx].state = StepState::Completed;
+                    slots[idx].duration = span_label(slots[idx].start_ms, ev_ms);
+                    slots[idx].detail.clear();
+                    label = if label.is_empty() {
+                        slots[idx].name.clone()
+                    } else {
+                        format!("{} -> {label}", slots[idx].name)
+                    };
+                }
+                push_ev("ActivityCompleted", label, None);
+            }
+            EventAttrs::ActivityTaskFailedEventAttributes(a) => {
+                let err = one_line_preview(&format_failure_chain(a.failure), 160);
+                let mut label = err.clone();
+                if let Some(&idx) = by_event.get(&a.scheduled_event_id) {
+                    slots[idx].state = StepState::Failed;
+                    slots[idx].duration = span_label(slots[idx].start_ms, ev_ms);
+                    slots[idx].detail = err;
+                    label = format!("{}: {label}", slots[idx].name);
+                }
+                push_ev("ActivityFailed", label, None);
+            }
+            EventAttrs::ActivityTaskTimedOutEventAttributes(a) => {
+                let err = one_line_preview(&format_failure_chain(a.failure), 160);
+                let mut label = err.clone();
+                if let Some(&idx) = by_event.get(&a.scheduled_event_id) {
+                    slots[idx].state = StepState::TimedOut;
+                    slots[idx].duration = span_label(slots[idx].start_ms, ev_ms);
+                    slots[idx].detail = err;
+                    label = format!("{}: {label}", slots[idx].name);
+                }
+                push_ev("ActivityTimedOut", label, None);
+            }
+            EventAttrs::ActivityTaskCancelRequestedEventAttributes(a) => {
+                let name = by_event
+                    .get(&a.scheduled_event_id)
+                    .map_or_else(String::new, |&idx| slots[idx].name.clone());
+                push_ev("ActivityCancelRequested", name, None);
+            }
+            EventAttrs::ActivityTaskCanceledEventAttributes(a) => {
+                let mut name = String::new();
+                if let Some(&idx) = by_event.get(&a.scheduled_event_id) {
+                    slots[idx].state = StepState::Cancelled;
+                    slots[idx].duration = span_label(slots[idx].start_ms, ev_ms);
+                    name.clone_from(&slots[idx].name);
+                }
+                push_ev("ActivityCancelled", name, None);
+            }
+            EventAttrs::StartChildWorkflowExecutionInitiatedEventAttributes(a) => {
+                let wf_name = a.workflow_type.map(|w| w.name).unwrap_or_default();
+                let child_ns = if a.namespace.is_empty() {
+                    namespace.to_owned()
+                } else {
+                    a.namespace
+                };
+                let child_tq = a.task_queue.map(|q| q.name).unwrap_or_default();
+                let queue_tag = Some((child_ns, child_tq));
+                let step_name = format!("{wf_name} '{}'", a.workflow_id);
+                let idx = slots.len();
+                slots.push(StepSlot {
+                    kind: "child",
+                    name: step_name.clone(),
+                    activity_id: String::new(),
+                    state: StepState::Pending,
+                    start_ms: ev_ms,
+                    duration: String::new(),
+                    detail: String::new(),
+                    child_queue: queue_tag.clone(),
+                });
+                by_event.insert(ev.event_id, idx);
+                push_ev("ChildInitiated", step_name, queue_tag);
+            }
+            EventAttrs::ChildWorkflowExecutionStartedEventAttributes(a) => {
+                let mut label = a
+                    .workflow_execution
+                    .map(|e| e.workflow_id)
+                    .unwrap_or_default();
+                let mut cq = None;
+                if let Some(&idx) = by_event.get(&a.initiated_event_id) {
+                    slots[idx].state = StepState::Running;
+                    slots[idx].start_ms = ev_ms.or(slots[idx].start_ms);
+                    label.clone_from(&slots[idx].name);
+                    cq.clone_from(&slots[idx].child_queue);
+                }
+                push_ev("ChildStarted", label, cq);
+            }
+            EventAttrs::ChildWorkflowExecutionCompletedEventAttributes(a) => {
+                let res_preview = one_line_preview(&decode_payloads(a.result), 120);
+                let mut label = res_preview;
+                let mut cq = None;
+                if let Some(&idx) = by_event.get(&a.initiated_event_id) {
+                    slots[idx].state = StepState::Completed;
+                    slots[idx].duration = span_label(slots[idx].start_ms, ev_ms);
+                    cq.clone_from(&slots[idx].child_queue);
+                    label = if label.is_empty() {
+                        slots[idx].name.clone()
+                    } else {
+                        format!("{} -> {label}", slots[idx].name)
+                    };
+                }
+                push_ev("ChildCompleted", label, cq);
+            }
+            EventAttrs::ChildWorkflowExecutionFailedEventAttributes(a) => {
+                let err = one_line_preview(&format_failure_chain(a.failure), 160);
+                let mut label = err.clone();
+                let mut cq = None;
+                if let Some(&idx) = by_event.get(&a.initiated_event_id) {
+                    slots[idx].state = StepState::Failed;
+                    slots[idx].duration = span_label(slots[idx].start_ms, ev_ms);
+                    slots[idx].detail = err;
+                    cq.clone_from(&slots[idx].child_queue);
+                    label = format!("{}: {label}", slots[idx].name);
+                }
+                push_ev("ChildFailed", label, cq);
+            }
+            EventAttrs::ChildWorkflowExecutionCanceledEventAttributes(a) => {
+                let mut label = String::new();
+                let mut cq = None;
+                if let Some(&idx) = by_event.get(&a.initiated_event_id) {
+                    slots[idx].state = StepState::Cancelled;
+                    slots[idx].duration = span_label(slots[idx].start_ms, ev_ms);
+                    label.clone_from(&slots[idx].name);
+                    cq.clone_from(&slots[idx].child_queue);
+                }
+                push_ev("ChildCancelled", label, cq);
+            }
+            EventAttrs::ChildWorkflowExecutionTimedOutEventAttributes(a) => {
+                let mut label = String::new();
+                let mut cq = None;
+                if let Some(&idx) = by_event.get(&a.initiated_event_id) {
+                    slots[idx].state = StepState::TimedOut;
+                    slots[idx].duration = span_label(slots[idx].start_ms, ev_ms);
+                    label.clone_from(&slots[idx].name);
+                    cq.clone_from(&slots[idx].child_queue);
+                }
+                push_ev("ChildTimedOut", label, cq);
+            }
+            EventAttrs::ChildWorkflowExecutionTerminatedEventAttributes(a) => {
+                let mut label = String::new();
+                let mut cq = None;
+                if let Some(&idx) = by_event.get(&a.initiated_event_id) {
+                    slots[idx].state = StepState::Failed;
+                    slots[idx].duration = span_label(slots[idx].start_ms, ev_ms);
+                    label.clone_from(&slots[idx].name);
+                    cq.clone_from(&slots[idx].child_queue);
+                }
+                push_ev("ChildTerminated", label, cq);
+            }
+            EventAttrs::WorkflowExecutionSignaledEventAttributes(a) => {
+                push_ev(
+                    "WorkflowSignaled",
+                    one_line_preview(&a.signal_name, 120),
+                    None,
+                );
+            }
+            EventAttrs::WorkflowExecutionCancelRequestedEventAttributes(a) => {
+                push_ev("CancelRequested", one_line_preview(&a.cause, 160), None);
+            }
+            EventAttrs::WorkflowExecutionCompletedEventAttributes(a) => {
+                let output = decode_payloads(a.result);
+                push_ev("WorkflowCompleted", one_line_preview(&output, 160), None);
+                outcome = Some(CloseOutcome::Completed(output));
+            }
+            EventAttrs::WorkflowExecutionFailedEventAttributes(a) => {
+                let detail = format_failure_chain(a.failure);
+                push_ev("WorkflowFailed", one_line_preview(&detail, 160), None);
+                outcome = Some(CloseOutcome::Unsuccessful {
+                    status: "failed".into(),
+                    detail,
+                });
+            }
+            EventAttrs::WorkflowExecutionCanceledEventAttributes(a) => {
+                let raw = decode_payloads(a.details);
+                let detail = if raw.is_empty() {
+                    "workflow was cancelled".into()
+                } else {
+                    raw
+                };
+                push_ev("WorkflowCancelled", one_line_preview(&detail, 160), None);
+                outcome = Some(CloseOutcome::Unsuccessful {
+                    status: "cancelled".into(),
+                    detail,
+                });
+            }
+            EventAttrs::WorkflowExecutionTerminatedEventAttributes(a) => {
+                let detail = if a.reason.is_empty() {
+                    "workflow was terminated".into()
+                } else {
+                    a.reason
+                };
+                push_ev("WorkflowTerminated", one_line_preview(&detail, 160), None);
+                outcome = Some(CloseOutcome::Unsuccessful {
+                    status: "terminated".into(),
+                    detail,
+                });
+            }
+            EventAttrs::WorkflowExecutionTimedOutEventAttributes(_) => {
+                push_ev("WorkflowTimedOut", "workflow timed out".into(), None);
+                outcome = Some(CloseOutcome::Unsuccessful {
+                    status: "timed_out".into(),
+                    detail: "workflow timed out".into(),
+                });
+            }
+            EventAttrs::WorkflowExecutionContinuedAsNewEventAttributes(a) => {
+                let detail = format!("continued as run {}", a.new_execution_run_id);
+                push_ev("ContinuedAsNew", detail.clone(), None);
+                outcome = Some(CloseOutcome::Unsuccessful {
+                    status: "continued_as_new".into(),
+                    detail,
+                });
+            }
+            _ => {}
+        }
+    }
+
+    for pa in pending_activities {
+        let Some(slot) = slots.iter_mut().rev().find(|s| {
+            s.kind == "activity"
+                && s.activity_id == pa.activity_id
+                && matches!(s.state, StepState::Pending | StepState::Running)
+        }) else {
+            continue;
+        };
+        if let Some(started) = pa.last_started_time.as_ref()
+            && let Some(ms) = ts_to_ms(Some((started.seconds, started.nanos)))
+        {
+            slot.start_ms = Some(ms);
+        }
+        if pa.last_failure.is_some() {
+            slot.state = StepState::Retrying;
+        } else if pa.attempt >= 1
+            && slot.state == StepState::Pending
+            && pa.last_started_time.is_some()
+        {
+            slot.state = StepState::Running;
+        }
+        let mut details = Vec::new();
+        if pa.attempt > 1 || pa.maximum_attempts > 0 {
+            if pa.maximum_attempts > 0 {
+                details.push(format!(
+                    "attempt {}/{}",
+                    pa.attempt.max(1),
+                    pa.maximum_attempts
+                ));
+            } else {
+                details.push(format!("attempt {}", pa.attempt));
+            }
+        }
+        let hb = one_line_preview(&decode_payloads(pa.heartbeat_details), 100);
+        if !hb.is_empty() {
+            details.push(format!("heartbeat: {hb}"));
+        }
+        if let Some(failure) = pa.last_failure {
+            let err = one_line_preview(&format_failure_chain(Some(failure)), 120);
+            details.push(format!("last error: {err}"));
+        }
+        slot.detail = details.join(" · ");
+    }
+
+    let wf_open = ExecStatus::from_proto(info.status).is_open();
+    for slot in &mut slots {
+        if slot.duration.is_empty()
+            && wf_open
+            && matches!(slot.state, StepState::Running | StepState::Retrying)
+            && let Some(s) = slot.start_ms
+        {
+            slot.duration = format!(
+                "{} elapsed",
+                wire::format_duration_ms(now_ms.saturating_sub(s))
+            );
+        }
+    }
+
+    if slots.len() > 128 {
+        slots.drain(..slots.len() - 128);
+    }
+    if events.len() > 200 {
+        events.drain(..events.len() - 200);
+    }
+
+    let steps = slots
+        .into_iter()
+        .map(|s| RawStep {
+            step: WorkflowStep {
+                kind: s.kind.into(),
+                name: s.name,
+                state: s.state,
+                duration: s.duration,
+                detail: s.detail,
+            },
+            child_queue: s.child_queue,
+        })
+        .collect();
+
+    RawInspection {
+        elapsed,
+        input,
+        task_warning,
+        steps,
+        events,
+        outcome,
     }
 }

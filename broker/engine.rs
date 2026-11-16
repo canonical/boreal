@@ -5,7 +5,7 @@ use std::time::Duration;
 use boreal_common::catalog::{self, Catalog};
 use boreal_common::wire::{
     ErrorCode, PromptSummary, Request, Response, ResultOutcome, UpdaterRequest, UpdaterResponse,
-    WorkflowCounts, WorkflowDetail, WorkflowSummary,
+    WorkflowCounts, WorkflowDetail, WorkflowSummary, WorkflowView,
 };
 
 use crate::ledger::{self, Coordinator, Gate, TrackedKey};
@@ -60,7 +60,7 @@ impl<B: Backend> Engine<B> {
                     .map_err(map_catalog_err)?;
                 Ok(Response::Permissions(report))
             }
-            Request::Start {
+            Request::Run {
                 owner,
                 worker,
                 id,
@@ -246,7 +246,85 @@ impl<B: Backend> Engine<B> {
                     draining,
                 }))
             }
+            Request::View { owner, id } => {
+                catalog::validate_workflow_id(&id).map_err(map_catalog_err)?;
+                let detail = self
+                    .authorize_and_describe_read(caller, &owner, &id)
+                    .await?;
+                let insp = self
+                    .backend
+                    .inspect_workflow(&owner, &id, &detail.run_id)
+                    .await
+                    .map_err(map_backend_err)?;
+                let steps = insp
+                    .steps
+                    .into_iter()
+                    .map(|mut item| {
+                        if let Some((ns, tq)) = item.child_queue
+                            && !self.can_read_child_queue(caller, &owner, &ns, &tq)
+                            && !item.step.detail.is_empty()
+                        {
+                            item.step.detail = "[redacted]".into();
+                        }
+                        item.step
+                    })
+                    .collect();
+                let events = insp
+                    .events
+                    .into_iter()
+                    .map(|mut item| {
+                        if let Some((ns, tq)) = item.child_queue
+                            && !self.can_read_child_queue(caller, &owner, &ns, &tq)
+                        {
+                            item.event.summary = "[redacted]".into();
+                        }
+                        item.event
+                    })
+                    .collect();
+                let outcome = match insp.outcome {
+                    Some(CloseOutcome::Completed(output)) => Some(ResultOutcome::Completed {
+                        run_id: detail.run_id.clone(),
+                        output,
+                    }),
+                    Some(CloseOutcome::Unsuccessful {
+                        status,
+                        detail: msg,
+                    }) => Some(ResultOutcome::Unsuccessful {
+                        run_id: detail.run_id.clone(),
+                        status,
+                        detail: msg,
+                    }),
+                    Some(CloseOutcome::Running) | None => None,
+                };
+                Ok(Response::View(WorkflowView {
+                    owner: detail.owner,
+                    worker: detail.worker,
+                    workflow_type: detail.workflow_type,
+                    workflow_id: detail.workflow_id,
+                    run_id: detail.run_id,
+                    status: detail.status,
+                    start_time: detail.start_time,
+                    close_time: detail.close_time,
+                    elapsed: insp.elapsed,
+                    input: insp.input,
+                    task_warning: insp.task_warning,
+                    steps,
+                    events,
+                    outcome,
+                }))
+            }
         }
+    }
+
+    fn can_read_child_queue(&self, caller: &str, owner: &str, ns: &str, task_queue: &str) -> bool {
+        if ns != owner {
+            return false;
+        }
+        let prefix = format!("{owner}-");
+        let Some(worker) = task_queue.strip_prefix(&prefix) else {
+            return false;
+        };
+        self.catalog.can_read(caller, owner, worker)
     }
 
     async fn authorize_and_describe_read(
@@ -624,13 +702,17 @@ fn map_backend_err(err: BackendError) -> (ErrorCode, String) {
 mod tests {
     use super::*;
     use crate::pg::ActiveDbExecution;
-    use crate::temporal::{BoxFuture, ExecStatus, SchedulePauseOutcome};
+    use crate::temporal::{
+        BoxFuture, ExecStatus, RawEvent, RawInspection, RawStep, SchedulePauseOutcome,
+    };
+    use boreal_common::wire::{StepState, WorkflowEvent, WorkflowStep};
     use std::collections::HashMap;
     use std::sync::Mutex;
 
     #[derive(Default)]
     struct MockState {
         runs: HashMap<(String, String), RawExecution>,
+        inspections: HashMap<(String, String), RawInspection>,
         descendants: HashMap<(String, String), Vec<TrackedKey>>,
         db_running: Vec<ActiveDbExecution>,
         unpaused_schedules: Vec<(String, String)>,
@@ -706,6 +788,23 @@ mod tests {
             _run_id: &'a str,
         ) -> BoxFuture<'a, CloseOutcome> {
             Box::pin(async { Ok(CloseOutcome::Completed("Hello, Alice!".into())) })
+        }
+
+        fn inspect_workflow<'a>(
+            &'a self,
+            namespace: &'a str,
+            workflow_id: &'a str,
+            _run_id: &'a str,
+        ) -> BoxFuture<'a, RawInspection> {
+            let insp = self
+                .state
+                .lock()
+                .unwrap()
+                .inspections
+                .get(&(namespace.to_owned(), workflow_id.to_owned()))
+                .cloned()
+                .unwrap_or_default();
+            Box::pin(async move { Ok(insp) })
         }
 
         fn cancel_workflow<'a>(
@@ -899,7 +998,7 @@ workers:
         let started = engine
             .handle_user_request(
                 "bob",
-                Request::Start {
+                Request::Run {
                     owner: "alice".into(),
                     worker: "greet".into(),
                     id: "g1".into(),
@@ -912,7 +1011,7 @@ workers:
         let denied = engine
             .handle_user_request(
                 "bob",
-                Request::Start {
+                Request::Run {
                     owner: "alice".into(),
                     worker: "count".into(),
                     id: "c1".into(),
@@ -932,7 +1031,7 @@ workers:
         engine
             .handle_user_request(
                 "alice",
-                Request::Start {
+                Request::Run {
                     owner: "alice".into(),
                     worker: "count".into(),
                     id: "c1".into(),
@@ -1012,7 +1111,7 @@ workers:
         engine
             .handle_user_request(
                 "alice",
-                Request::Start {
+                Request::Run {
                     owner: "alice".into(),
                     worker: "greet".into(),
                     id: "p1".into(),
@@ -1065,7 +1164,7 @@ workers:
             engine
                 .handle_user_request(
                     "alice",
-                    Request::Start {
+                    Request::Run {
                         owner: "alice".into(),
                         worker: "greet".into(),
                         id: "blocked".into(),
@@ -1161,7 +1260,7 @@ workers:
         engine
             .handle_user_request(
                 "alice",
-                Request::Start {
+                Request::Run {
                     owner: "alice".into(),
                     worker: "greet".into(),
                     id: "a1".into(),
@@ -1172,7 +1271,7 @@ workers:
         engine
             .handle_user_request(
                 "alice",
-                Request::Start {
+                Request::Run {
                     owner: "alice".into(),
                     worker: "greet".into(),
                     id: "a2".into(),
@@ -1229,6 +1328,107 @@ workers:
                 draining: true,
             })
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_view_returns_steps_events_and_redacts_unauthorized_child_workers() {
+        let mut users = std::collections::BTreeMap::new();
+        users.insert(
+            "alice".into(),
+            "user: alice\npermissions: {read: true, write: false}\nworkers:\n  greet:\n    package: lab-worker\n    permissions: {read: true, write: false}\n  count:\n    package: lab-worker-alt\n    permissions: {read: [bob], write: false}\n".into(),
+        );
+        users.insert(
+            "bob".into(),
+            "user: bob\npermissions: {read: false, write: false}\nworkers: {}\n".into(),
+        );
+        users.insert(
+            "carol".into(),
+            "user: carol\npermissions: {read: false, write: false}\nworkers: {}\n".into(),
+        );
+        let workers = "lab-worker:\n  workflowType: DemoWorkflow\n  args:\n  - name: name\n    type: string\nlab-worker-alt:\n  workflowType: CountWorkflow\n";
+        let catalog = Catalog::from_yaml(workers, &users).unwrap();
+
+        let dir = std::env::temp_dir().join(format!("boreal-engine-test-4-{}", std::process::id()));
+        let coord = Arc::new(Coordinator::open(&dir).unwrap());
+        let backend = Arc::new(MockBackend {
+            state: Mutex::new(MockState::default()),
+        });
+        let engine = Engine::new(catalog, coord, Arc::clone(&backend));
+
+        engine
+            .handle_user_request(
+                "alice",
+                Request::Run {
+                    owner: "alice".into(),
+                    worker: "greet".into(),
+                    id: "v1".into(),
+                    args: vec!["Alice".into()],
+                },
+            )
+            .await;
+
+        backend.state.lock().unwrap().inspections.insert(
+            ("alice".into(), "v1".into()),
+            RawInspection {
+                elapsed: "2.50s".into(),
+                input: r#"{"name":"Alice"}"#.into(),
+                task_warning: String::new(),
+                steps: vec![RawStep {
+                    step: WorkflowStep {
+                        kind: "child".into(),
+                        name: "CountWorkflow 'v1-child'".into(),
+                        state: StepState::Failed,
+                        duration: "1.10s".into(),
+                        detail: "private child failure".into(),
+                    },
+                    child_queue: Some(("alice".into(), "alice-count".into())),
+                }],
+                events: vec![RawEvent {
+                    event: WorkflowEvent {
+                        id: 2,
+                        timestamp: "14:02:11.000".into(),
+                        kind: "ChildFailed".into(),
+                        summary: "private child failure".into(),
+                    },
+                    child_queue: Some(("alice".into(), "alice-count".into())),
+                }],
+                outcome: None,
+            },
+        );
+
+        // Bob can read both alice/greet and alice/count -> sees child detail unredacted.
+        let Response::View(bob_view) = engine
+            .handle_user_request(
+                "bob",
+                Request::View {
+                    owner: "alice".into(),
+                    id: "v1".into(),
+                },
+            )
+            .await
+        else {
+            panic!("expected Response::View for bob");
+        };
+        assert_eq!(bob_view.steps[0].detail, "private child failure");
+        assert_eq!(bob_view.events[0].summary, "private child failure");
+
+        // Carol can read alice/greet, but NOT alice/count -> child payload is redacted!
+        let Response::View(carol_view) = engine
+            .handle_user_request(
+                "carol",
+                Request::View {
+                    owner: "alice".into(),
+                    id: "v1".into(),
+                },
+            )
+            .await
+        else {
+            panic!("expected Response::View for carol");
+        };
+        assert_eq!(carol_view.steps[0].detail, "[redacted]");
+        assert_eq!(carol_view.events[0].summary, "[redacted]");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
