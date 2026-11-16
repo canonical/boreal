@@ -80,7 +80,7 @@ def main():
                 except OSError as err:
                     raise AssertionError(f"shell closed before {needles!r}: {bytes(data)!r}") from err
                 if not chunk:
-                    raise AssertionError(f"shell closed before {needles!r}: {bytes(data)!r}") from err
+                    raise AssertionError(f"shell closed before {needles!r}: {bytes(data)!r}")
                 data.extend(chunk)
                 # Crossterm asks the terminal for its cursor position; the PTY
                 # is not a terminal emulator, so answer the query ourselves.
@@ -390,7 +390,7 @@ def main():
         run_rc_pty_session("edit_mode: helix\n", verify_helix)
 
         # Invalid ~/.borealrc warns and falls back safely to emacs mode without locking out login.
-        def verify_fallback(fd, expect):
+        def verify_fallback(_, expect):
             expect(b"warning: invalid ~/.borealrc", b"falling back to emacs mode", ok_arrow, b"\x1b[6 q")
 
         run_rc_pty_session("edit_mode: unsupported\n", verify_fallback)
@@ -432,7 +432,7 @@ def main():
             # 1) Offline broker socket degrades silently to alice on 󰇅 demo-lab is ❄️ v0.2.0.
             orig_env = env
             env = live_env
-            def verify_offline_broker(_fd, expect):
+            def verify_offline_broker(_, expect):
                 out = expect(
                     b"Boreal lab shell (alice)",
                     b"\x1b[22;0t\x1b]0;Boreal alice@demo-lab\x07",
@@ -474,7 +474,7 @@ def main():
             thread = threading.Thread(target=serve_summary, daemon=True)
             thread.start()
             try:
-                def verify_live_summary(_fd, expect):
+                def verify_live_summary(_, expect):
                     expect(
                         "\x1b[36malice\x1b[0m on \x1b[35m󰇅 demo-lab\x1b[0m".encode(),
                         "\x1b[90m[\x1b[0m\x1b[94m 1\x1b[0m \x1b[92m 2\x1b[0m\x1b[90m]\x1b[0m".encode(),
