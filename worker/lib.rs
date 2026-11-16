@@ -158,9 +158,38 @@ pub fn task_queue(default_queue: &str) -> Result<String> {
 
 /// Connects using Temporal's standard TEMPORAL_ADDRESS, TEMPORAL_NAMESPACE, and TLS settings.
 pub async fn connect() -> Result<Client> {
-    let (mut connection_options, client_options) =
+    connect_loaded(None).await
+}
+
+/// Connects a client bound to `namespace`, reusing TEMPORAL_ADDRESS and TLS settings.
+///
+/// Call this from an activity when starting or awaiting a workflow in another user's
+/// namespace. The worker gRPC gate authorizes the caller from the listener binding,
+/// not from this namespace string. Do not call it from workflow code.
+pub async fn connect_namespace(namespace: &str) -> Result<Client> {
+    if !valid_namespace(namespace) {
+        return Err("invalid Temporal namespace".into());
+    }
+    connect_loaded(Some(namespace.to_owned())).await
+}
+
+fn valid_namespace(namespace: &str) -> bool {
+    let bytes = namespace.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 255
+        && bytes[0].is_ascii_alphanumeric()
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+}
+
+async fn connect_loaded(namespace: Option<String>) -> Result<Client> {
+    let (mut connection_options, mut client_options) =
         ClientOptions::load_from_config(LoadClientConfigProfileOptions::default())?;
     connection_options.grpc_compression = temporalio_client::GrpcCompression::None;
+    if let Some(namespace) = namespace {
+        client_options.namespace = namespace;
+    }
     let connection = Connection::connect(connection_options).await?;
     Ok(Client::new(connection, client_options)?)
 }
@@ -229,6 +258,16 @@ where
 mod tests {
     use super::*;
     use std::{cell::Cell, future};
+
+    #[test]
+    fn test_connect_namespace_rejects_blank_or_unsafe_names() {
+        assert!(!valid_namespace(""));
+        assert!(!valid_namespace(" "));
+        assert!(!valid_namespace("alice/prep"));
+        assert!(!valid_namespace("-alice"));
+        assert!(valid_namespace("shared"));
+        assert!(valid_namespace("alice"));
+    }
 
     #[test]
     fn test_task_queue_uses_default_or_validates_override() {

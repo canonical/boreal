@@ -7,6 +7,11 @@ downstream Boreal Rust workers:
   to `default_queue` and rejecting blank names.
 - `connect()` — connects a Temporal `Client` from standard `TEMPORAL_ADDRESS`,
   `TEMPORAL_NAMESPACE`, and TLS environment settings.
+- `connect_namespace(namespace)` — same connection settings, bound to another
+  user's Temporal namespace. Call it from an activity, then use upstream
+  `temporalio_client` `start_workflow`, `get_result`, and `cancel`. The worker
+  gRPC gate checks `perms.yaml` using the listener owner, not the namespace
+  argument. Do not call it from workflow code.
 - `run_worker(default_queue, build_options)` — installs `SIGTERM` and `SIGINT`
   handlers before connecting, builds a `Worker` on the current Tokio runtime,
   and continues driving `Worker::run` after shutdown so in-flight work can drain
