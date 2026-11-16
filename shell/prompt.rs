@@ -2,8 +2,8 @@ use std::borrow::Cow;
 use std::env;
 use std::io::{self, Write};
 use std::sync::Arc;
-use std::time::Duration;
 
+use boreal_common::catalog;
 use boreal_common::os;
 use boreal_common::wire::PromptSummary;
 use crossterm::{queue, style, terminal};
@@ -12,8 +12,12 @@ use reedline::{PromptEditMode, PromptHistorySearch, PromptHistorySearchStatus, P
 
 use crate::helix;
 
-const DURATION_THRESHOLD: Duration = Duration::from_secs(1);
+const HOST_ICON: char = '󰇅';
+const PAUSED_ICON: char = '';
+const RUNNING_ICON: char = '';
+const SNOWFLAKE: &str = "\u{2744}\u{fe0f}";
 
+const DRAIN_BADGE: &str = "\x1b[31m󰞴\x1b[0m ";
 const OK_INSERT_INDICATOR: &str = "\x1b[1;32m❯\x1b[0m ";
 const ERR_INSERT_INDICATOR: &str = "\x1b[1;31m❯\x1b[0m ";
 const NORMAL_MODAL_INDICATOR: &str = "\x1b[1;36m❮\x1b[0m ";
@@ -74,16 +78,18 @@ pub fn write_title_exit<W: Write>(writer: &mut W) -> io::Result<()> {
 /// Two-line Starship-style prompt pre-rendered once per command cycle.
 pub struct Prompt {
     window_title: String,
-    identity: String,
+    prefix: String,
+    version_suffix: String,
     rendered_left: String,
     last_ok: bool,
     helix_state: Option<Arc<helix::State>>,
 }
 
 impl Prompt {
-    pub fn new<S: AsRef<str>>(
+    pub fn new<S: AsRef<str>, V: AsRef<str>>(
         caller: S,
         host: Host,
+        version: V,
         helix_state: Option<Arc<helix::State>>,
     ) -> Self {
         let clean_caller: String = caller
@@ -91,25 +97,37 @@ impl Prompt {
             .chars()
             .filter(|c| !c.is_control())
             .collect();
-        let (host_label, host_seg) = match &host {
-            Host::Live(name) => {
-                let clean_host = os::sanitize_hostname(name);
-                let painted = Color::Blue.bold().paint(clean_host.clone()).to_string();
-                (clean_host, painted)
-            }
-            Host::Mock => (
-                String::from("mock"),
-                Color::Purple.bold().paint("mock").to_string(),
-            ),
+        let host_label = match &host {
+            Host::Live(name) => os::sanitize_hostname(name),
+            Host::Mock => String::from("mock"),
         };
+        let raw_ver: String = version
+            .as_ref()
+            .trim()
+            .chars()
+            .filter(|c| !c.is_control() && !c.is_whitespace())
+            .collect();
+        let ver_body = raw_ver
+            .strip_prefix('v')
+            .filter(|s| !s.is_empty())
+            .unwrap_or(if raw_ver.is_empty() {
+                catalog::default_lab_version()
+            } else {
+                &raw_ver
+            });
         let window_title = format!("Boreal {clean_caller}@{host_label}");
-        let user_seg = Color::Cyan.bold().paint(&clean_caller);
-        let at_seg = Color::DarkGray.normal().paint("@");
-        let identity = format!("{user_seg}{at_seg}{host_seg}");
-        let rendered_left = format!("{identity}\n");
+        let user_seg = Color::Cyan.paint(&clean_caller);
+        let host_seg = Color::Purple.paint(format!("{HOST_ICON} {host_label}"));
+        let prefix = format!("{user_seg} on {host_seg}");
+        let version_suffix = format!(
+            " is {SNOWFLAKE} {}",
+            Color::Cyan.paint(format!("v{ver_body}"))
+        );
+        let rendered_left = format!("{prefix}{version_suffix}\n");
         Self {
             window_title,
-            identity,
+            prefix,
+            version_suffix,
             rendered_left,
             last_ok: true,
             helix_state,
@@ -120,51 +138,41 @@ impl Prompt {
         &self.window_title
     }
 
-    pub fn refresh(
-        &mut self,
-        summary: Option<PromptSummary>,
-        last_ok: bool,
-        last_duration: Option<Duration>,
-    ) {
+    pub fn refresh(&mut self, summary: Option<PromptSummary>, last_ok: bool) {
         self.last_ok = last_ok;
-        let sep = Color::DarkGray.normal().paint(" · ");
-        let mut line = self.identity.clone();
+        let mut line = self.prefix.clone();
 
-        if let Some(sum) = summary {
-            if let Some(count) = sum.running_workflows
-                && count > 0
-            {
-                let badge = Color::Green.bold().paint(format!("{count} running"));
-                line.push_str(&format!("{sep}{badge}"));
+        if let Some(counts) = summary.and_then(|s| s.workflows)
+            && (counts.paused > 0 || counts.running > 0)
+        {
+            line.push(' ');
+            line.push_str(&Color::DarkGray.paint("[").to_string());
+            if counts.paused > 0 {
+                line.push_str(
+                    &Color::LightBlue
+                        .paint(format!("{PAUSED_ICON} {}", counts.paused))
+                        .to_string(),
+                );
+                if counts.running > 0 {
+                    line.push(' ');
+                }
             }
-            if sum.draining {
-                let badge = Color::Yellow.bold().paint("draining");
-                line.push_str(&format!("{sep}{badge}"));
+            if counts.running > 0 {
+                line.push_str(
+                    &Color::LightGreen
+                        .paint(format!("{RUNNING_ICON} {}", counts.running))
+                        .to_string(),
+                );
             }
+            line.push_str(&Color::DarkGray.paint("]").to_string());
         }
 
-        if let Some(dur_text) = last_duration.and_then(format_duration) {
-            let badge = Color::Yellow.normal().paint(format!("took {dur_text}"));
-            line.push_str(&format!("{sep}{badge}"));
-        }
-
+        line.push_str(&self.version_suffix);
         line.push('\n');
+        if summary.is_some_and(|s| s.draining) {
+            line.push_str(DRAIN_BADGE);
+        }
         self.rendered_left = line;
-    }
-}
-
-pub fn format_duration(elapsed: Duration) -> Option<String> {
-    if elapsed < DURATION_THRESHOLD {
-        return None;
-    }
-    let secs = elapsed.as_secs();
-    if secs < 60 {
-        let tenths = elapsed.as_millis() / 100;
-        Some(format!("{}.{}s", tenths / 10, tenths % 10))
-    } else if secs < 3600 {
-        Some(format!("{}m {:02}s", secs / 60, secs % 60))
-    } else {
-        Some(format!("{}h {:02}m", secs / 3600, (secs % 3600) / 60))
     }
 }
 
@@ -233,6 +241,7 @@ impl reedline::Prompt for Prompt {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use boreal_common::wire::WorkflowCounts;
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use reedline::{EditMode as _, Prompt as _, ReedlineRawEvent, default_vi_insert_keybindings};
 
@@ -256,6 +265,7 @@ mod tests {
 
     #[test]
     fn test_static_indicator_ansi_sequences_match_palette() {
+        assert_eq!(DRAIN_BADGE, format!("{} ", Color::Red.paint("󰞴")));
         assert_eq!(
             OK_INSERT_INDICATOR,
             format!("{} ", Color::Green.bold().paint("❯"))
@@ -275,42 +285,98 @@ mod tests {
     }
 
     #[test]
-    fn test_status_line_segments_and_zero_noise_omission() {
-        let mut live = Prompt::new("alice", Host::Live("demo-lab\n".into()), None);
-        assert_eq!(strip_ansi(&live.render_prompt_left()), "alice@demo-lab\n");
-
-        // Zero running workflows, no drain, and < 1s duration stay silent.
-        live.refresh(
-            Some(PromptSummary {
-                running_workflows: Some(0),
-                draining: false,
-            }),
-            true,
-            Some(Duration::from_millis(950)),
-        );
-        assert_eq!(strip_ansi(&live.render_prompt_left()), "alice@demo-lab\n");
-
-        // Active workflows, draining gate, and slow command render cleanly.
-        live.refresh(
-            Some(PromptSummary {
-                running_workflows: Some(2),
-                draining: true,
-            }),
-            false,
-            Some(Duration::from_millis(1420)),
+    fn test_status_line_segments_and_drain_badge() {
+        let mut live = Prompt::new(
+            "alice",
+            Host::Live("demo-lab\n".into()),
+            catalog::default_lab_version(),
+            None,
         );
         assert_eq!(
             strip_ansi(&live.render_prompt_left()),
-            "alice@demo-lab · 2 running · draining · took 1.4s\n"
+            "alice on 󰇅 demo-lab is ❄️ v0.1.0\n"
         );
+
+        let cases = [
+            (None, "alice on 󰇅 demo-lab is ❄️ v0.1.0\n"),
+            (
+                Some(PromptSummary {
+                    workflows: Some(WorkflowCounts {
+                        paused: 0,
+                        running: 0,
+                    }),
+                    draining: false,
+                }),
+                "alice on 󰇅 demo-lab is ❄️ v0.1.0\n",
+            ),
+            (
+                Some(PromptSummary {
+                    workflows: Some(WorkflowCounts {
+                        paused: 1,
+                        running: 0,
+                    }),
+                    draining: false,
+                }),
+                "alice on 󰇅 demo-lab [ 1] is ❄️ v0.1.0\n",
+            ),
+            (
+                Some(PromptSummary {
+                    workflows: Some(WorkflowCounts {
+                        paused: 0,
+                        running: 2,
+                    }),
+                    draining: false,
+                }),
+                "alice on 󰇅 demo-lab [ 2] is ❄️ v0.1.0\n",
+            ),
+            (
+                Some(PromptSummary {
+                    workflows: Some(WorkflowCounts {
+                        paused: 1,
+                        running: 2,
+                    }),
+                    draining: false,
+                }),
+                "alice on 󰇅 demo-lab [ 1  2] is ❄️ v0.1.0\n",
+            ),
+            (
+                Some(PromptSummary {
+                    workflows: Some(WorkflowCounts {
+                        paused: 1,
+                        running: 2,
+                    }),
+                    draining: true,
+                }),
+                "alice on 󰇅 demo-lab [ 1  2] is ❄️ v0.1.0\n󰞴 ",
+            ),
+            (
+                Some(PromptSummary {
+                    workflows: None,
+                    draining: true,
+                }),
+                "alice on 󰇅 demo-lab is ❄️ v0.1.0\n󰞴 ",
+            ),
+        ];
+        for (summary, expected) in cases {
+            live.refresh(summary, true);
+            assert_eq!(
+                strip_ansi(&live.render_prompt_left()),
+                expected,
+                "{summary:?}"
+            );
+        }
+
+        live.refresh(None, false);
         assert_eq!(
             live.render_prompt_indicator(PromptEditMode::Emacs),
             ERR_INSERT_INDICATOR
         );
 
-        // Mock preview renders <user>@mock and matching window title.
-        let mock = Prompt::new("alice", Host::Mock, None);
-        assert_eq!(strip_ansi(&mock.render_prompt_left()), "alice@mock\n");
+        let mock = Prompt::new("alice", Host::Mock, "v0.4.2", None);
+        assert_eq!(
+            strip_ansi(&mock.render_prompt_left()),
+            "alice on 󰇅 mock is ❄️ v0.4.2\n"
+        );
         assert_eq!(live.window_title(), "Boreal alice@demo-lab");
         assert_eq!(mock.window_title(), "Boreal alice@mock");
     }
@@ -330,26 +396,11 @@ mod tests {
     }
 
     #[test]
-    fn test_duration_formatting_tiers() {
-        let cases = [
-            (Duration::from_millis(0), None),
-            (Duration::from_millis(999), None),
-            (Duration::from_millis(1000), Some("1.0s")),
-            (Duration::from_millis(2490), Some("2.4s")),
-            (Duration::from_secs(65), Some("1m 05s")),
-            (Duration::from_secs(3725), Some("1h 02m")),
-        ];
-        for (input, expected) in cases {
-            assert_eq!(format_duration(input).as_deref(), expected, "{input:?}");
-        }
-    }
-
-    #[test]
     fn test_vi_and_helix_modal_indicators() {
         let hx_state = Arc::new(helix::State::new());
         let mut hx =
             helix::Helix::with_state(default_vi_insert_keybindings(), Arc::clone(&hx_state));
-        let prompt = Prompt::new("bob", Host::Mock, Some(hx_state));
+        let prompt = Prompt::new("bob", Host::Mock, "0.1.0", Some(hx_state));
 
         assert_eq!(
             prompt.render_prompt_indicator(hx.edit_mode()),

@@ -14,7 +14,6 @@ use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
-use std::time::Instant;
 
 use boreal_common::catalog::{Catalog, DEFAULT_ETC_DIR};
 use boreal_common::os;
@@ -446,51 +445,36 @@ fn run_interactive() -> Result<(), Box<dyn Error>> {
     let mut prompt = Prompt::new(
         ctx.caller(),
         resolve_prompt_host(mode.is_mock()),
+        ctx.catalog().version(),
         helix_state,
     );
     let _title_guard = prompt::TitleGuard::enter(prompt.window_title());
     let mut last_ok = true;
-    let mut last_duration = None;
 
     loop {
         println!();
-        prompt.refresh(mode.prompt_summary(), last_ok, last_duration);
+        prompt.refresh(mode.prompt_summary(), last_ok);
         match editor.read_line(&prompt)? {
             Signal::Success(line) => match ctx.parse(&line) {
                 Ok(Some(Action::Exit)) => break,
-                Ok(Some(action)) => {
-                    let started = Instant::now();
-                    match execute_action(action, &mode) {
-                        Ok(ok) => {
-                            last_ok = ok;
-                            last_duration = Some(started.elapsed());
-                        }
-                        Err(err) => {
-                            eprintln!("error: {err}");
-                            last_ok = false;
-                            last_duration = Some(started.elapsed());
-                        }
+                Ok(Some(action)) => match execute_action(action, &mode) {
+                    Ok(ok) => last_ok = ok,
+                    Err(err) => {
+                        eprintln!("error: {err}");
+                        last_ok = false;
                     }
-                }
-                Ok(None) => {
-                    last_ok = true;
-                    last_duration = None;
-                }
+                },
+                Ok(None) => last_ok = true,
                 Err(command::Error::Quote) => {
                     eprintln!("error: unfinished quote or escape");
                     last_ok = false;
-                    last_duration = None;
                 }
                 Err(command::Error::Clap(error)) => {
                     last_ok = !error.use_stderr();
-                    last_duration = None;
                     error.print()?;
                 }
             },
-            Signal::CtrlC => {
-                last_duration = None;
-                continue;
-            }
+            Signal::CtrlC => continue,
             Signal::CtrlD | Signal::ExternalBreak(_) => break,
             _ => continue,
         }

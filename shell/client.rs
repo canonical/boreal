@@ -7,7 +7,7 @@ use std::time::Duration;
 use boreal_common::catalog::Catalog;
 use boreal_common::wire::{
     self, PermissionReport, PromptSummary, Request, Response, ResultOutcome, WorkerEntry,
-    WorkflowDetail, WorkflowSummary,
+    WorkflowCounts, WorkflowDetail, WorkflowSummary,
 };
 
 type MockRunningMap = BTreeMap<(String, String), (String, String)>;
@@ -206,7 +206,10 @@ fn mock_dispatch(
                 .filter(|(entry_owner, _)| entry_owner == caller)
                 .count() as u32;
             Response::Summary(PromptSummary {
-                running_workflows: Some(count),
+                workflows: Some(WorkflowCounts {
+                    paused: 0,
+                    running: count,
+                }),
                 draining: false,
             })
         }
@@ -358,7 +361,10 @@ mod tests {
         assert_eq!(
             mock.prompt_summary(),
             Some(PromptSummary {
-                running_workflows: Some(1),
+                workflows: Some(WorkflowCounts {
+                    paused: 0,
+                    running: 1,
+                }),
                 draining: false,
             })
         );
@@ -370,7 +376,13 @@ mod tests {
             args: vec!["Ada".into()],
         })
         .unwrap();
-        assert_eq!(mock.prompt_summary().unwrap().running_workflows, Some(2));
+        assert_eq!(
+            mock.prompt_summary().unwrap().workflows,
+            Some(WorkflowCounts {
+                paused: 0,
+                running: 2,
+            })
+        );
 
         mock.send(&Request::Cancel {
             owner: "alice".into(),
@@ -384,7 +396,13 @@ mod tests {
             run_id: "mock-job-2".into(),
         })
         .unwrap();
-        assert_eq!(mock.prompt_summary().unwrap().running_workflows, Some(0));
+        assert_eq!(
+            mock.prompt_summary().unwrap().workflows,
+            Some(WorkflowCounts {
+                paused: 0,
+                running: 0,
+            })
+        );
 
         // Missing socket fails silently to None without blocking login.
         let offline = Mode::Live {
@@ -392,7 +410,7 @@ mod tests {
         };
         assert_eq!(offline.prompt_summary(), None);
 
-        // Live Unix socket summary round-trips running count and draining state.
+        // Live Unix socket summary round-trips paused/running counts and draining state.
         let sock =
             std::env::temp_dir().join(format!("boreal-client-sum-{}.sock", std::process::id()));
         let _ = std::fs::remove_file(&sock);
@@ -402,7 +420,10 @@ mod tests {
             let raw = wire::read_frame(&mut conn).unwrap();
             assert_eq!(Request::decode(&raw).unwrap(), Request::Summary);
             let reply = Response::Summary(PromptSummary {
-                running_workflows: Some(4),
+                workflows: Some(WorkflowCounts {
+                    paused: 1,
+                    running: 4,
+                }),
                 draining: true,
             });
             wire::write_frame(&mut conn, &reply.encode()).unwrap();
@@ -413,7 +434,10 @@ mod tests {
         assert_eq!(
             live.prompt_summary(),
             Some(PromptSummary {
-                running_workflows: Some(4),
+                workflows: Some(WorkflowCounts {
+                    paused: 1,
+                    running: 4,
+                }),
                 draining: true,
             })
         );
