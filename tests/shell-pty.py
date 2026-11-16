@@ -98,6 +98,7 @@ def main():
         try:
             wait_for(
                 b"mock-only",
+                b"\x1b[22;0t\x1b]0;Boreal alice@mock\x07",
                 b"\x1b[1;36malice\x1b[0m",
                 b"\x1b[1;35mmock\x1b[0m",
                 b"\x1b[1;32m1 running\x1b[0m",
@@ -247,6 +248,7 @@ def main():
                 replies = requests
             assert process.wait(timeout=5) == 0, bytes(data)
             assert b"\x1b[0 q" in data, "terminal cursor was not reset on exit"
+            assert b"\x1b]0;\x07\x1b[23;0t" in data, "terminal title was not restored on exit"
         finally:
             if process.poll() is None:
                 process.terminate()
@@ -406,6 +408,7 @@ def main():
             def verify_offline_broker(_fd, expect):
                 out = expect(
                     b"Boreal lab shell (alice)",
+                    b"\x1b[22;0t\x1b]0;Boreal alice@demo-lab\x07",
                     b"\x1b[1;36malice\x1b[0m",
                     b"\x1b[1;34mdemo-lab\x1b[0m",
                     ok_arrow,
