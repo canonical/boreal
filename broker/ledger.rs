@@ -30,6 +30,7 @@ pub struct TrackedKey {
 
 #[derive(Clone, Debug)]
 struct Lease {
+    namespace: String,
     granted_at: Instant,
 }
 
@@ -327,9 +328,30 @@ impl Coordinator {
         guard.leases.insert(
             task_token,
             Lease {
+                namespace: namespace.to_owned(),
                 granted_at: Instant::now(),
             },
         );
+    }
+
+    /// True when this namespace still has a drain-tracked run or a live worker lease.
+    ///
+    /// A closed admission gate uses this so an in-flight caller can start a delegated
+    /// workflow without letting idle callers admit new work.
+    pub fn namespace_has_inflight(&self, namespace: &str) -> bool {
+        let mut guard = self.inner.lock().unwrap();
+        let now = Instant::now();
+        guard
+            .leases
+            .retain(|_, lease| now.duration_since(lease.granted_at) < LEASE_TTL);
+        guard
+            .leases
+            .values()
+            .any(|lease| lease.namespace == namespace)
+            || guard
+                .tracked_runs
+                .iter()
+                .any(|key| key.namespace == namespace)
     }
 
     pub fn complete_lease(&self, task_token: &[u8]) {
