@@ -212,7 +212,8 @@ assert libc.ptrace(16, {worker_pid}, 0, 0) == -1, "same-UID ptrace unexpectedly 
     # Inside alice-greet's worker netns:
     # - DescribeNamespace on alice is permitted for worker startup.
     # - Cross-namespace DescribeNamespace on bob MUST fail with PermissionDenied.
-    # - Client StartWorkflowExecution / ListWorkflowExecutions MUST fail with PermissionDenied.
+    # - StartWorkflowExecution against a namespace the worker cannot write, and
+    #   ListWorkflowExecutions, MUST fail with PermissionDenied.
     # - Internal Postgres (5432) and History (7234) ports are unreachable.
     pw_alice = pwd.getpwnam("alice")
     alice_env = {**os.environ, "HOME": pw_alice.pw_dir, "USER": "alice"}
@@ -262,9 +263,9 @@ assert libc.ptrace(16, {worker_pid}, 0, 0) == -1, "same-UID ptrace unexpectedly 
             "--address",
             "127.0.0.1:7233",
             "--namespace",
-            "alice",
+            "bob",
             "--task-queue",
-            "alice-greet",
+            "bob-greet",
             "--type",
             "DemoWorkflow",
             "--workflow-id",

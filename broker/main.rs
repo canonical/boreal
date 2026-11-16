@@ -295,7 +295,12 @@ async fn run_broker(
         cfg.pg_user.clone(),
         cfg.pg_db.clone(),
     ));
-    let engine = Arc::new(Engine::new(catalog, Arc::clone(&coordinator), backend));
+    let catalog = Arc::new(catalog);
+    let engine = Arc::new(Engine::new(
+        catalog.as_ref().clone(),
+        Arc::clone(&coordinator),
+        backend,
+    ));
 
     let user_listener = UnixListener::from_std(bound.user_listener)?;
     let updater_listener = UnixListener::from_std(bound.updater_listener)?;
@@ -307,6 +312,7 @@ async fn run_broker(
             binding,
             cfg.upstream_temporal_addr.clone(),
             Arc::clone(&coordinator),
+            Arc::clone(&catalog),
         ));
     }
 

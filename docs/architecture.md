@@ -49,10 +49,18 @@ store:
   runs as `<user>` with `NoNewPrivileges = true`, `PrivateTmp = true`,
   `ProtectSystem = "strict"`, `ProtectProc = "invisible"`, and host
   `kernel.yama.ptrace_scope = 2` (blocking same-UID `ptrace` from interactive
-  sessions). `boreal-broker`'s HTTP/2 gRPC worker gate permits only worker
-  polling/completion RPCs on `WorkflowService`, enforces `namespace == <user>`
-  and `task_queue == <user>-<worker>`, blocks cross-namespace child workflows
-  and signals, and tracks outstanding task tokens as active leases.
+  sessions). `boreal-broker`'s HTTP/2 gRPC worker gate permits worker
+  polling/completion RPCs on `WorkflowService`, plus `StartWorkflowExecution`,
+  `GetWorkflowExecutionHistory`, and `RequestCancelWorkflowExecution` when the
+  target namespace, task queue, and `workflowType` match a registered worker and
+  `/etc/boreal/users/<owner>/perms.yaml` grants the listener owner `write`
+  (start and cancel) or `read` (history). Caller identity is the per-worker
+  listener binding, never the `temporal-namespace` header or request namespace.
+  Cross-namespace child-workflow commands, external signals, and external
+  cancels stay denied. Permitted starts are recorded for updater drain; a closed
+  admission gate still accepts one only when that caller namespace already has
+  in-flight tracked work or a live worker lease. Polling RPCs still require
+  `namespace == <user>` and `task_queue == <user>-<worker>`.
 
 ## SSH surface and user secrets
 

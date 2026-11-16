@@ -30,7 +30,8 @@
     `/run/netns/boreal-worker-<user>-<worker>` with `ProtectProc = "invisible"`
     and `kernel.yama.ptrace_scope = 2`, reaching Temporal only through a
     per-worker HTTP/2 gRPC gate restricting RPC methods, `namespace`, and
-    `task_queue`.
+    `task_queue`, while allowing a permitted worker to start, await, and cancel
+    another user's registered workflow through standard Temporal client RPCs.
 - **Data-driven `boreal-shell` and user secrets (`shell/` & `worker/`)**:
   - `boreal-shell` renders a two-line Starship-style status prompt
     (`<user> on 󰇅 <host>` or `<user> on 󰇅 mock`, caller-scoped
