@@ -109,23 +109,23 @@ def main():
 
             # Partial commands are underlined; the selected match uses the
             # terminal defaults in reverse, while inactive text is bright black.
-            os.write(master, b"st")
-            wait_for(b"\x1b[4mst", b"\x1b[6 q")
+            os.write(master, b"r")
+            wait_for(b"\x1b[4mr", b"\x1b[6 q")
             os.write(master, b"\t")
             wait_for(
-                b"\x1b[4;7;49;39mst",
-                b"\x1b[7;49;39mart",
-                b"\x1b[7;49;39m   Start a workflow",
-                b"\x1b[4;90mst",
-                b"\x1b[90matus",
-                b"\x1b[33mDescribe a workflow",
+                b"\x1b[4;7;49;39mr",
+                b"\x1b[7;49;39mun",
+                b"\x1b[7;49;39m     Run a workflow",
+                b"\x1b[4;90mr",
+                b"\x1b[90mesult",
+                b"\x1b[33mShow a workflow result",
             )
             # Selection follows Tab without coloring the selected description's
             # background; inactive descriptions retain their original yellow.
             os.write(master, b"\t")
             wait_for(
-                b"\x1b[7;49;39m  Describe a workflow",
-                b"\x1b[33mStart a workflow",
+                b"\x1b[7;49;39m  Show a workflow result",
+                b"\x1b[33mRun a workflow",
             )
             os.write(master, b"\x03")
             wait_for(ok_arrow, b"\x1b[6 q")
@@ -173,7 +173,7 @@ def main():
 
             # Even shell metacharacters passed as an argument have no side effects;
             # starting a workflow updates the prompt status bracket to '[ 2]'.
-            line = f"start greet test '$(touch {marker})' 5\r".encode()
+            line = f"run greet test '$(touch {marker})' 5\r".encode()
             os.write(master, line)
             wait_for(
                 b"[mock] started DemoWorkflow 'test'",
@@ -181,6 +181,22 @@ def main():
                 ok_arrow,
             )
             assert not marker.exists(), "a shell metacharacter was executed"
+
+            # 'v' + Tab immediately completes 'view '; running 'view test' enters the
+            # alternate-screen live TUI and 'q' cleanly restores the prompt.
+            os.write(master, b"v\t")
+            wait_for(b"\x1b[32mview\x1b[0m ", b"\x1b[6 q")
+            os.write(master, b"test\r")
+            wait_for(
+                b"\x1b[?1049h",
+                b"DemoWorkflow",
+                b"'test'",
+                b"STEPS & IO",
+                b"LIVE EVENT LOG",
+                b"WorkflowStarted",
+            )
+            os.write(master, b"q")
+            wait_for(b"\x1b[?1049l", ok_arrow, b"\x1b[6 q")
 
             # Cancel requires confirmation: 'n' aborts, 'y' proceeds.
             os.write(master, b"cancel run-1 --owner bob\r")
