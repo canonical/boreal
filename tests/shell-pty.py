@@ -6,11 +6,13 @@ import os
 import pathlib
 import pty
 import select
+import socket
 import struct
 import subprocess
 import sys
 import tempfile
 import termios
+import threading
 import time
 
 
@@ -88,8 +90,20 @@ def main():
                 cursor_replies = requests
             return bytes(data)
 
+        ok_arrow = "\x1b[1;32m❯\x1b[0m ".encode()
+        err_arrow = "\x1b[1;31m❯\x1b[0m ".encode()
+        norm_arrow = "\x1b[1;36m❮\x1b[0m ".encode()
+        sel_arrow = "\x1b[1;35m❮\x1b[0m ".encode()
+
         try:
-            wait_for(b"mock-only", b"boreal\x1b", b"\x1b[6 q")
+            wait_for(
+                b"mock-only",
+                b"\x1b[1;36malice\x1b[0m",
+                b"\x1b[1;35mmock\x1b[0m",
+                b"\x1b[1;32m1 running\x1b[0m",
+                ok_arrow,
+                b"\x1b[6 q",
+            )
 
             # Partial commands are underlined; the selected match uses the
             # terminal defaults in reverse, while inactive text is bright black.
@@ -112,23 +126,31 @@ def main():
                 b"\x1b[33mStart a workflow",
             )
             os.write(master, b"\x03")
-            wait_for(b"boreal\x1b", b"\x1b[6 q")
+            wait_for(ok_arrow, b"\x1b[6 q")
 
             # Unknown commands are red and recognized commands are green.
             os.write(master, b"unknown")
             wait_for(b"\x1b[31munknown", b"\x1b[6 q")
             os.write(master, b"\x03")
-            wait_for(b"boreal\x1b", b"\x1b[6 q")
+            wait_for(ok_arrow, b"\x1b[6 q")
             os.write(master, b"workers")
             wait_for(b"\x1b[32mworkers", b"\x1b[6 q")
             os.write(master, b"\x03")
-            wait_for(b"boreal\x1b", b"\x1b[6 q")
+            wait_for(ok_arrow, b"\x1b[6 q")
+
+            # Submitting an invalid command turns the prompt indicator red;
+            # `help` succeeds and restores the green indicator.
+            os.write(master, b"badcmd\r")
+            wait_for(b"unrecognized subcommand", err_arrow, b"\x1b[6 q")
+            os.write(master, b"help\r")
+            wait_for(b"Boreal lab shell", ok_arrow, b"\x1b[6 q")
+            # Clear 'badcmd' / 'help' from top of history by running workers below.
 
             # Options include their dashes, but not the value after '='.
             os.write(master, b"list --owner=bob")
             wait_for(b"\x1b[33m--owner", b"=bob", b"\x1b[6 q")
             os.write(master, b"\x03")
-            wait_for(b"boreal\x1b", b"\x1b[6 q")
+            wait_for(ok_arrow, b"\x1b[6 q")
 
             # Single-candidate Tab immediately applies completion without opening the menu.
             os.write(master, b"work")
@@ -137,32 +159,50 @@ def main():
             single_tab = wait_for(b"\x1b[32mworkers\x1b[0m ", b"\x1b[6 q")
             assert b"List available workers" not in single_tab
             os.write(master, b"\r")
-            wait_for(b"[mock] alice/greet (DemoWorkflow)")
+            wait_for(b"[mock] alice/greet (DemoWorkflow)", ok_arrow)
 
             # The previous command is available through Up and as a light-black right-arrow hint.
             os.write(master, b"\x1b[A\r")
-            wait_for(b"[mock] alice/greet (DemoWorkflow)")
+            wait_for(b"[mock] alice/greet (DemoWorkflow)", ok_arrow)
             os.write(master, b"wo")
             wait_for(b"\x1b[90mrkers")
             os.write(master, b"\x1b[C\r")
-            wait_for(b"[mock] alice/greet (DemoWorkflow)")
+            wait_for(b"[mock] alice/greet (DemoWorkflow)", ok_arrow)
 
-            # Even shell metacharacters passed as an argument have no side effects.
+            # Even shell metacharacters passed as an argument have no side effects;
+            # starting a workflow updates the prompt status bar to '2 running'.
             line = f"start greet test '$(touch {marker})' 5\r".encode()
             os.write(master, line)
-            wait_for(b"[mock] started DemoWorkflow 'test'")
+            wait_for(
+                b"[mock] started DemoWorkflow 'test'",
+                b"\x1b[1;32m2 running\x1b[0m",
+                ok_arrow,
+            )
             assert not marker.exists(), "a shell metacharacter was executed"
 
             # Cancel requires confirmation: 'n' aborts, 'y' proceeds.
             os.write(master, b"cancel run-1 --owner bob\r")
             wait_for(b"Cancel DemoWorkflow 'run-1'", b"[y/N]: ")
             os.write(master, b"n\r")
-            wait_for(b"cancellation aborted.")
+            wait_for(b"cancellation aborted.", ok_arrow)
 
             os.write(master, b"cancel run-1 --owner bob\r")
             wait_for(b"Cancel DemoWorkflow 'run-1'", b"[y/N]: ")
             os.write(master, b"y\r")
-            wait_for(b"[mock] cancellation requested for DemoWorkflow 'run-1'")
+            wait_for(b"[mock] cancellation requested for DemoWorkflow 'run-1'", ok_arrow)
+
+            # Cancelling alice's sample-1 with >=1s delay drops count back to '1 running'
+            # and renders the Starship 'took 1.'s duration segment.
+            os.write(master, b"cancel sample-1\r")
+            wait_for(b"Cancel DemoWorkflow 'sample-1'", b"[y/N]: ")
+            time.sleep(1.05)
+            os.write(master, b"y\r")
+            wait_for(
+                b"[mock] cancellation requested for DemoWorkflow 'sample-1'",
+                b"\x1b[1;32m1 running\x1b[0m",
+                b"took 1.",
+                ok_arrow,
+            )
 
             # Interactive secret entry disables echo and never prints secret contents.
             os.write(master, b"secrets set tty_item\r")
@@ -283,49 +323,147 @@ def main():
                     proc.wait(timeout=5)
                 os.close(rc_master)
 
-        # ~/.borealrc edit_mode: vi (bar cursor in insert, block cursor in normal, 0dw + A<Tab>).
+        # ~/.borealrc edit_mode: vi (bar cursor + ❯ in insert, block cursor + ❮ in normal).
         def verify_vi(fd, expect):
-            expect(b"mock-only", b": ", b"\x1b[6 q")
+            expect(b"mock-only", ok_arrow, b"\x1b[6 q")
             os.write(fd, b"bad work")
             expect(b"work")
             os.write(fd, b"\x1b")
-            expect(b"\x1b[2 q")
+            expect(norm_arrow, b"\x1b[2 q")
             os.write(fd, b"0dwA")
-            expect(b"\x1b[6 q")
+            expect(ok_arrow, b"\x1b[6 q")
             os.write(fd, b"\t")
             expect(b"\x1b[32mworkers\x1b[0m ")
             os.write(fd, b"\x1b")
-            expect(b"\x1b[2 q")
+            expect(norm_arrow, b"\x1b[2 q")
             os.write(fd, b"\r")
-            expect(b"[mock] alice/greet (DemoWorkflow)")
+            expect(b"[mock] alice/greet (DemoWorkflow)", ok_arrow)
 
         run_rc_pty_session("edit_mode: vi\n", verify_vi)
 
-        # ~/.borealrc edit_mode: helix (selection-first gh + w + d, gl + a<Tab>, normal Enter).
+        # ~/.borealrc edit_mode: helix (❯ insert, cyan ❮ normal, purple ❮ select, normal Enter).
         def verify_helix(fd, expect):
-            expect(b"mock-only", b": ", b"\x1b[6 q")
+            expect(b"mock-only", ok_arrow, b"\x1b[6 q")
             os.write(fd, b"bad work")
             expect(b"work")
             os.write(fd, b"\x1b")
-            expect(b"\x1b[2 q")
+            expect(norm_arrow, b"\x1b[2 q")
+            os.write(fd, b"v")
+            expect(sel_arrow)
+            os.write(fd, b"\x1b")
+            expect(norm_arrow)
             os.write(fd, b"ghwdgla")
-            expect(b"\x1b[6 q")
+            expect(ok_arrow, b"\x1b[6 q")
             os.write(fd, b"\t")
             expect(b"\x1b[32mworkers\x1b[0m ")
             os.write(fd, b"\x1b")
-            expect(b"\x1b[2 q")
+            expect(norm_arrow, b"\x1b[2 q")
             os.write(fd, b"\r")
-            expect(b"[mock] alice/greet (DemoWorkflow)")
+            expect(b"[mock] alice/greet (DemoWorkflow)", ok_arrow)
 
         run_rc_pty_session("edit_mode: helix\n", verify_helix)
 
         # Invalid ~/.borealrc warns and falls back safely to emacs mode without locking out login.
         def verify_fallback(fd, expect):
-            expect(b"warning: invalid ~/.borealrc", b"falling back to emacs mode", b"\x1b[6 q")
+            expect(b"warning: invalid ~/.borealrc", b"falling back to emacs mode", ok_arrow, b"\x1b[6 q")
 
         run_rc_pty_session("edit_mode: unsupported\n", verify_fallback)
 
-    print("PTY styles, cursor, edit modes, completion, history, confirmation, and secrets: passed")
+        # Standalone mock-broker harness (live mode without VM): verify alice@demo-lab,
+        # live running count + draining badge, and silent fallback when broker is offline.
+        etc_dir = tmp_path / "etc-boreal"
+        (etc_dir / "users" / "alice").mkdir(parents=True)
+        etc_dir.chmod(0o700)
+        (etc_dir / "users").chmod(0o700)
+        (etc_dir / "users" / "alice").chmod(0o700)
+        workers_yaml = etc_dir / "workers.yaml"
+        workers_yaml.write_text(
+            "lab-worker:\n  workflowType: DemoWorkflow\n  args:\n  - name: name\n    type: string\n",
+            encoding="utf-8",
+        )
+        workers_yaml.chmod(0o400)
+        perms_yaml = etc_dir / "users" / "alice" / "perms.yaml"
+        perms_yaml.write_text(
+            "user: alice\npermissions: {read: false, write: false}\nworkers:\n  greet:\n    package: lab-worker\n    permissions: {read: false, write: false}\n",
+            encoding="utf-8",
+        )
+        perms_yaml.chmod(0o400)
+
+        try:
+            (tmp_path / ".borealrc").unlink(missing_ok=True)
+            sock_path = tmp_path / "broker.sock"
+            live_env = {
+                **env,
+                "BOREAL_TEST_ETC_DIR": str(etc_dir),
+                "BOREAL_TEST_CALLER": "alice",
+                "BOREAL_TEST_HOSTNAME": "demo-lab",
+                "BOREAL_TEST_BROKER_SOCKET": str(sock_path),
+            }
+
+            # 1) Offline broker socket degrades silently to alice@demo-lab without hanging.
+            orig_env = env
+            env = live_env
+            def verify_offline_broker(_fd, expect):
+                out = expect(
+                    b"Boreal lab shell (alice)",
+                    b"\x1b[1;36malice\x1b[0m",
+                    b"\x1b[1;34mdemo-lab\x1b[0m",
+                    ok_arrow,
+                )
+                assert b"running" not in out
+                assert b"draining" not in out
+                assert b"connect broker" not in out
+
+            run_rc_pty_session("edit_mode: emacs\n", verify_offline_broker)
+
+            # 2) Mock Unix-socket broker serves Request::Summary (tag 9) -> 3 running + draining.
+            stop_server = threading.Event()
+            srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            srv.bind(str(sock_path))
+            srv.listen(4)
+            srv.settimeout(0.2)
+
+            def serve_summary():
+                while not stop_server.is_set():
+                    try:
+                        conn, _ = srv.accept()
+                    except TimeoutError:
+                        continue
+                    except OSError:
+                        break
+                    with conn:
+                        hdr = conn.recv(4)
+                        if len(hdr) == 4:
+                            (plen,) = struct.unpack(">I", hdr)
+                            payload = conn.recv(plen)
+                            if payload == b"\x09":
+                                # Response::Summary(PromptSummary { running_workflows: Some(3), draining: true })
+                                body = b"\x0a\x01\x00\x00\x00\x03\x01"
+                                conn.sendall(struct.pack(">I", len(body)) + body)
+
+            thread = threading.Thread(target=serve_summary, daemon=True)
+            thread.start()
+            try:
+                def verify_live_summary(_fd, expect):
+                    expect(
+                        b"\x1b[1;36malice\x1b[0m",
+                        b"\x1b[1;34mdemo-lab\x1b[0m",
+                        b"\x1b[1;32m3 running\x1b[0m",
+                        b"\x1b[1;33mdraining\x1b[0m",
+                        ok_arrow,
+                    )
+
+                run_rc_pty_session("edit_mode: emacs\n", verify_live_summary)
+            finally:
+                stop_server.set()
+                srv.close()
+                thread.join(timeout=2)
+                env = orig_env
+        finally:
+            workers_yaml.chmod(0o600)
+            perms_yaml.chmod(0o600)
+
+    print("PTY Starship prompt, styles, cursor, edit modes, completion, history, confirmation, and secrets: passed")
 
 
 if __name__ == "__main__":

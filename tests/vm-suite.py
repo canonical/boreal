@@ -84,7 +84,7 @@ class SshPtySession:
         cursor_replies = 0
         while not (
             all(needle in plain for needle in needles)
-            and (not wait_prompt or plain.rstrip().endswith(b"boreal>"))
+            and (not wait_prompt or plain.rstrip().endswith("❯".encode()))
         ):
             rem = deadline - time.monotonic()
             if rem <= 0 or not select.select([self.master], [], [], rem)[0]:
@@ -367,7 +367,7 @@ def test_ssh_shell_permissions_secrets_and_recovery() -> None:
     # Interactive SSH PTY as alice
     alice = SshPtySession("alice")
     try:
-        banner = alice.wait_for(b"Boreal lab shell (alice)", b"boreal")
+        banner = alice.wait_for(b"Boreal lab shell (alice)", b"alice@")
         assert b"mock-only" not in banner
 
         alice.send(b"permissions ")
@@ -376,7 +376,7 @@ def test_ssh_shell_permissions_secrets_and_recovery() -> None:
         comp = alice.wait_for(b"alice", wait_prompt=False)
         assert b"bob" not in comp
         alice.send(b"\x03")
-        alice.wait_for(b"boreal>")
+        alice.wait_for("❯".encode())
 
         alice.send(b"permissions bob\r")
         alice.wait_for(b"error:")
@@ -433,14 +433,14 @@ def test_ssh_shell_permissions_secrets_and_recovery() -> None:
             raise AssertionError("rec-wf-1 did not recover after worker restart")
 
         alice.send(b"start count slow-count-1 'Hold' 120\r")
-        alice.wait_for(b"started CountWorkflow 'slow-count-1' on alice/count")
+        alice.wait_for(b"started CountWorkflow 'slow-count-1' on alice/count", b"1 running")
     finally:
         alice.close()
 
     # Interactive SSH PTY as bob: delegated start/read/cancel + denied start/cancel
     bob = SshPtySession("bob")
     try:
-        bob.wait_for(b"Boreal lab shell (bob)", b"boreal")
+        bob.wait_for(b"Boreal lab shell (bob)", b"bob@")
         bob.send(b"permissions alice\r")
         bob.wait_for(b"greet (package lab-worker): read=allowed, write=allowed")
 
@@ -473,7 +473,7 @@ def test_ssh_shell_permissions_secrets_and_recovery() -> None:
     # Interactive SSH PTY as carol: list filtering & denied read on alice/count and bob
     carol = SshPtySession("carol")
     try:
-        carol.wait_for(b"Boreal lab shell (carol)", b"boreal>")
+        carol.wait_for(b"Boreal lab shell (carol)", b"carol@")
         for _ in range(20):
             carol.send(b"list --owner alice\r")
             listing = carol.wait_for(b"list --owner alice")
