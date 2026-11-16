@@ -61,7 +61,7 @@ updater status
    `boreal-updater.service` (`systemctl --no-block start`) so drain and switch
    run asynchronously in the background.
 3. **Close gate (`run`)**: persists `Gate::Closed` in `boreal-broker`, waits for
-   in-flight `start` calls to finish recording, pauses unpaused Temporal
+   in-flight `run` calls to finish recording, pauses unpaused Temporal
    schedules across all user namespaces (recording which schedules were paused),
    and tracks schedule-reported executions.
 4. **Authoritative drain (`run`)**: polls `boreal-broker` until every tracked

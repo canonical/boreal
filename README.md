@@ -30,18 +30,18 @@ deployment.
 - **Kernel-authenticated runtime policy**: `boreal-broker` authenticates callers
   on `/run/boreal/broker.sock` (`0660 boreal-broker:boreal`) via `SO_PEERCRED`,
   validates typed argument schemas from `/etc/boreal/workers.yaml`, enforces
-  `/etc/boreal/users/<user>/perms.yaml` across `start`, `cancel`, `status`,
-  `result`, `list`, and `permissions`, and verifies registered `workflowType`
-  and pinned `run_id` on existing executions.
+  `/etc/boreal/users/<user>/perms.yaml` across `run`, `cancel`, `status`,
+  `result`, `view`, `list`, and `permissions`, and verifies registered
+  `workflowType` and pinned `run_id` on existing executions.
 - **Restricted SSH shell & user secrets**: OpenSSH disables SFTP, TCP/Unix/agent
   forwarding, tunnels, and `~/.ssh/rc`. `boreal-shell` renders a two-line
   Starship-style status prompt (`<user> on 󰇅 <host> [ <paused>  <running>] is ❄️ v<version>`
   from `temporal/Cargo.toml`, with line-2 red `󰞴` drain badge and modal `❯`/`❮`
-  indicators), drives commands and permission-filtered completions from
-  `/etc/boreal/`, requires `[y/N]` confirmation before `cancel`, rejects
-  unsupported non-interactive SSH commands, and stores secrets under
-  `~/.config/boreal/secrets` (`0700`/`0600`) via hidden TTY prompt or
-  `ssh <user>@<host> "secrets set <name>" < file`.
+  indicators), drives commands, live `view` TUI inspection, and
+  permission-filtered completions from `/etc/boreal/`, requires `[y/N]`
+  confirmation before `cancel`, rejects unsupported non-interactive SSH
+  commands, and stores secrets under `~/.config/boreal/secrets` (`0700`/`0600`)
+  via hidden TTY prompt or `ssh <user>@<host> "secrets set <name>" < file`.
 - **Restricted administration & gated updates**: `boreal.admin` assigns `admin`
   to `boreal-admin`, delegating via sanitized `sudo` only to `boreal-admin-ctl`
   for allowlisted Temporal/worker unit control and updater commands without

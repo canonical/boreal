@@ -20,10 +20,10 @@ store:
 - `/etc/boreal/workers.yaml` (`0440`, `root:boreal`): registered worker
   `workflowType`, `description`, and typed `args` metadata.
 - `/etc/boreal/users/<user>/perms.yaml` (`0440`, `root:boreal`): each user's
-  default and resolved per-worker `read` (`status`, `result`, `list`) and
-  `write` (`start`, `cancel`) policies (`true` grants all Boreal users, `false`
-  grants none beyond the owner, and a list grants named Boreal users; owners
-  always control their own workers).
+  default and resolved per-worker `read` (`status`, `result`, `view`, `list`)
+  and `write` (`run`, `cancel`) policies (`true` grants all Boreal users,
+  `false` grants none beyond the owner, and a list grants named Boreal users;
+  owners always control their own workers).
 
 ## Host and network-namespace isolation
 
@@ -63,8 +63,9 @@ regular file, `O_NOFOLLOW`, provisioned from `boreal.users.<name>.editMode` as
 `emacs`, `vi`, or `helix` with `emacs` fallback), render a two-line
 Starship-style prompt (`<user> on 󰇅 <host> [ <paused>  <running>] is ❄️ v<version>`,
 with a line-2 red `󰞴` drain badge and modal `❯`/`❮` indicators), and expose
-dynamic `clap` / `reedline` commands (`workers`, `start`, `list`, `status`,
-`result`, `cancel`, `permissions`, `secrets`, `help`, `exit`) and
+dynamic `clap` / `reedline` commands (`workers`, `run`, `list`, `status`,
+`result`, `view`, `cancel`, `permissions`, `secrets`, `help`, `exit`), an
+alternate-screen `view` TUI for live step/event inspection, and
 permission-filtered completions; non-interactive SSH accepts only
 `secrets set <name>`.
 

@@ -15,8 +15,8 @@
   - `/etc/boreal/workers.yaml` (`0440`, `root:boreal`) — registered
     `workflowType`, `description`, and typed `args` schemas.
   - `/etc/boreal/users/<user>/perms.yaml` (`0440`, `root:boreal`) — default and
-    resolved per-worker `read` (`status`, `result`, `list`) and `write` (`start`
-    and `cancel`) policies.
+    resolved per-worker `read` (`status`, `result`, `view`, `list`) and `write`
+    (`run` and `cancel`) policies.
 - **Runtime permission enforcement and host isolation (`boreal-broker` &
   `modules/{temporal,boreal}.nix`)**:
   - Production `services.temporal` (`temporal-server`) and PostgreSQL run inside
@@ -37,10 +37,11 @@
     `[ <paused>  <running>]` workflow counts, `is ❄️ v<version>` from
     `temporal/Cargo.toml` / `/etc/boreal/version`, line-2 red `󰞴` drain badge,
     and status/modal `❯`/`❮` indicators), dynamically builds `clap`/`reedline`
-    commands and permission-filtered completions from `/etc/boreal/` (falling
-    back to a local mock preview only outside SSH when `/etc/boreal` is absent),
-    requires `[y/N]` confirmation before `cancel`, and rejects unsupported SSH
-    commands, SFTP, and port/agent forwarding.
+    commands, an interactive `view` TUI for live workflow steps/events, and
+    permission-filtered completions from `/etc/boreal/` (falling back to a
+    local mock preview only outside SSH when `/etc/boreal` is absent), requires
+    `[y/N]` confirmation before `cancel`, and rejects unsupported SSH commands,
+    SFTP, and port/agent forwarding.
   - Users manage `~/.config/boreal/secrets` (`0700` directory, `0600` files) via
     echo-free TTY prompts or stdin (`ssh <user>@<host> "secrets set <name>" < file`),
     and worker activities read secrets locally via `boreal_worker::read_secret`.
