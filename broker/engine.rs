@@ -5,7 +5,7 @@ use std::time::Duration;
 use boreal_common::catalog::{self, Catalog};
 use boreal_common::wire::{
     ErrorCode, PromptSummary, Request, Response, ResultOutcome, UpdaterRequest, UpdaterResponse,
-    WorkflowDetail, WorkflowSummary,
+    WorkflowCounts, WorkflowDetail, WorkflowSummary,
 };
 
 use crate::ledger::{self, Coordinator, Gate, TrackedKey};
@@ -228,21 +228,21 @@ impl<B: Backend> Engine<B> {
                     .users()
                     .get(caller)
                     .is_some_and(|policy| !policy.workers().is_empty());
-                let running_workflows = if !has_own_workers {
-                    Some(0)
+                let workflows = if !has_own_workers {
+                    Some(WorkflowCounts::default())
                 } else {
                     match tokio::time::timeout(
                         Duration::from_millis(200),
-                        self.backend.count_running_workflows(caller),
+                        self.backend.count_open_workflows(caller),
                     )
                     .await
                     {
-                        Ok(Ok(count)) => Some(count),
+                        Ok(Ok(counts)) => Some(counts),
                         Ok(Err(_)) | Err(_) => None,
                     }
                 };
                 Ok(Response::Summary(PromptSummary {
-                    running_workflows,
+                    workflows,
                     draining,
                 }))
             }
@@ -787,24 +787,36 @@ mod tests {
             Box::pin(async move { Ok(rows) })
         }
 
-        fn count_running_workflows<'a>(&'a self, namespace: &'a str) -> BoxFuture<'a, u32> {
+        fn count_open_workflows<'a>(&'a self, namespace: &'a str) -> BoxFuture<'a, WorkflowCounts> {
             let guard = self.state.lock().unwrap();
             if guard.fail_db {
                 return Box::pin(async { Err(BackendError::Unavailable("db down".into())) });
             }
-            let mut open_ids: BTreeSet<String> = guard
-                .runs
-                .iter()
-                .filter(|((ns, _), exec)| ns == namespace && exec.status.is_open())
-                .map(|((_, id), _)| id.clone())
-                .collect();
-            for row in &guard.db_running {
-                if row.namespace == namespace {
-                    open_ids.insert(row.workflow_id.clone());
+            let mut paused_ids = BTreeSet::new();
+            let mut running_ids = BTreeSet::new();
+            for ((ns, id), exec) in &guard.runs {
+                if ns == namespace {
+                    match exec.status {
+                        ExecStatus::Paused => {
+                            paused_ids.insert(id.clone());
+                        }
+                        ExecStatus::Running => {
+                            running_ids.insert(id.clone());
+                        }
+                        _ => {}
+                    }
                 }
             }
-            let count = open_ids.len() as u32;
-            Box::pin(async move { Ok(count) })
+            for row in &guard.db_running {
+                if row.namespace == namespace && !paused_ids.contains(&row.workflow_id) {
+                    running_ids.insert(row.workflow_id.clone());
+                }
+            }
+            let counts = WorkflowCounts {
+                paused: paused_ids.len() as u32,
+                running: running_ids.len() as u32,
+            };
+            Box::pin(async move { Ok(counts) })
         }
     }
 
@@ -1138,7 +1150,10 @@ workers:
         assert_eq!(
             engine.handle_user_request("alice", Request::Summary).await,
             Response::Summary(PromptSummary {
-                running_workflows: Some(0),
+                workflows: Some(WorkflowCounts {
+                    paused: 0,
+                    running: 0,
+                }),
                 draining: false,
             })
         );
@@ -1154,24 +1169,49 @@ workers:
                 },
             )
             .await;
+        engine
+            .handle_user_request(
+                "alice",
+                Request::Start {
+                    owner: "alice".into(),
+                    worker: "greet".into(),
+                    id: "a2".into(),
+                    args: vec!["Ada".into()],
+                },
+            )
+            .await;
+        backend
+            .state
+            .lock()
+            .unwrap()
+            .runs
+            .get_mut(&("alice".into(), "a2".into()))
+            .unwrap()
+            .status = ExecStatus::Paused;
 
-        // Alice sees 1 running in her namespace; Bob still sees 0 in his own namespace.
+        // Alice sees 1 paused + 1 running in her namespace; Bob still sees 0/0 in his own.
         assert_eq!(
             engine.handle_user_request("alice", Request::Summary).await,
             Response::Summary(PromptSummary {
-                running_workflows: Some(1),
+                workflows: Some(WorkflowCounts {
+                    paused: 1,
+                    running: 1,
+                }),
                 draining: false,
             })
         );
         assert_eq!(
             engine.handle_user_request("bob", Request::Summary).await,
             Response::Summary(PromptSummary {
-                running_workflows: Some(0),
+                workflows: Some(WorkflowCounts {
+                    paused: 0,
+                    running: 0,
+                }),
                 draining: false,
             })
         );
 
-        // Gate closure surfaces draining=true, and DB outage degrades running_workflows to None.
+        // Gate closure surfaces draining=true, and DB outage degrades workflows to None.
         assert_eq!(
             engine
                 .handle_updater_request(UpdaterRequest::CloseGate {
@@ -1185,7 +1225,7 @@ workers:
         assert_eq!(
             engine.handle_user_request("alice", Request::Summary).await,
             Response::Summary(PromptSummary {
-                running_workflows: None,
+                workflows: None,
                 draining: true,
             })
         );

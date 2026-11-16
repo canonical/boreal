@@ -3,6 +3,8 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::Duration;
 
+use boreal_common::wire::WorkflowCounts;
+
 pub const DEFAULT_PG_SOCKET: &str = "/run/postgresql/.s.PGSQL.5432";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -21,12 +23,12 @@ fn valid_namespace(ns: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, b'_' | b'-'))
 }
 
-pub fn count_running_in_namespace(
+pub fn count_open_in_namespace(
     socket_path: &Path,
     db_user: &str,
     db_name: &str,
     namespace: &str,
-) -> Result<u32, String> {
+) -> Result<WorkflowCounts, String> {
     if !valid_namespace(namespace) {
         return Err(format!("invalid namespace identifier '{namespace}'"));
     }
@@ -43,7 +45,9 @@ pub fn count_running_in_namespace(
     wait_for_ready(&mut stream)?;
 
     let sql = format!(
-        "SELECT COUNT(*) \
+        "SELECT \
+             COUNT(*) FILTER (WHERE c.status = 8), \
+             COUNT(*) FILTER (WHERE c.status = 1) \
          FROM current_executions c \
          JOIN namespaces n ON n.id = c.namespace_id \
          WHERE n.name = '{namespace}' \
@@ -57,12 +61,16 @@ pub fn count_running_in_namespace(
     let Some(first) = rows.first() else {
         return Err("empty COUNT(*) response from current_executions".into());
     };
-    if first.len() != 1 {
-        return Err("unexpected column count from COUNT(*) query".into());
+    if first.len() != 2 {
+        return Err("unexpected column count from open workflow COUNT(*) query".into());
     }
-    first[0]
+    let paused = first[0]
         .parse::<u32>()
-        .map_err(|_| format!("invalid COUNT(*) value '{}'", first[0]))
+        .map_err(|_| format!("invalid paused COUNT(*) value '{}'", first[0]))?;
+    let running = first[1]
+        .parse::<u32>()
+        .map_err(|_| format!("invalid running COUNT(*) value '{}'", first[1]))?;
+    Ok(WorkflowCounts { paused, running })
 }
 
 pub fn query_running_executions(
@@ -342,10 +350,8 @@ mod tests {
             "00112233-4455-6677-8899-aabbccddeeff"
         );
 
-        assert!(count_running_in_namespace(&sock, "boreal-broker", "temporal", "Alice").is_err());
-        assert!(
-            count_running_in_namespace(&sock, "boreal-broker", "temporal", "alice';--").is_err()
-        );
+        assert!(count_open_in_namespace(&sock, "boreal-broker", "temporal", "Alice").is_err());
+        assert!(count_open_in_namespace(&sock, "boreal-broker", "temporal", "alice';--").is_err());
 
         let count_sock =
             std::env::temp_dir().join(format!("boreal-pg-cnt-{}.sock", std::process::id()));
@@ -363,12 +369,17 @@ mod tests {
 
             let (qtag, qbody) = read_msg(&mut conn).unwrap();
             assert_eq!(qtag, b'Q');
-            assert!(String::from_utf8_lossy(&qbody).contains("n.name = 'alice'"));
+            let sql_str = String::from_utf8_lossy(&qbody);
+            assert!(sql_str.contains("n.name = 'alice'"));
+            assert!(sql_str.contains("c.status = 8"));
+            assert!(sql_str.contains("c.status = 1"));
 
             let mut row = Vec::new();
-            row.extend_from_slice(&1u16.to_be_bytes());
-            row.extend_from_slice(&1i32.to_be_bytes());
-            row.extend_from_slice(b"2");
+            row.extend_from_slice(&2u16.to_be_bytes());
+            for col in ["1", "2"] {
+                row.extend_from_slice(&(col.len() as i32).to_be_bytes());
+                row.extend_from_slice(col.as_bytes());
+            }
             conn.write_all(b"D").unwrap();
             conn.write_all(&((row.len() + 4) as u32).to_be_bytes())
                 .unwrap();
@@ -377,8 +388,11 @@ mod tests {
                 .unwrap();
         });
         assert_eq!(
-            count_running_in_namespace(&count_sock, "boreal-broker", "temporal", "alice").unwrap(),
-            2
+            count_open_in_namespace(&count_sock, "boreal-broker", "temporal", "alice").unwrap(),
+            WorkflowCounts {
+                paused: 1,
+                running: 2,
+            }
         );
         count_server.join().unwrap();
         let _ = std::fs::remove_file(&count_sock);

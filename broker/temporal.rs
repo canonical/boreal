@@ -25,6 +25,8 @@ use tonic::{
 };
 use uuid::Uuid;
 
+use boreal_common::wire::WorkflowCounts;
+
 use crate::ledger::TrackedKey;
 use crate::pg::{self, ActiveDbExecution};
 
@@ -187,7 +189,7 @@ pub trait Backend: Send + Sync {
 
     fn list_running_history_db(&self) -> BoxFuture<'_, Vec<ActiveDbExecution>>;
 
-    fn count_running_workflows<'a>(&'a self, namespace: &'a str) -> BoxFuture<'a, u32>;
+    fn count_open_workflows<'a>(&'a self, namespace: &'a str) -> BoxFuture<'a, WorkflowCounts>;
 }
 
 pub struct LiveBackend {
@@ -876,18 +878,16 @@ impl Backend for LiveBackend {
         })
     }
 
-    fn count_running_workflows<'a>(&'a self, namespace: &'a str) -> BoxFuture<'a, u32> {
+    fn count_open_workflows<'a>(&'a self, namespace: &'a str) -> BoxFuture<'a, WorkflowCounts> {
         let sock = self.pg_socket.clone();
         let user = self.pg_user.clone();
         let db = self.pg_db.clone();
         let ns = namespace.to_owned();
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || {
-                pg::count_running_in_namespace(&sock, &user, &db, &ns)
-            })
-            .await
-            .map_err(|e| BackendError::Internal(format!("db task join error: {e}")))?
-            .map_err(BackendError::Unavailable)
+            tokio::task::spawn_blocking(move || pg::count_open_in_namespace(&sock, &user, &db, &ns))
+                .await
+                .map_err(|e| BackendError::Internal(format!("db task join error: {e}")))?
+                .map_err(BackendError::Unavailable)
         })
     }
 }
