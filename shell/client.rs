@@ -388,13 +388,13 @@ mod tests {
 
         // Missing socket fails silently to None without blocking login.
         let offline = Mode::Live {
-            socket: PathBuf::from("/tmp/opencode/nonexistent-boreal-broker.sock"),
+            socket: std::env::temp_dir().join("nonexistent-boreal-broker.sock"),
         };
         assert_eq!(offline.prompt_summary(), None);
 
         // Live Unix socket summary round-trips running count and draining state.
-        let sock = Path::new("/tmp/opencode")
-            .join(format!("boreal-client-sum-{}.sock", std::process::id()));
+        let sock =
+            std::env::temp_dir().join(format!("boreal-client-sum-{}.sock", std::process::id()));
         let _ = std::fs::remove_file(&sock);
         let listener = UnixListener::bind(&sock).unwrap();
         let server = std::thread::spawn(move || {
