@@ -42,7 +42,7 @@ impl ErrorCode {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Request {
     Workers,
-    Start {
+    Run {
         owner: String,
         worker: String,
         id: String,
@@ -72,6 +72,10 @@ pub enum Request {
         user: Option<String>,
     },
     Summary,
+    View {
+        owner: String,
+        id: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -153,6 +157,79 @@ pub struct PromptSummary {
     pub draining: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StepState {
+    Pending,
+    Running,
+    Retrying,
+    Completed,
+    Failed,
+    Cancelled,
+    TimedOut,
+}
+
+impl StepState {
+    fn tag(self) -> u8 {
+        match self {
+            Self::Pending => 1,
+            Self::Running => 2,
+            Self::Retrying => 3,
+            Self::Completed => 4,
+            Self::Failed => 5,
+            Self::Cancelled => 6,
+            Self::TimedOut => 7,
+        }
+    }
+
+    fn from_tag(tag: u8) -> Result<Self, Error> {
+        match tag {
+            1 => Ok(Self::Pending),
+            2 => Ok(Self::Running),
+            3 => Ok(Self::Retrying),
+            4 => Ok(Self::Completed),
+            5 => Ok(Self::Failed),
+            6 => Ok(Self::Cancelled),
+            7 => Ok(Self::TimedOut),
+            _ => Err(Error::Decode("invalid StepState tag")),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkflowStep {
+    pub kind: String,
+    pub name: String,
+    pub state: StepState,
+    pub duration: String,
+    pub detail: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkflowEvent {
+    pub id: u64,
+    pub timestamp: String,
+    pub kind: String,
+    pub summary: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkflowView {
+    pub owner: String,
+    pub worker: String,
+    pub workflow_type: String,
+    pub workflow_id: String,
+    pub run_id: String,
+    pub status: String,
+    pub start_time: String,
+    pub close_time: String,
+    pub elapsed: String,
+    pub input: String,
+    pub task_warning: String,
+    pub steps: Vec<WorkflowStep>,
+    pub events: Vec<WorkflowEvent>,
+    pub outcome: Option<ResultOutcome>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Response {
     Workers(Vec<WorkerEntry>),
@@ -180,6 +257,7 @@ pub enum Response {
         message: String,
     },
     Summary(PromptSummary),
+    View(WorkflowView),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -268,6 +346,10 @@ impl Encoder {
         self.buf.extend_from_slice(&v.to_be_bytes());
     }
 
+    fn u64(&mut self, v: u64) {
+        self.buf.extend_from_slice(&v.to_be_bytes());
+    }
+
     fn str(&mut self, s: &str) {
         self.u32(s.len() as u32);
         self.buf.extend_from_slice(s.as_bytes());
@@ -337,6 +419,13 @@ impl<'a> Decoder<'a> {
         Ok(u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
     }
 
+    fn u64(&mut self) -> Result<u64, Error> {
+        let b = self.take(8)?;
+        Ok(u64::from_be_bytes([
+            b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+        ]))
+    }
+
     fn str(&mut self) -> Result<String, Error> {
         let len = self.u32()? as usize;
         let bytes = self.take(len)?;
@@ -378,7 +467,7 @@ impl Request {
         let mut enc = Encoder::new();
         match self {
             Self::Workers => enc.u8(1),
-            Self::Start {
+            Self::Run {
                 owner,
                 worker,
                 id,
@@ -423,6 +512,11 @@ impl Request {
                 enc.opt_str(user.as_deref());
             }
             Self::Summary => enc.u8(9),
+            Self::View { owner, id } => {
+                enc.u8(10);
+                enc.str(owner);
+                enc.str(id);
+            }
         }
         enc.finish()
     }
@@ -443,7 +537,7 @@ impl Request {
                 for _ in 0..count {
                     args.push(dec.str()?);
                 }
-                Self::Start {
+                Self::Run {
                     owner,
                     worker,
                     id,
@@ -472,6 +566,10 @@ impl Request {
                 user: dec.opt_str()?,
             },
             9 => Self::Summary,
+            10 => Self::View {
+                owner: dec.str()?,
+                id: dec.str()?,
+            },
             _ => return Err(Error::Decode("unknown Request tag")),
         };
         dec.finish()?;
@@ -502,6 +600,144 @@ fn decode_detail(dec: &mut Decoder<'_>) -> Result<WorkflowDetail, Error> {
         status: dec.str()?,
         start_time: dec.str()?,
         close_time: dec.str()?,
+    })
+}
+
+fn encode_outcome(enc: &mut Encoder, outcome: &ResultOutcome) {
+    match outcome {
+        ResultOutcome::Completed { run_id, output } => {
+            enc.u8(1);
+            enc.str(run_id);
+            enc.str(output);
+        }
+        ResultOutcome::Running { run_id } => {
+            enc.u8(2);
+            enc.str(run_id);
+        }
+        ResultOutcome::Unsuccessful {
+            run_id,
+            status,
+            detail,
+        } => {
+            enc.u8(3);
+            enc.str(run_id);
+            enc.str(status);
+            enc.str(detail);
+        }
+    }
+}
+
+fn decode_outcome(dec: &mut Decoder<'_>) -> Result<ResultOutcome, Error> {
+    match dec.u8()? {
+        1 => Ok(ResultOutcome::Completed {
+            run_id: dec.str()?,
+            output: dec.str()?,
+        }),
+        2 => Ok(ResultOutcome::Running { run_id: dec.str()? }),
+        3 => Ok(ResultOutcome::Unsuccessful {
+            run_id: dec.str()?,
+            status: dec.str()?,
+            detail: dec.str()?,
+        }),
+        _ => Err(Error::Decode("unknown ResultOutcome tag")),
+    }
+}
+
+fn encode_view(enc: &mut Encoder, v: &WorkflowView) {
+    enc.str(&v.owner);
+    enc.str(&v.worker);
+    enc.str(&v.workflow_type);
+    enc.str(&v.workflow_id);
+    enc.str(&v.run_id);
+    enc.str(&v.status);
+    enc.str(&v.start_time);
+    enc.str(&v.close_time);
+    enc.str(&v.elapsed);
+    enc.str(&v.input);
+    enc.str(&v.task_warning);
+    enc.u32(v.steps.len() as u32);
+    for step in &v.steps {
+        enc.str(&step.kind);
+        enc.str(&step.name);
+        enc.u8(step.state.tag());
+        enc.str(&step.duration);
+        enc.str(&step.detail);
+    }
+    enc.u32(v.events.len() as u32);
+    for ev in &v.events {
+        enc.u64(ev.id);
+        enc.str(&ev.timestamp);
+        enc.str(&ev.kind);
+        enc.str(&ev.summary);
+    }
+    match &v.outcome {
+        Some(out) => {
+            enc.u8(1);
+            encode_outcome(enc, out);
+        }
+        None => enc.u8(0),
+    }
+}
+
+fn decode_view(dec: &mut Decoder<'_>) -> Result<WorkflowView, Error> {
+    let owner = dec.str()?;
+    let worker = dec.str()?;
+    let workflow_type = dec.str()?;
+    let workflow_id = dec.str()?;
+    let run_id = dec.str()?;
+    let status = dec.str()?;
+    let start_time = dec.str()?;
+    let close_time = dec.str()?;
+    let elapsed = dec.str()?;
+    let input = dec.str()?;
+    let task_warning = dec.str()?;
+    let n_steps = dec.u32()? as usize;
+    if n_steps > 1024 {
+        return Err(Error::Decode("too many workflow steps"));
+    }
+    let mut steps = Vec::with_capacity(n_steps);
+    for _ in 0..n_steps {
+        steps.push(WorkflowStep {
+            kind: dec.str()?,
+            name: dec.str()?,
+            state: StepState::from_tag(dec.u8()?)?,
+            duration: dec.str()?,
+            detail: dec.str()?,
+        });
+    }
+    let n_events = dec.u32()? as usize;
+    if n_events > 4096 {
+        return Err(Error::Decode("too many workflow events"));
+    }
+    let mut events = Vec::with_capacity(n_events);
+    for _ in 0..n_events {
+        events.push(WorkflowEvent {
+            id: dec.u64()?,
+            timestamp: dec.str()?,
+            kind: dec.str()?,
+            summary: dec.str()?,
+        });
+    }
+    let outcome = match dec.u8()? {
+        0 => None,
+        1 => Some(decode_outcome(dec)?),
+        _ => return Err(Error::Decode("invalid option tag")),
+    };
+    Ok(WorkflowView {
+        owner,
+        worker,
+        workflow_type,
+        workflow_id,
+        run_id,
+        status,
+        start_time,
+        close_time,
+        elapsed,
+        input,
+        task_warning,
+        steps,
+        events,
+        outcome,
     })
 }
 
@@ -554,27 +790,7 @@ impl Response {
             }
             Self::WorkflowResult(outcome) => {
                 enc.u8(5);
-                match outcome {
-                    ResultOutcome::Completed { run_id, output } => {
-                        enc.u8(1);
-                        enc.str(run_id);
-                        enc.str(output);
-                    }
-                    ResultOutcome::Running { run_id } => {
-                        enc.u8(2);
-                        enc.str(run_id);
-                    }
-                    ResultOutcome::Unsuccessful {
-                        run_id,
-                        status,
-                        detail,
-                    } => {
-                        enc.u8(3);
-                        enc.str(run_id);
-                        enc.str(status);
-                        enc.str(detail);
-                    }
-                }
+                encode_outcome(&mut enc, outcome);
             }
             Self::CancelPrepared(d) => {
                 enc.u8(6);
@@ -617,6 +833,10 @@ impl Response {
                 enc.u8(10);
                 enc.opt_counts(summary.workflows);
                 enc.bool(summary.draining);
+            }
+            Self::View(view) => {
+                enc.u8(11);
+                encode_view(&mut enc, view);
             }
         }
         enc.finish()
@@ -670,22 +890,7 @@ impl Response {
                 Self::List(items)
             }
             4 => Self::Status(decode_detail(&mut dec)?),
-            5 => {
-                let outcome = match dec.u8()? {
-                    1 => ResultOutcome::Completed {
-                        run_id: dec.str()?,
-                        output: dec.str()?,
-                    },
-                    2 => ResultOutcome::Running { run_id: dec.str()? },
-                    3 => ResultOutcome::Unsuccessful {
-                        run_id: dec.str()?,
-                        status: dec.str()?,
-                        detail: dec.str()?,
-                    },
-                    _ => return Err(Error::Decode("unknown ResultOutcome tag")),
-                };
-                Self::WorkflowResult(outcome)
-            }
+            5 => Self::WorkflowResult(decode_outcome(&mut dec)?),
             6 => Self::CancelPrepared(decode_detail(&mut dec)?),
             7 => Self::Cancelled {
                 owner: dec.str()?,
@@ -728,6 +933,7 @@ impl Response {
                 workflows: dec.opt_counts()?,
                 draining: dec.bool()?,
             }),
+            11 => Self::View(decode_view(&mut dec)?),
             _ => return Err(Error::Decode("unknown Response tag")),
         };
         dec.finish()?;
@@ -837,6 +1043,59 @@ impl UpdaterResponse {
     }
 }
 
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u32;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = i64::from(yoe) + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if month <= 2 { y + 1 } else { y };
+    (year, month, day)
+}
+
+pub fn format_utc_timestamp(secs: i64, _nanos: i32) -> String {
+    if secs <= 0 {
+        return "-".into();
+    }
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400) as u32;
+    let (year, month, day) = civil_from_days(days);
+    let hour = rem / 3_600;
+    let min = (rem % 3_600) / 60;
+    let sec = rem % 60;
+    format!("{year:04}-{month:02}-{day:02} {hour:02}:{min:02}:{sec:02} UTC")
+}
+
+pub fn format_utc_hms(secs: i64, nanos: i32) -> String {
+    if secs <= 0 {
+        return "--:--:--.---".into();
+    }
+    let rem = secs.rem_euclid(86_400) as u32;
+    let hour = rem / 3_600;
+    let min = (rem % 3_600) / 60;
+    let sec = rem % 60;
+    let millis = (nanos.unsigned_abs() / 1_000_000).min(999);
+    format!("{hour:02}:{min:02}:{sec:02}.{millis:03}")
+}
+
+pub fn format_duration_ms(ms: u64) -> String {
+    if ms < 1_000 {
+        format!("{ms}ms")
+    } else if ms < 60_000 {
+        format!("{}.{:02}s", ms / 1_000, (ms % 1_000) / 10)
+    } else if ms < 3_600_000 {
+        let s = ms / 1_000;
+        format!("{}m {:02}s", s / 60, s % 60)
+    } else {
+        let s = ms / 1_000;
+        format!("{}h {:02}m {:02}s", s / 3_600, (s % 3_600) / 60, s % 60)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -845,7 +1104,7 @@ mod tests {
     fn test_shell_and_updater_ipc_frames_roundtrip() {
         let requests = [
             Request::Workers,
-            Request::Start {
+            Request::Run {
                 owner: "alice".into(),
                 worker: "greet".into(),
                 id: "run-1".into(),
@@ -858,6 +1117,10 @@ mod tests {
             },
             Request::Permissions { user: None },
             Request::Summary,
+            Request::View {
+                owner: "alice".into(),
+                id: "run-1".into(),
+            },
         ];
         for req in requests {
             let mut pipe = Vec::new();
@@ -893,6 +1156,42 @@ mod tests {
                 workflows: None,
                 draining: false,
             }),
+            Response::View(WorkflowView {
+                owner: "alice".into(),
+                worker: "greet".into(),
+                workflow_type: "DemoWorkflow".into(),
+                workflow_id: "run-1".into(),
+                run_id: "uuid".into(),
+                status: "running".into(),
+                start_time: "2026-11-16 14:02:10 UTC".into(),
+                close_time: "-".into(),
+                elapsed: "4.20s".into(),
+                input: r#"{"name":"Ada","wait_seconds":20}"#.into(),
+                task_warning: String::new(),
+                steps: vec![
+                    WorkflowStep {
+                        kind: "timer".into(),
+                        name: "5s".into(),
+                        state: StepState::Completed,
+                        duration: "5.00s".into(),
+                        detail: String::new(),
+                    },
+                    WorkflowStep {
+                        kind: "activity".into(),
+                        name: "greet".into(),
+                        state: StepState::Retrying,
+                        duration: "1.20s elapsed".into(),
+                        detail: "attempt 2/5 · heartbeat: 40%".into(),
+                    },
+                ],
+                events: vec![WorkflowEvent {
+                    id: 1,
+                    timestamp: "14:02:10.125".into(),
+                    kind: "WorkflowExecutionStarted".into(),
+                    summary: "DemoWorkflow on alice-greet".into(),
+                }],
+                outcome: None,
+            }),
         ];
         for resp in responses {
             assert_eq!(Response::decode(&resp.encode()).unwrap(), resp);
@@ -909,5 +1208,19 @@ mod tests {
             detail: "waiting".into(),
         };
         assert_eq!(UpdaterResponse::decode(&uresp.encode()).unwrap(), uresp);
+    }
+
+    #[test]
+    fn test_utc_timestamp_and_duration_formatting() {
+        assert_eq!(format_utc_timestamp(0, 0), "-");
+        assert_eq!(
+            format_utc_timestamp(1_794_837_730, 125_000_000),
+            "2026-11-16 14:02:10 UTC"
+        );
+        assert_eq!(format_utc_hms(1_794_837_730, 125_000_000), "14:02:10.125");
+        assert_eq!(format_duration_ms(38), "38ms");
+        assert_eq!(format_duration_ms(1_042), "1.04s");
+        assert_eq!(format_duration_ms(125_000), "2m 05s");
+        assert_eq!(format_duration_ms(3_723_000), "1h 02m 03s");
     }
 }
