@@ -1,10 +1,12 @@
 use std::borrow::Cow;
+use std::env;
+use std::io::{self, Write};
 use std::sync::Arc;
 use std::time::Duration;
 
 use boreal_common::os;
 use boreal_common::wire::PromptSummary;
-use crossterm::style;
+use crossterm::{queue, style, terminal};
 use nu_ansi_term::Color;
 use reedline::{PromptEditMode, PromptHistorySearch, PromptHistorySearchStatus, PromptViMode};
 
@@ -30,8 +32,48 @@ impl Host {
     }
 }
 
+/// Pushes the active window title onto the XTerm title stack, sets the session
+/// title via OSC 0 (`\x1b]0;...\x07`), and restores the previous title on drop.
+pub struct TitleGuard {
+    active: bool,
+}
+
+impl TitleGuard {
+    pub fn enter<S: AsRef<str>>(title: S) -> Self {
+        if env::var_os("TERM").is_some_and(|t| t == "dumb") {
+            return Self { active: false };
+        }
+        let mut out = io::stdout().lock();
+        let _ = write_title_enter(&mut out, title.as_ref());
+        Self { active: true }
+    }
+}
+
+impl Drop for TitleGuard {
+    fn drop(&mut self) {
+        if self.active {
+            let mut out = io::stdout().lock();
+            let _ = write_title_exit(&mut out);
+        }
+    }
+}
+
+pub fn write_title_enter<W: Write>(writer: &mut W, title: &str) -> io::Result<()> {
+    let safe: String = title.chars().filter(|c| !c.is_control()).collect();
+    writer.write_all(b"\x1b[22;0t")?;
+    queue!(writer, terminal::SetTitle(safe))?;
+    writer.flush()
+}
+
+pub fn write_title_exit<W: Write>(writer: &mut W) -> io::Result<()> {
+    queue!(writer, terminal::SetTitle(""))?;
+    writer.write_all(b"\x1b[23;0t")?;
+    writer.flush()
+}
+
 /// Two-line Starship-style prompt pre-rendered once per command cycle.
 pub struct Prompt {
+    window_title: String,
     identity: String,
     rendered_left: String,
     last_ok: bool,
@@ -44,20 +86,38 @@ impl Prompt {
         host: Host,
         helix_state: Option<Arc<helix::State>>,
     ) -> Self {
-        let user_seg = Color::Cyan.bold().paint(caller.as_ref());
-        let at_seg = Color::DarkGray.normal().paint("@");
-        let host_seg = match &host {
-            Host::Live(name) => Color::Blue.bold().paint(os::sanitize_hostname(name)),
-            Host::Mock => Color::Purple.bold().paint("mock"),
+        let clean_caller: String = caller
+            .as_ref()
+            .chars()
+            .filter(|c| !c.is_control())
+            .collect();
+        let (host_label, host_seg) = match &host {
+            Host::Live(name) => {
+                let clean_host = os::sanitize_hostname(name);
+                let painted = Color::Blue.bold().paint(clean_host.clone()).to_string();
+                (clean_host, painted)
+            }
+            Host::Mock => (
+                String::from("mock"),
+                Color::Purple.bold().paint("mock").to_string(),
+            ),
         };
+        let window_title = format!("Boreal {clean_caller}@{host_label}");
+        let user_seg = Color::Cyan.bold().paint(&clean_caller);
+        let at_seg = Color::DarkGray.normal().paint("@");
         let identity = format!("{user_seg}{at_seg}{host_seg}");
         let rendered_left = format!("{identity}\n");
         Self {
+            window_title,
             identity,
             rendered_left,
             last_ok: true,
             helix_state,
         }
+    }
+
+    pub fn window_title(&self) -> &str {
+        &self.window_title
     }
 
     pub fn refresh(
@@ -248,9 +308,25 @@ mod tests {
             ERR_INSERT_INDICATOR
         );
 
-        // Mock preview renders <user>@mock.
+        // Mock preview renders <user>@mock and matching window title.
         let mock = Prompt::new("alice", Host::Mock, None);
         assert_eq!(strip_ansi(&mock.render_prompt_left()), "alice@mock\n");
+        assert_eq!(live.window_title(), "Boreal alice@demo-lab");
+        assert_eq!(mock.window_title(), "Boreal alice@mock");
+    }
+
+    #[test]
+    fn test_window_title_osc_sequences_strip_controls_and_restore_stack() {
+        let mut enter_buf = Vec::new();
+        write_title_enter(&mut enter_buf, "Boreal alice@demo-lab\x07\x1b]9;bad").unwrap();
+        assert_eq!(
+            enter_buf,
+            b"\x1b[22;0t\x1b]0;Boreal alice@demo-lab]9;bad\x07"
+        );
+
+        let mut exit_buf = Vec::new();
+        write_title_exit(&mut exit_buf).unwrap();
+        assert_eq!(exit_buf, b"\x1b]0;\x07\x1b[23;0t");
     }
 
     #[test]

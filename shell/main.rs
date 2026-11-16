@@ -448,6 +448,7 @@ fn run_interactive() -> Result<(), Box<dyn Error>> {
         resolve_prompt_host(mode.is_mock()),
         helix_state,
     );
+    let _title_guard = prompt::TitleGuard::enter(prompt.window_title());
     let mut last_ok = true;
     let mut last_duration = None;
 
