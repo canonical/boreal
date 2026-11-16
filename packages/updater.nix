@@ -13,6 +13,7 @@ let
         (fs.unions [
           ../common
           ../updater
+          ../templates/default/temporal/Cargo.toml
         ])
         (
           fs.unions [

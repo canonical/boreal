@@ -9,6 +9,7 @@ let
         (fs.unions [
           ../common
           ../shell
+          ../templates/default/temporal/Cargo.toml
         ])
         (
           fs.unions [

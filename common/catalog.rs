@@ -9,6 +9,49 @@ use crate::yaml::{self, Value};
 
 pub const DEFAULT_ETC_DIR: &str = "/etc/boreal";
 const MAX_YAML_BYTES: usize = 512 * 1024;
+const MAX_VERSION_BYTES: usize = 256;
+const DEFAULT_TEMPORAL_MANIFEST: &str = include_str!("../templates/default/temporal/Cargo.toml");
+
+pub fn parse_cargo_version(manifest: &str) -> Option<&str> {
+    let mut in_version_section = false;
+    for raw_line in manifest.lines() {
+        let line = raw_line.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(header) = line.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+            let section = header.trim();
+            in_version_section = matches!(section, "workspace.package" | "package");
+            continue;
+        }
+        if !in_version_section {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("version") {
+            let trimmed = rest.trim_start();
+            let Some(after_eq) = trimmed.strip_prefix('=') else {
+                continue;
+            };
+            let Some(quoted) = after_eq.trim_start().strip_prefix('"') else {
+                continue;
+            };
+            let Some((ver, trailing)) = quoted.split_once('"') else {
+                continue;
+            };
+            if trailing.trim().is_empty()
+                && !ver.is_empty()
+                && ver.chars().all(|c| !c.is_control() && !c.is_whitespace())
+            {
+                return Some(ver);
+            }
+        }
+    }
+    None
+}
+
+pub fn default_lab_version() -> &'static str {
+    parse_cargo_version(DEFAULT_TEMPORAL_MANIFEST).unwrap_or("0.1.0")
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Scalar {
@@ -388,6 +431,7 @@ pub struct VerifiedWorker<'a> {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Catalog {
+    version: String,
     packages: BTreeMap<String, Package>,
     users: BTreeMap<String, UserPolicy>,
 }
@@ -496,7 +540,25 @@ impl Catalog {
             user_texts.insert(user_name.to_owned(), perms_text);
         }
 
-        Self::from_yaml(&workers_text, &user_texts)
+        let mut catalog = Self::from_yaml(&workers_text, &user_texts)?;
+        match os::read_owned_file(&dir.join("version"), expected_uid, 0o227, MAX_VERSION_BYTES) {
+            Ok(raw_ver) => {
+                let text = String::from_utf8(raw_ver)
+                    .map_err(|_| Error::InvalidCatalog("version file is not valid UTF-8".into()))?;
+                let trimmed = text.trim();
+                if trimmed.is_empty()
+                    || trimmed.chars().any(|c| c.is_control() || c.is_whitespace())
+                {
+                    return Err(Error::InvalidCatalog(
+                        "version file must be a single non-empty token".into(),
+                    ));
+                }
+                catalog.version = trimmed.to_owned();
+            }
+            Err(os::Error::Io(err)) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(Error::InvalidCatalog(err.detail())),
+        }
+        Ok(catalog)
     }
 
     pub fn from_yaml(
@@ -521,7 +583,11 @@ impl Catalog {
             users.insert(dir_user.clone(), policy);
         }
 
-        let catalog = Self { packages, users };
+        let catalog = Self {
+            version: default_lab_version().to_owned(),
+            packages,
+            users,
+        };
         catalog.validate_cross_references()?;
         Ok(catalog)
     }
@@ -642,6 +708,10 @@ workers:
             }
         }
         Ok(())
+    }
+
+    pub fn version(&self) -> &str {
+        &self.version
     }
 
     pub fn packages(&self) -> &BTreeMap<String, Package> {
@@ -1395,5 +1465,51 @@ lab-worker-alt:
             cat.verify_execution("alice", "bob-greet", "DemoWorkflow", "run-123")
                 .is_err()
         );
+        assert_eq!(cat.version(), default_lab_version());
+        assert_eq!(default_lab_version(), "0.1.0");
+    }
+
+    #[test]
+    fn test_cargo_manifest_and_etc_version_loading() {
+        let cases = [
+            (
+                "[workspace]\nresolver = \"3\"\n[workspace.package]\nversion = \"0.4.2\" # comment\n",
+                Some("0.4.2"),
+            ),
+            (
+                "[package]\nname = \"worker\"\nversion = \"1.2.0-rc.1\"\n",
+                Some("1.2.0-rc.1"),
+            ),
+            ("[dependencies]\nserde = { version = \"1.0\" }\n", None),
+        ];
+        for (manifest, expected) in cases {
+            assert_eq!(parse_cargo_version(manifest), expected, "{manifest}");
+        }
+
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        let dir = std::env::temp_dir().join(format!("boreal-cat-ver-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(dir.join("users"))
+            .unwrap();
+        let workers = dir.join("workers.yaml");
+        fs::write(&workers, "w:\n  workflowType: Demo\n").unwrap();
+        fs::set_permissions(&workers, fs::Permissions::from_mode(0o400)).unwrap();
+
+        let fallback = Catalog::load_from_dir(&dir, None).unwrap();
+        assert_eq!(fallback.version(), "0.1.0");
+
+        let ver_file = dir.join("version");
+        fs::write(&ver_file, "0.3.1\n").unwrap();
+        fs::set_permissions(&ver_file, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(Catalog::load_from_dir(&dir, None).is_err());
+
+        fs::set_permissions(&ver_file, fs::Permissions::from_mode(0o400)).unwrap();
+        let loaded = Catalog::load_from_dir(&dir, None).unwrap();
+        assert_eq!(loaded.version(), "0.3.1");
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

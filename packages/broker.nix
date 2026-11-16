@@ -14,6 +14,7 @@ let
         (fs.unions [
           ../common
           ../broker
+          ../templates/default/temporal/Cargo.toml
         ])
         (
           fs.unions [
