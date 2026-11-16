@@ -142,8 +142,14 @@ pub struct PermissionReport {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WorkflowCounts {
+    pub paused: u32,
+    pub running: u32,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PromptSummary {
-    pub running_workflows: Option<u32>,
+    pub workflows: Option<WorkflowCounts>,
     pub draining: bool,
 }
 
@@ -277,11 +283,12 @@ impl Encoder {
         }
     }
 
-    fn opt_u32(&mut self, val: Option<u32>) {
+    fn opt_counts(&mut self, val: Option<WorkflowCounts>) {
         match val {
-            Some(v) => {
+            Some(counts) => {
                 self.u8(1);
-                self.u32(v);
+                self.u32(counts.paused);
+                self.u32(counts.running);
             }
             None => self.u8(0),
         }
@@ -346,10 +353,13 @@ impl<'a> Decoder<'a> {
         }
     }
 
-    fn opt_u32(&mut self) -> Result<Option<u32>, Error> {
+    fn opt_counts(&mut self) -> Result<Option<WorkflowCounts>, Error> {
         match self.u8()? {
             0 => Ok(None),
-            1 => Ok(Some(self.u32()?)),
+            1 => Ok(Some(WorkflowCounts {
+                paused: self.u32()?,
+                running: self.u32()?,
+            })),
             _ => Err(Error::Decode("invalid option tag")),
         }
     }
@@ -605,7 +615,7 @@ impl Response {
             }
             Self::Summary(summary) => {
                 enc.u8(10);
-                enc.opt_u32(summary.running_workflows);
+                enc.opt_counts(summary.workflows);
                 enc.bool(summary.draining);
             }
         }
@@ -715,7 +725,7 @@ impl Response {
                 message: dec.str()?,
             },
             10 => Self::Summary(PromptSummary {
-                running_workflows: dec.opt_u32()?,
+                workflows: dec.opt_counts()?,
                 draining: dec.bool()?,
             }),
             _ => return Err(Error::Decode("unknown Response tag")),
@@ -873,11 +883,14 @@ mod tests {
                 message: "denied".into(),
             },
             Response::Summary(PromptSummary {
-                running_workflows: Some(3),
+                workflows: Some(WorkflowCounts {
+                    paused: 1,
+                    running: 3,
+                }),
                 draining: true,
             }),
             Response::Summary(PromptSummary {
-                running_workflows: None,
+                workflows: None,
                 draining: false,
             }),
         ];
