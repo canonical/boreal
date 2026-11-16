@@ -354,7 +354,7 @@ in
                 type = permissionType;
                 default = false;
                 description = ''
-                  Default read policy for this user's workers (`status` and `result`).
+                  Default read policy for this user's workers (`status`, `result`, `view`, and `list`).
                   `true` grants all Boreal users, `false` grants none beyond the owner,
                   and a list grants named Boreal users.
                 '';
@@ -364,7 +364,7 @@ in
                 type = permissionType;
                 default = false;
                 description = ''
-                  Default write policy for this user's workers (`start` and `cancel`).
+                  Default write policy for this user's workers (`run` and `cancel`).
                   `true` grants all Boreal users, `false` grants none beyond the owner,
                   and a list grants named Boreal users.
                 '';
