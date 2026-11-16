@@ -16,7 +16,7 @@ pub enum SecretAction {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
     Workers,
-    Start {
+    Run {
         worker: String,
         id: String,
         args: Vec<String>,
@@ -71,14 +71,14 @@ impl Context {
         &self.caller
     }
 
-    pub fn cli(&self, start_owner_hint: Option<&str>) -> Command {
+    pub fn cli(&self, run_owner_hint: Option<&str>) -> Command {
         let readable = self.catalog.readable_owners(&self.caller);
         let writable = self.catalog.writable_owners(&self.caller);
         let perm_users = self.catalog.visible_permission_users(&self.caller);
 
         let mut worker_choices: BTreeMap<String, String> = BTreeMap::new();
         for (owner, policy) in self.catalog.users() {
-            if let Some(hint) = start_owner_hint
+            if let Some(hint) = run_owner_hint
                 && owner != hint
             {
                 continue;
@@ -114,8 +114,8 @@ impl Context {
             .help("Registered worker name")
             .value_parser(PossibleValuesParser::new(worker_values));
 
-        let start_cmd = Command::new("start")
-            .about("Start a workflow")
+        let run_cmd = Command::new("run")
+            .about("Run a workflow")
             .arg(worker_arg)
             .arg(Arg::new("id").required(true).help("Workflow ID"))
             .arg(
@@ -180,7 +180,7 @@ impl Context {
             .about("Boreal lab shell")
             .subcommand_required(true)
             .subcommand(Command::new("workers").about("List available workers"))
-            .subcommand(start_cmd)
+            .subcommand(run_cmd)
             .subcommand(list_cmd)
             .subcommand(status_cmd)
             .subcommand(result_cmd)
@@ -204,7 +204,7 @@ impl Context {
 
         let action = match matches.subcommand() {
             Some(("workers", _)) => Action::Workers,
-            Some(("start", sub)) => {
+            Some(("run", sub)) => {
                 let worker = sub.get_one::<String>("worker").unwrap().clone();
                 let id = sub.get_one::<String>("id").unwrap().clone();
                 let owner = sub.get_one::<String>("owner").unwrap().clone();
@@ -227,7 +227,7 @@ impl Context {
                     return Err(Error::Clap(cmd.error(
                         ErrorKind::InvalidValue,
                         format!(
-                            "permission denied: '{}' cannot start '{owner}/{worker}'",
+                            "permission denied: '{}' cannot run '{owner}/{worker}'",
                             self.caller
                         ),
                     )));
@@ -237,7 +237,7 @@ impl Context {
                         cmd.error(ErrorKind::ValueValidation, e.detail()),
                     ));
                 }
-                Action::Start {
+                Action::Run {
                     worker,
                     id,
                     args,
@@ -392,8 +392,8 @@ mod tests {
             ),
             ("exit", Action::Exit),
             (
-                "start count run-2 Élan",
-                Action::Start {
+                "run count run-2 Élan",
+                Action::Run {
                     worker: "count".into(),
                     id: "run-2".into(),
                     args: vec!["Élan".into()],
@@ -401,8 +401,8 @@ mod tests {
                 },
             ),
             (
-                "start greet run-1 'Alice Smith' 5 --owner bob",
-                Action::Start {
+                "run greet run-1 'Alice Smith' 5 --owner bob",
+                Action::Run {
                     worker: "greet".into(),
                     id: "run-1".into(),
                     args: vec!["Alice Smith".into(), "5".into()],
@@ -420,7 +420,7 @@ mod tests {
 
         // Alice does NOT have write on bob/count in mock catalog!
         assert!(matches!(
-            ctx.parse("start count run-1 Alice --owner bob"),
+            ctx.parse("run count run-1 Alice --owner bob"),
             Err(Error::Clap(_))
         ));
     }
@@ -431,9 +431,10 @@ mod tests {
         for line in [
             "unknown",
             "/bin/sh",
-            "start greet run-1 Alice 0",
-            "start greet run-1 Alice 7201",
-            "start other run-1 Alice",
+            "start greet run-1 Alice 5",
+            "run greet run-1 Alice 0",
+            "run greet run-1 Alice 7201",
+            "run other run-1 Alice",
             "status run-1 --owner eve",
             "secrets set api_token leaked_value",
             "secrets set ../escape",
@@ -442,7 +443,7 @@ mod tests {
             assert!(matches!(ctx.parse(line), Err(Error::Clap(_))), "{line}");
         }
         assert!(matches!(
-            ctx.parse("start greet run-1 'unfinished"),
+            ctx.parse("run greet run-1 'unfinished"),
             Err(Error::Quote)
         ));
         assert!(
@@ -453,9 +454,9 @@ mod tests {
     #[test]
     fn test_shell_metacharacters_are_only_arguments() {
         let ctx = Context::mock();
-        let parsed = ctx.parse("start greet run-1 '$(not-executed)' 5");
+        let parsed = ctx.parse("run greet run-1 '$(not-executed)' 5");
         assert!(
-            matches!(parsed, Ok(Some(Action::Start { args, .. })) if args == vec!["$(not-executed)", "5"])
+            matches!(parsed, Ok(Some(Action::Run { args, .. })) if args == vec!["$(not-executed)", "5"])
         );
     }
 }

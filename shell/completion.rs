@@ -21,7 +21,7 @@ impl Completer {
     }
 
     fn typed_arg_candidates(&self, previous: &[String]) -> Vec<(String, Option<String>)> {
-        if previous.first().map(String::as_str) != Some("start") {
+        if previous.first().map(String::as_str) != Some("run") {
             return Vec::new();
         }
         let mut owner = self.ctx.caller().to_owned();
@@ -303,13 +303,14 @@ mod tests {
         let mut comp = mock_completer();
         let cases = [
             ("", "workers", "workers "),
-            ("", "start", "start "),
+            ("", "run", "run "),
             ("", "secrets", "secrets "),
             ("", "help", "help "),
-            ("sta", "start", "start "),
+            ("ru", "run", "run "),
+            ("st", "status", "status "),
             ("per", "permissions", "permissions "),
-            ("start ", "greet", "start greet "),
-            ("start c", "count", "start count "),
+            ("run ", "greet", "run greet "),
+            ("run c", "count", "run count "),
             ("list --o", "--owner", "list --owner "),
             ("list --owner ", "alice", "list --owner alice "),
             ("list --owner=", "--owner=bob", "list --owner=bob "),
@@ -321,9 +322,9 @@ mod tests {
             ),
             ("cancel run --owner a", "alice", "cancel run --owner alice "),
             (
-                "start greet id name --owner b",
+                "run greet id name --owner b",
                 "bob",
-                "start greet id name --owner bob ",
+                "run greet id name --owner bob ",
             ),
             ("permissions b", "bob", "permissions bob "),
             ("secrets ", "set", "secrets set "),
@@ -337,7 +338,7 @@ mod tests {
         // When --owner bob is specified first, `count` must NOT be completed for `alice`
         // because `alice` only has write permission on `bob/greet`!
         let bob_workers: Vec<_> = comp
-            .complete("start --owner bob ", 18)
+            .complete("run --owner bob ", 16)
             .into_iter()
             .map(|s| s.display_value().to_owned())
             .collect();
@@ -370,8 +371,8 @@ train-pkg:
             "alice",
         ));
         let mut custom_comp = Completer::new(custom_ctx);
-        assert!(candidate(&mut custom_comp, "start train job1 f", 18, "fast").is_some());
-        assert!(candidate(&mut custom_comp, "start train job1 fast t", 23, "true").is_some());
+        assert!(candidate(&mut custom_comp, "run train job1 f", 16, "fast").is_some());
+        assert!(candidate(&mut custom_comp, "run train job1 fast t", 21, "true").is_some());
         // Alice has no access to bob -> bob must NOT appear in `list --owner ` or `permissions `!
         assert!(candidate(&mut custom_comp, "list --owner ", 13, "bob").is_none());
         assert!(candidate(&mut custom_comp, "permissions ", 12, "bob").is_none());
@@ -381,8 +382,8 @@ train-pkg:
     fn test_quotes_and_cursor_suffixes_are_preserved() {
         let mut comp = mock_completer();
         let cases = [
-            ("'sta", 4, "start", "'start' "),
-            ("\"sta", 4, "start", "\"start\" "),
+            ("'ru", 3, "run", "'run' "),
+            ("\"ru", 3, "run", "\"run\" "),
             (
                 "list --owner=\"a",
                 15,
@@ -403,10 +404,10 @@ train-pkg:
                 "list --owner 'alice' trailing",
             ),
             (
-                "start greet id 'Zoë' --o",
-                25,
+                "run greet id 'Zoë' --o",
+                23,
                 "--owner",
-                "start greet id 'Zoë' --owner ",
+                "run greet id 'Zoë' --owner ",
             ),
         ];
         for (line, pos, display, expected) in cases {
@@ -425,11 +426,11 @@ train-pkg:
         let mut comp = mock_completer();
         for (line, pos) in [
             ("stXYZ", 2),
-            ("start \\", 7),
-            ("start # comment", 15),
+            ("run \\", 5),
+            ("run # comment", 13),
             ("list --owner 'ab", 14),
             ("é", 1),
-            ("start", 6),
+            ("run", 4),
             ("list\0", 5),
         ] {
             assert!(comp.complete(line, pos).is_empty(), "{line:?} at {pos}");

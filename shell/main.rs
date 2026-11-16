@@ -263,13 +263,13 @@ fn execute_action(action: Action, mode: &Mode) -> Result<bool, String> {
             let resp = mode.send(&Request::Permissions { user: Some(user) })?;
             Ok(client::print_response(resp, mode.is_mock()))
         }
-        Action::Start {
+        Action::Run {
             worker,
             id,
             args,
             owner,
         } => {
-            let resp = mode.send(&Request::Start {
+            let resp = mode.send(&Request::Run {
                 owner,
                 worker,
                 id,

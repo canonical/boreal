@@ -6,8 +6,9 @@ use std::time::Duration;
 
 use boreal_common::catalog::Catalog;
 use boreal_common::wire::{
-    self, PermissionReport, PromptSummary, Request, Response, ResultOutcome, WorkerEntry,
-    WorkflowCounts, WorkflowDetail, WorkflowSummary,
+    self, PermissionReport, PromptSummary, Request, Response, ResultOutcome, StepState,
+    WorkerEntry, WorkflowCounts, WorkflowDetail, WorkflowEvent, WorkflowStep, WorkflowSummary,
+    WorkflowView,
 };
 
 type MockRunningMap = BTreeMap<(String, String), (String, String)>;
@@ -124,7 +125,7 @@ fn mock_dispatch(
                 },
             }
         }
-        Request::Start {
+        Request::Run {
             owner,
             worker,
             id,
@@ -213,6 +214,82 @@ fn mock_dispatch(
                 draining: false,
             })
         }
+        Request::View { owner, id } => {
+            let entry = running
+                .lock()
+                .unwrap()
+                .get(&(owner.clone(), id.clone()))
+                .cloned();
+            let (worker, wf_type, status, steps, outcome) = match entry {
+                Some((w, t)) => (
+                    w,
+                    t,
+                    "running".into(),
+                    vec![
+                        WorkflowStep {
+                            kind: "timer".into(),
+                            name: "#1 (5.00s)".into(),
+                            state: StepState::Completed,
+                            duration: "5.00s".into(),
+                            detail: String::new(),
+                        },
+                        WorkflowStep {
+                            kind: "activity".into(),
+                            name: "greet".into(),
+                            state: StepState::Running,
+                            duration: "1.20s elapsed".into(),
+                            detail: "attempt 1".into(),
+                        },
+                    ],
+                    None,
+                ),
+                None => (
+                    "greet".into(),
+                    "DemoWorkflow".into(),
+                    "completed".into(),
+                    vec![WorkflowStep {
+                        kind: "activity".into(),
+                        name: "greet".into(),
+                        state: StepState::Completed,
+                        duration: "38ms".into(),
+                        detail: String::new(),
+                    }],
+                    Some(ResultOutcome::Completed {
+                        run_id: format!("mock-{id}"),
+                        output: "[mock result]".into(),
+                    }),
+                ),
+            };
+            Response::View(WorkflowView {
+                owner: owner.clone(),
+                worker: worker.clone(),
+                workflow_type: wf_type.clone(),
+                workflow_id: id.clone(),
+                run_id: format!("mock-{id}"),
+                status,
+                start_time: "2026-11-16 14:02:10 UTC".into(),
+                close_time: "-".into(),
+                elapsed: "6.20s".into(),
+                input: r#"{"name":"Alice","wait_seconds":5}"#.into(),
+                task_warning: String::new(),
+                steps,
+                events: vec![
+                    WorkflowEvent {
+                        id: 1,
+                        timestamp: "14:02:10.000".into(),
+                        kind: "WorkflowStarted".into(),
+                        summary: format!("{wf_type} on {owner}-{worker}"),
+                    },
+                    WorkflowEvent {
+                        id: 2,
+                        timestamp: "14:02:15.000".into(),
+                        kind: "ActivityStarted".into(),
+                        summary: "greet (attempt 1)".into(),
+                    },
+                ],
+                outcome,
+            })
+        }
     }
 }
 
@@ -292,7 +369,7 @@ pub fn print_response(resp: Response, mock: bool) -> bool {
             eprintln!("error: {message}");
             false
         }
-        Response::Summary(_) => true,
+        Response::Summary(_) | Response::View(_) => true,
     }
 }
 
@@ -369,7 +446,7 @@ mod tests {
             })
         );
 
-        mock.send(&Request::Start {
+        mock.send(&Request::Run {
             owner: "alice".into(),
             worker: "greet".into(),
             id: "job-2".into(),

@@ -267,7 +267,7 @@ mod tests {
                 "li'st' foo\\ --text",
                 &[(g, "li'st'"), (d, " foo\\ --text")],
             ),
-            ("\"sta", &[(u, "\"sta")]),
+            ("\"ru", &[(u, "\"ru")]),
             (
                 "list 'unfinished --owner",
                 &[(g, "list"), (d, " 'unfinished --owner")],
@@ -334,7 +334,7 @@ mod tests {
         }
         for line in [
             "# comment\n list --owner=alice",
-            "start 'some --text' foo\\ bar \"a\\q\\\"b\"",
+            "run 'some --text' foo\\ bar \"a\\q\\\"b\"",
             "li'st' '' --owner='Élan'",
             "list foo#bar \\\n--help",
             "list '--' --owner",
@@ -349,11 +349,11 @@ mod tests {
         let ctx = Arc::new(Context::mock());
         let highlighter = Highlighter::new(Arc::clone(&ctx));
         for line in [
-            "start greet run-1 'Alice Smith' 5 --owner bob",
+            "run greet run-1 'Alice Smith' 5 --owner bob",
             "list --owner=alice # comment\n",
             "status 'é --text'",
             "list -- --owner",
-            "'sta",
+            "'ru",
             "list \\",
         ] {
             let raw = highlighter.highlight(line, 0).raw_string();
