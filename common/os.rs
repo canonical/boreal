@@ -124,6 +124,28 @@ pub fn current_euid() -> u32 {
     unsafe { geteuid() }
 }
 
+pub fn sanitize_hostname<S: AsRef<str>>(raw: S) -> String {
+    let cleaned: String = raw
+        .as_ref()
+        .trim()
+        .chars()
+        .filter(|c| !c.is_control() && !c.is_whitespace())
+        .take(64)
+        .collect();
+    if cleaned.is_empty() || cleaned == "(none)" {
+        String::from("boreal")
+    } else {
+        cleaned
+    }
+}
+
+pub fn hostname() -> String {
+    fs::read_to_string("/proc/sys/kernel/hostname")
+        .or_else(|_| fs::read_to_string("/etc/hostname"))
+        .map(sanitize_hostname)
+        .unwrap_or_else(|_| String::from("boreal"))
+}
+
 pub fn peer_uid(stream: &UnixStream) -> Result<u32, Error> {
     let mut cred = Ucred {
         pid: 0,
@@ -349,6 +371,19 @@ mod tests {
 
         let (a, _b) = UnixStream::pair().unwrap();
         assert_eq!(peer_uid(&a).unwrap(), uid);
+        assert!(!hostname().is_empty());
+
+        let host_cases = [
+            ("demo-lab\n", "demo-lab"),
+            ("  lab-01.internal  ", "lab-01.internal"),
+            ("bad\x1b[31mhost\x07", "bad[31mhost"),
+            ("", "boreal"),
+            (" \t\n ", "boreal"),
+            ("(none)\n", "boreal"),
+        ];
+        for (input, expected) in host_cases {
+            assert_eq!(sanitize_hostname(input), expected, "{input:?}");
+        }
     }
 
     #[test]
