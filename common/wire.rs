@@ -71,6 +71,7 @@ pub enum Request {
     Permissions {
         user: Option<String>,
     },
+    Summary,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -140,6 +141,12 @@ pub struct PermissionReport {
     pub workers: Vec<WorkerPermissionLine>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PromptSummary {
+    pub running_workflows: Option<u32>,
+    pub draining: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Response {
     Workers(Vec<WorkerEntry>),
@@ -166,6 +173,7 @@ pub enum Response {
         code: ErrorCode,
         message: String,
     },
+    Summary(PromptSummary),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -269,6 +277,16 @@ impl Encoder {
         }
     }
 
+    fn opt_u32(&mut self, val: Option<u32>) {
+        match val {
+            Some(v) => {
+                self.u8(1);
+                self.u32(v);
+            }
+            None => self.u8(0),
+        }
+    }
+
     fn finish(self) -> Vec<u8> {
         self.buf
     }
@@ -324,6 +342,14 @@ impl<'a> Decoder<'a> {
         match self.u8()? {
             0 => Ok(None),
             1 => Ok(Some(self.str()?)),
+            _ => Err(Error::Decode("invalid option tag")),
+        }
+    }
+
+    fn opt_u32(&mut self) -> Result<Option<u32>, Error> {
+        match self.u8()? {
+            0 => Ok(None),
+            1 => Ok(Some(self.u32()?)),
             _ => Err(Error::Decode("invalid option tag")),
         }
     }
@@ -386,6 +412,7 @@ impl Request {
                 enc.u8(8);
                 enc.opt_str(user.as_deref());
             }
+            Self::Summary => enc.u8(9),
         }
         enc.finish()
     }
@@ -434,6 +461,7 @@ impl Request {
             8 => Self::Permissions {
                 user: dec.opt_str()?,
             },
+            9 => Self::Summary,
             _ => return Err(Error::Decode("unknown Request tag")),
         };
         dec.finish()?;
@@ -575,6 +603,11 @@ impl Response {
                 enc.u8(code.tag());
                 enc.str(message);
             }
+            Self::Summary(summary) => {
+                enc.u8(10);
+                enc.opt_u32(summary.running_workflows);
+                enc.bool(summary.draining);
+            }
         }
         enc.finish()
     }
@@ -681,6 +714,10 @@ impl Response {
                 code: ErrorCode::from_tag(dec.u8()?)?,
                 message: dec.str()?,
             },
+            10 => Self::Summary(PromptSummary {
+                running_workflows: dec.opt_u32()?,
+                draining: dec.bool()?,
+            }),
             _ => return Err(Error::Decode("unknown Response tag")),
         };
         dec.finish()?;
@@ -810,6 +847,7 @@ mod tests {
                 run_id: "r1".into(),
             },
             Request::Permissions { user: None },
+            Request::Summary,
         ];
         for req in requests {
             let mut pipe = Vec::new();
@@ -834,6 +872,14 @@ mod tests {
                 code: ErrorCode::PermissionDenied,
                 message: "denied".into(),
             },
+            Response::Summary(PromptSummary {
+                running_workflows: Some(3),
+                draining: true,
+            }),
+            Response::Summary(PromptSummary {
+                running_workflows: None,
+                draining: false,
+            }),
         ];
         for resp in responses {
             assert_eq!(Response::decode(&resp.encode()).unwrap(), resp);

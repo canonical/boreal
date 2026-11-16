@@ -186,6 +186,8 @@ pub trait Backend: Send + Sync {
     fn list_running_visibility(&self) -> BoxFuture<'_, Vec<TrackedKey>>;
 
     fn list_running_history_db(&self) -> BoxFuture<'_, Vec<ActiveDbExecution>>;
+
+    fn count_running_workflows<'a>(&'a self, namespace: &'a str) -> BoxFuture<'a, u32>;
 }
 
 pub struct LiveBackend {
@@ -871,6 +873,21 @@ impl Backend for LiveBackend {
                 .await
                 .map_err(|e| BackendError::Internal(format!("db task join error: {e}")))?
                 .map_err(BackendError::Unavailable)
+        })
+    }
+
+    fn count_running_workflows<'a>(&'a self, namespace: &'a str) -> BoxFuture<'a, u32> {
+        let sock = self.pg_socket.clone();
+        let user = self.pg_user.clone();
+        let db = self.pg_db.clone();
+        let ns = namespace.to_owned();
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || {
+                pg::count_running_in_namespace(&sock, &user, &db, &ns)
+            })
+            .await
+            .map_err(|e| BackendError::Internal(format!("db task join error: {e}")))?
+            .map_err(BackendError::Unavailable)
         })
     }
 }

@@ -1,10 +1,11 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
+use std::time::Duration;
 
 use boreal_common::catalog::{self, Catalog};
 use boreal_common::wire::{
-    ErrorCode, Request, Response, ResultOutcome, UpdaterRequest, UpdaterResponse, WorkflowDetail,
-    WorkflowSummary,
+    ErrorCode, PromptSummary, Request, Response, ResultOutcome, UpdaterRequest, UpdaterResponse,
+    WorkflowDetail, WorkflowSummary,
 };
 
 use crate::ledger::{self, Coordinator, Gate, TrackedKey};
@@ -219,6 +220,31 @@ impl<B: Backend> Engine<B> {
                     workflow_id: id,
                     run_id: detail.run_id,
                 })
+            }
+            Request::Summary => {
+                let draining = !matches!(self.coordinator.gate_snapshot(), Gate::Open);
+                let has_own_workers = self
+                    .catalog
+                    .users()
+                    .get(caller)
+                    .is_some_and(|policy| !policy.workers().is_empty());
+                let running_workflows = if !has_own_workers {
+                    Some(0)
+                } else {
+                    match tokio::time::timeout(
+                        Duration::from_millis(200),
+                        self.backend.count_running_workflows(caller),
+                    )
+                    .await
+                    {
+                        Ok(Ok(count)) => Some(count),
+                        Ok(Err(_)) | Err(_) => None,
+                    }
+                };
+                Ok(Response::Summary(PromptSummary {
+                    running_workflows,
+                    draining,
+                }))
             }
         }
     }
@@ -760,6 +786,26 @@ mod tests {
             let rows = guard.db_running.clone();
             Box::pin(async move { Ok(rows) })
         }
+
+        fn count_running_workflows<'a>(&'a self, namespace: &'a str) -> BoxFuture<'a, u32> {
+            let guard = self.state.lock().unwrap();
+            if guard.fail_db {
+                return Box::pin(async { Err(BackendError::Unavailable("db down".into())) });
+            }
+            let mut open_ids: BTreeSet<String> = guard
+                .runs
+                .iter()
+                .filter(|((ns, _), exec)| ns == namespace && exec.status.is_open())
+                .map(|((_, id), _)| id.clone())
+                .collect();
+            for row in &guard.db_running {
+                if row.namespace == namespace {
+                    open_ids.insert(row.workflow_id.clone());
+                }
+            }
+            let count = open_ids.len() as u32;
+            Box::pin(async move { Ok(count) })
+        }
     }
 
     fn demo_catalog() -> Catalog {
@@ -1075,6 +1121,73 @@ workers:
         assert_eq!(
             backend.state.lock().unwrap().unpaused_schedules,
             vec![("alice".into(), "hourly".into())]
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_summary_isolates_caller_counts_and_degrades_gracefully() {
+        let dir = std::env::temp_dir().join(format!("boreal-engine-test-3-{}", std::process::id()));
+        let coord = Arc::new(Coordinator::open(&dir).unwrap());
+        let backend = Arc::new(MockBackend {
+            state: Mutex::new(MockState::default()),
+        });
+        let engine = Engine::new(demo_catalog(), coord, Arc::clone(&backend));
+
+        assert_eq!(
+            engine.handle_user_request("alice", Request::Summary).await,
+            Response::Summary(PromptSummary {
+                running_workflows: Some(0),
+                draining: false,
+            })
+        );
+
+        engine
+            .handle_user_request(
+                "alice",
+                Request::Start {
+                    owner: "alice".into(),
+                    worker: "greet".into(),
+                    id: "a1".into(),
+                    args: vec!["Alice".into()],
+                },
+            )
+            .await;
+
+        // Alice sees 1 running in her namespace; Bob still sees 0 in his own namespace.
+        assert_eq!(
+            engine.handle_user_request("alice", Request::Summary).await,
+            Response::Summary(PromptSummary {
+                running_workflows: Some(1),
+                draining: false,
+            })
+        );
+        assert_eq!(
+            engine.handle_user_request("bob", Request::Summary).await,
+            Response::Summary(PromptSummary {
+                running_workflows: Some(0),
+                draining: false,
+            })
+        );
+
+        // Gate closure surfaces draining=true, and DB outage degrades running_workflows to None.
+        assert_eq!(
+            engine
+                .handle_updater_request(UpdaterRequest::CloseGate {
+                    update_id: "u-sum".into(),
+                    rev: "abcd".into(),
+                })
+                .await,
+            UpdaterResponse::GateClosed
+        );
+        backend.state.lock().unwrap().fail_db = true;
+        assert_eq!(
+            engine.handle_user_request("alice", Request::Summary).await,
+            Response::Summary(PromptSummary {
+                running_workflows: None,
+                draining: true,
+            })
         );
 
         let _ = std::fs::remove_dir_all(&dir);

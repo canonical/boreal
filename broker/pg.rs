@@ -12,6 +12,59 @@ pub struct ActiveDbExecution {
     pub run_id_hex: String,
 }
 
+fn valid_namespace(ns: &str) -> bool {
+    let b = ns.as_bytes();
+    !b.is_empty()
+        && b.len() <= 64
+        && b[0].is_ascii_lowercase()
+        && b.iter()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, b'_' | b'-'))
+}
+
+pub fn count_running_in_namespace(
+    socket_path: &Path,
+    db_user: &str,
+    db_name: &str,
+    namespace: &str,
+) -> Result<u32, String> {
+    if !valid_namespace(namespace) {
+        return Err(format!("invalid namespace identifier '{namespace}'"));
+    }
+    let mut stream = UnixStream::connect(socket_path)
+        .map_err(|e| format!("connect postgres {}: {e}", socket_path.display()))?;
+    stream
+        .set_read_timeout(Some(Duration::from_millis(200)))
+        .map_err(|e| e.to_string())?;
+    stream
+        .set_write_timeout(Some(Duration::from_millis(200)))
+        .map_err(|e| e.to_string())?;
+
+    send_startup(&mut stream, db_user, db_name)?;
+    wait_for_ready(&mut stream)?;
+
+    let sql = format!(
+        "SELECT COUNT(*) \
+         FROM current_executions c \
+         JOIN namespaces n ON n.id = c.namespace_id \
+         WHERE n.name = '{namespace}' \
+           AND c.status IN (1, 8) \
+           AND c.workflow_id NOT LIKE 'temporal-sys-%';"
+    );
+    send_simple_query(&mut stream, &sql)?;
+    let rows = read_query_rows(&mut stream)?;
+    let _ = send_terminate(&mut stream);
+
+    let Some(first) = rows.first() else {
+        return Err("empty COUNT(*) response from current_executions".into());
+    };
+    if first.len() != 1 {
+        return Err("unexpected column count from COUNT(*) query".into());
+    }
+    first[0]
+        .parse::<u32>()
+        .map_err(|_| format!("invalid COUNT(*) value '{}'", first[0]))
+}
+
 pub fn query_running_executions(
     socket_path: &Path,
     db_user: &str,
@@ -288,5 +341,46 @@ mod tests {
             format_uuid_hex(&active[0].run_id_hex),
             "00112233-4455-6677-8899-aabbccddeeff"
         );
+
+        assert!(count_running_in_namespace(&sock, "boreal-broker", "temporal", "Alice").is_err());
+        assert!(
+            count_running_in_namespace(&sock, "boreal-broker", "temporal", "alice';--").is_err()
+        );
+
+        let count_sock =
+            std::env::temp_dir().join(format!("boreal-pg-cnt-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&count_sock);
+        let count_listener = UnixListener::bind(&count_sock).unwrap();
+        let count_server = std::thread::spawn(move || {
+            let (mut conn, _) = count_listener.accept().unwrap();
+            let mut len_buf = [0u8; 4];
+            conn.read_exact(&mut len_buf).unwrap();
+            let slen = u32::from_be_bytes(len_buf) as usize;
+            let mut startup = vec![0u8; slen - 4];
+            conn.read_exact(&mut startup).unwrap();
+            conn.write_all(b"R\x00\x00\x00\x08\x00\x00\x00\x00Z\x00\x00\x00\x05I")
+                .unwrap();
+
+            let (qtag, qbody) = read_msg(&mut conn).unwrap();
+            assert_eq!(qtag, b'Q');
+            assert!(String::from_utf8_lossy(&qbody).contains("n.name = 'alice'"));
+
+            let mut row = Vec::new();
+            row.extend_from_slice(&1u16.to_be_bytes());
+            row.extend_from_slice(&1i32.to_be_bytes());
+            row.extend_from_slice(b"2");
+            conn.write_all(b"D").unwrap();
+            conn.write_all(&((row.len() + 4) as u32).to_be_bytes())
+                .unwrap();
+            conn.write_all(&row).unwrap();
+            conn.write_all(b"C\x00\x00\x00\x0dSELECT 1\0Z\x00\x00\x00\x05I")
+                .unwrap();
+        });
+        assert_eq!(
+            count_running_in_namespace(&count_sock, "boreal-broker", "temporal", "alice").unwrap(),
+            2
+        );
+        count_server.join().unwrap();
+        let _ = std::fs::remove_file(&count_sock);
     }
 }

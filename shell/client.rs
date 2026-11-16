@@ -116,6 +116,10 @@ fn mock_dispatch(catalog: &Catalog, caller: &str, req: &Request) -> Response {
             workflow_id: id.clone(),
             run_id: run_id.clone(),
         },
+        Request::Summary => Response::Summary(wire::PromptSummary {
+            running_workflows: Some(1),
+            draining: false,
+        }),
     }
 }
 
@@ -179,6 +183,7 @@ pub fn print_response(resp: Response, mock: bool) {
         Response::Error { message, .. } => {
             eprintln!("error: {message}");
         }
+        Response::Summary(_) => {}
     }
 }
 
