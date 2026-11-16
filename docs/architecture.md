@@ -14,6 +14,9 @@ Nix generates protected, group-readable catalogs under `/etc/boreal/` (`0750`,
 `root:boreal`) outside writable home directories and without secrets in the Nix
 store:
 
+- `/etc/boreal/version` (`0440`, `root:boreal`): downstream lab version
+  (`boreal.version`, defaulting to `temporal/Cargo.toml`
+  `workspace.package.version`).
 - `/etc/boreal/workers.yaml` (`0440`, `root:boreal`): registered worker
   `workflowType`, `description`, and typed `args` metadata.
 - `/etc/boreal/users/<user>/perms.yaml` (`0440`, `root:boreal`): each user's
@@ -58,10 +61,10 @@ OpenSSH disables root login, SFTP, TCP/Unix/agent/X11 forwarding, tunnels,
 and login shell `boreal-shell`. Interactive sessions read `~/.borealrc` (`0600`
 regular file, `O_NOFOLLOW`, provisioned from `boreal.users.<name>.editMode` as
 `emacs`, `vi`, or `helix` with `emacs` fallback), render a two-line
-Starship-style prompt (`<user>@<host>`, caller-scoped running workflow count,
-admission drain badge, slow command duration, and modal `❯`/`❮` indicators), and
-expose dynamic `clap` / `reedline` commands (`workers`, `start`, `list`,
-`status`, `result`, `cancel`, `permissions`, `secrets`, `help`, `exit`) and
+Starship-style prompt (`<user> on 󰇅 <host> [ <paused>  <running>] is ❄️ v<version>`,
+with a line-2 red `󰞴` drain badge and modal `❯`/`❮` indicators), and expose
+dynamic `clap` / `reedline` commands (`workers`, `start`, `list`, `status`,
+`result`, `cancel`, `permissions`, `secrets`, `help`, `exit`) and
 permission-filtered completions; non-interactive SSH accepts only
 `secrets set <name>`.
 

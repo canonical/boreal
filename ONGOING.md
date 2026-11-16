@@ -33,13 +33,14 @@
     `task_queue`.
 - **Data-driven `boreal-shell` and user secrets (`shell/` & `worker/`)**:
   - `boreal-shell` renders a two-line Starship-style status prompt
-    (`<user>@<host>` or `<user>@mock`, caller-scoped running workflow count,
-    update drain badge, slow command duration, and status/modal `❯`/`❮`
-    indicators), dynamically builds `clap`/`reedline` commands and
-    permission-filtered completions from `/etc/boreal/` (falling back to a local
-    mock preview only outside SSH when `/etc/boreal` is absent), requires `[y/N]`
-    confirmation before `cancel`, and rejects unsupported SSH commands, SFTP,
-    and port/agent forwarding.
+    (`<user> on 󰇅 <host>` or `<user> on 󰇅 mock`, caller-scoped
+    `[ <paused>  <running>]` workflow counts, `is ❄️ v<version>` from
+    `temporal/Cargo.toml` / `/etc/boreal/version`, line-2 red `󰞴` drain badge,
+    and status/modal `❯`/`❮` indicators), dynamically builds `clap`/`reedline`
+    commands and permission-filtered completions from `/etc/boreal/` (falling
+    back to a local mock preview only outside SSH when `/etc/boreal` is absent),
+    requires `[y/N]` confirmation before `cancel`, and rejects unsupported SSH
+    commands, SFTP, and port/agent forwarding.
   - Users manage `~/.config/boreal/secrets` (`0700` directory, `0600` files) via
     echo-free TTY prompts or stdin (`ssh <user>@<host> "secrets set <name>" < file`),
     and worker activities read secrets locally via `boreal_worker::read_secret`.
