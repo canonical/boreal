@@ -308,6 +308,8 @@ mod tests {
             ("", "help", "help "),
             ("ru", "run", "run "),
             ("st", "status", "status "),
+            ("v", "view", "view "),
+            ("view job-1 --owner b", "bob", "view job-1 --owner bob "),
             ("per", "permissions", "permissions "),
             ("run ", "greet", "run greet "),
             ("run c", "count", "run count "),

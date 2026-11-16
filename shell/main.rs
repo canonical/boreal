@@ -6,6 +6,7 @@ mod highlighter;
 mod menu;
 mod prompt;
 mod rc;
+mod tui;
 
 use std::env;
 use std::error::Error;
@@ -288,6 +289,19 @@ fn execute_action(action: Action, mode: &Mode) -> Result<bool, String> {
         Action::Result { id, owner } => {
             let resp = mode.send(&Request::Result { owner, id })?;
             Ok(client::print_response(resp, mode.is_mock()))
+        }
+        Action::View { id, owner } => {
+            let resp = mode.send(&Request::View {
+                owner: owner.clone(),
+                id: id.clone(),
+            })?;
+            match resp {
+                Response::View(initial) => {
+                    tui::run(initial, &owner, &id, mode)?;
+                    Ok(true)
+                }
+                other => Ok(client::print_response(other, mode.is_mock())),
+            }
         }
         Action::Cancel { id, owner } => {
             let prep = mode.send(&Request::PrepareCancel {

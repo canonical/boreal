@@ -33,6 +33,10 @@ pub enum Action {
         id: String,
         owner: String,
     },
+    View {
+        id: String,
+        owner: String,
+    },
     Cancel {
         id: String,
         owner: String,
@@ -139,6 +143,11 @@ impl Context {
             .arg(Arg::new("id").required(true).help("Workflow ID"))
             .arg(owner_arg(&readable, &self.caller));
 
+        let view_cmd = Command::new("view")
+            .about("Inspect a workflow run in a live TUI")
+            .arg(Arg::new("id").required(true).help("Workflow ID"))
+            .arg(owner_arg(&readable, &self.caller));
+
         let cancel_cmd = Command::new("cancel")
             .about("Cancel a workflow")
             .arg(Arg::new("id").required(true).help("Workflow ID"))
@@ -184,6 +193,7 @@ impl Context {
             .subcommand(list_cmd)
             .subcommand(status_cmd)
             .subcommand(result_cmd)
+            .subcommand(view_cmd)
             .subcommand(cancel_cmd)
             .subcommand(perms_cmd)
             .subcommand(secrets_cmd)
@@ -259,6 +269,14 @@ impl Context {
                 let id = sub.get_one::<String>("id").unwrap().clone();
                 validate_id_or_clap(&mut cmd, &id)?;
                 Action::Result {
+                    id,
+                    owner: sub.get_one::<String>("owner").unwrap().clone(),
+                }
+            }
+            Some(("view", sub)) => {
+                let id = sub.get_one::<String>("id").unwrap().clone();
+                validate_id_or_clap(&mut cmd, &id)?;
+                Action::View {
                     id,
                     owner: sub.get_one::<String>("owner").unwrap().clone(),
                 }
@@ -356,6 +374,13 @@ mod tests {
             (
                 "result run-1 --owner bob",
                 Action::Result {
+                    id: "run-1".into(),
+                    owner: "bob".into(),
+                },
+            ),
+            (
+                "view run-1 --owner bob",
+                Action::View {
                     id: "run-1".into(),
                     owner: "bob".into(),
                 },
