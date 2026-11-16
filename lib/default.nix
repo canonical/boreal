@@ -63,6 +63,7 @@ in
         }).config;
       failed = builtins.filter (entry: !entry.assertion) evaluated.assertions;
       failureText = lib.concatMapStringsSep "\n" (entry: "- ${entry.message}") failed;
+      versionEtc = evaluated.environment.etc."boreal/version";
       workersEtc = evaluated.environment.etc."boreal/workers.yaml";
       userPolicySources = map (user: evaluated.environment.etc."boreal/users/${user}/perms.yaml".source) (
         builtins.attrNames evaluated.boreal.users
@@ -73,6 +74,7 @@ in
       throw "Boreal lab check failed assertions:\n${failureText}"
     else
       assert evaluated.boreal.enable;
+      assert versionEtc.user == "root" && versionEtc.group == "boreal" && versionEtc.mode == "0440";
       assert workersEtc.user == "root" && workersEtc.group == "boreal" && workersEtc.mode == "0440";
       assert builtins.all (
         user:
@@ -130,10 +132,23 @@ in
       pname,
       src,
       cargoLock,
-      version ? "0.1.0",
+      version ? null,
       ...
     }@args:
     let
+      cargoManifest =
+        let
+          manifestPath = src + "/Cargo.toml";
+        in
+        if builtins.pathExists manifestPath then
+          builtins.fromTOML (builtins.readFile manifestPath)
+        else
+          { };
+      resolvedVersion =
+        if version != null then
+          version
+        else
+          cargoManifest.workspace.package.version or cargoManifest.package.version or "0.1.0";
       passthrough = builtins.removeAttrs args [
         "pname"
         "version"
@@ -148,7 +163,8 @@ in
     pkgs.rustPlatform.buildRustPackage (
       passthrough
       // {
-        inherit pname version cargoLock;
+        inherit pname cargoLock;
+        version = resolvedVersion;
         src = lib.cleanSourceWith {
           inherit src;
           filter =

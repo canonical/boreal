@@ -332,6 +332,43 @@ let
       temporalAddress = "   ";
     };
   };
+  invalidLabVersion = mkHost {
+    boreal = {
+      enable = true;
+      version = "0.1.0 beta";
+    };
+  };
+  workerVersionPkg = pkgs.runCommand "versioned-worker" { version = "0.4.2"; } ''
+    mkdir -p "$out/bin"
+    printf '#!/bin/sh\nexit 0\n' > "$out/bin/versioned-worker"
+    chmod +x "$out/bin/versioned-worker"
+  '';
+  workerVersionHost = mkHost {
+    boreal = {
+      enable = true;
+      workerPackages.v-worker = {
+        package = workerVersionPkg;
+        workflowType = "VersionedWorkflow";
+      };
+    };
+  };
+  mockDownstreamRoot = pkgs.runCommand "mock-downstream-root" { } ''
+    mkdir -p "$out/temporal"
+    printf '[workspace]\nresolver = "3"\n[workspace.package]\nversion = "1.2.3"\n' > "$out/temporal/Cargo.toml"
+  '';
+  selfManifestHost =
+    (self.lib.mkHost {
+      inherit system;
+      specialArgs = {
+        self = {
+          outPath = mockDownstreamRoot;
+        };
+      };
+      modules = [
+        baseContainer
+        { boreal.enable = true; }
+      ];
+    }).config;
   removedUpdaterRepo = mkHost {
     boreal = {
       enable = true;
@@ -374,6 +411,7 @@ let
       ];
     }).config;
 
+  versionEtc = configured.environment.etc."boreal/version";
   workersEtc = configured.environment.etc."boreal/workers.yaml";
   alicePermsEtc = configured.environment.etc."boreal/users/alice/perms.yaml";
   bobPermsEtc = configured.environment.etc."boreal/users/bob/perms.yaml";
@@ -534,6 +572,12 @@ assert configured.users.users.admin.shell == "${adminStub}/bin/boreal-admin";
 assert !(builtins.elem "wheel" configured.users.users.admin.extraGroups);
 assert !(builtins.elem "boreal" configured.users.users.admin.extraGroups);
 assert configured.security.sudo.wheelNeedsPassword;
+assert configured.boreal.version == "0.1.0";
+assert workerVersionHost.boreal.version == "0.4.2";
+assert selfManifestHost.boreal.version == "1.2.3";
+assert selfManifestHost.environment.etc."boreal/version".text == "1.2.3\n";
+assert versionEtc.user == "root" && versionEtc.group == "boreal" && versionEtc.mode == "0440";
+assert versionEtc.text == "0.1.0\n";
 assert workersEtc.user == "root" && workersEtc.group == "boreal" && workersEtc.mode == "0440";
 assert
   alicePermsEtc.user == "root" && alicePermsEtc.group == "boreal" && alicePermsEtc.mode == "0440";
@@ -600,6 +644,7 @@ assert assertionFailed adminCollisionUser "reserved";
 assert assertionFailed invalidWorkerName "worker name must match";
 assert assertionFailed collidingUnitKey "must be unique";
 assert assertionFailed emptyTemporalAddress "temporalAddress";
+assert assertionFailed invalidLabVersion "boreal.version";
 assert assertionFailed removedUpdaterRepo "boreal.updater.repository";
 assert assertionFailed removedUpdaterBranch "boreal.updater.branch";
 assert assertionFailed removedUpdaterConfigName "boreal.updater.configurationName";
