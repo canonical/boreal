@@ -1,46 +1,112 @@
+use std::collections::BTreeMap;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use boreal_common::catalog::Catalog;
 use boreal_common::wire::{
-    self, PermissionReport, Request, Response, ResultOutcome, WorkerEntry, WorkflowDetail,
-    WorkflowSummary,
+    self, PermissionReport, PromptSummary, Request, Response, ResultOutcome, WorkerEntry,
+    WorkflowDetail, WorkflowSummary,
 };
 
+type MockRunningMap = BTreeMap<(String, String), (String, String)>;
+
 pub enum Mode {
-    Live { socket: PathBuf },
-    Mock { catalog: Catalog, caller: String },
+    Live {
+        socket: PathBuf,
+    },
+    Mock {
+        catalog: Catalog,
+        caller: String,
+        running: Mutex<MockRunningMap>,
+    },
 }
 
 impl Mode {
+    pub fn mock(catalog: Catalog, caller: impl Into<String>) -> Self {
+        let mut seeded = MockRunningMap::new();
+        for user in catalog.users().keys() {
+            seeded.insert(
+                (user.clone(), String::from("sample-1")),
+                (String::from("greet"), String::from("DemoWorkflow")),
+            );
+        }
+        Self::Mock {
+            catalog,
+            caller: caller.into(),
+            running: Mutex::new(seeded),
+        }
+    }
+
     pub fn is_mock(&self) -> bool {
         matches!(self, Self::Mock { .. })
     }
 
     pub fn send(&self, req: &Request) -> Result<Response, String> {
         match self {
-            Self::Live { socket } => send_ipc(socket, req),
-            Self::Mock { catalog, caller } => Ok(mock_dispatch(catalog, caller, req)),
+            Self::Live { socket } => send_ipc(
+                socket,
+                req,
+                Duration::from_secs(30),
+                Duration::from_secs(10),
+            ),
+            Self::Mock {
+                catalog,
+                caller,
+                running,
+            } => Ok(mock_dispatch(catalog, caller, running, req)),
+        }
+    }
+
+    pub fn prompt_summary(&self) -> Option<PromptSummary> {
+        match self {
+            Self::Live { socket } => match send_ipc(
+                socket,
+                &Request::Summary,
+                Duration::from_millis(250),
+                Duration::from_millis(150),
+            ) {
+                Ok(Response::Summary(summary)) => Some(summary),
+                _ => None,
+            },
+            Self::Mock {
+                catalog,
+                caller,
+                running,
+            } => match mock_dispatch(catalog, caller, running, &Request::Summary) {
+                Response::Summary(summary) => Some(summary),
+                _ => None,
+            },
         }
     }
 }
 
-fn send_ipc(socket: &Path, req: &Request) -> Result<Response, String> {
+fn send_ipc(
+    socket: &Path,
+    req: &Request,
+    read_timeout: Duration,
+    write_timeout: Duration,
+) -> Result<Response, String> {
     let mut stream = UnixStream::connect(socket)
         .map_err(|e| format!("connect broker {}: {e}", socket.display()))?;
     stream
-        .set_read_timeout(Some(Duration::from_secs(30)))
+        .set_read_timeout(Some(read_timeout))
         .map_err(|e| e.to_string())?;
     stream
-        .set_write_timeout(Some(Duration::from_secs(10)))
+        .set_write_timeout(Some(write_timeout))
         .map_err(|e| e.to_string())?;
     wire::write_frame(&mut stream, &req.encode()).map_err(|e| e.detail())?;
     let raw = wire::read_frame(&mut stream).map_err(|e| e.detail())?;
     Response::decode(&raw).map_err(|e| e.detail())
 }
 
-fn mock_dispatch(catalog: &Catalog, caller: &str, req: &Request) -> Response {
+fn mock_dispatch(
+    catalog: &Catalog,
+    caller: &str,
+    running: &Mutex<MockRunningMap>,
+    req: &Request,
+) -> Response {
     match req {
         Request::Workers => match catalog.list_accessible_workers(caller) {
             Ok(list) => Response::Workers(list),
@@ -64,9 +130,13 @@ fn mock_dispatch(catalog: &Catalog, caller: &str, req: &Request) -> Response {
             id,
             args: _,
         } => {
-            let wf_type = catalog
+            let wf_type: String = catalog
                 .worker_and_package(owner, worker)
                 .map_or_else(|_| "MockWorkflow".into(), |(_, p)| p.workflow_type().into());
+            running.lock().unwrap().insert(
+                (owner.clone(), id.clone()),
+                (worker.clone(), wf_type.clone()),
+            );
             Response::Started {
                 owner: owner.clone(),
                 worker: worker.clone(),
@@ -75,14 +145,23 @@ fn mock_dispatch(catalog: &Catalog, caller: &str, req: &Request) -> Response {
                 run_id: format!("mock-{id}"),
             }
         }
-        Request::List { owner } => Response::List(vec![WorkflowSummary {
-            owner: owner.clone(),
-            worker: "greet".into(),
-            workflow_type: "DemoWorkflow".into(),
-            workflow_id: "sample-1".into(),
-            run_id: "mock-sample-1".into(),
-            status: "running".into(),
-        }]),
+        Request::List { owner } => {
+            let items = running
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|((entry_owner, _), _)| entry_owner == owner)
+                .map(|((_, wf_id), (worker, wf_type))| WorkflowSummary {
+                    owner: owner.clone(),
+                    worker: worker.clone(),
+                    workflow_type: wf_type.clone(),
+                    workflow_id: wf_id.clone(),
+                    run_id: format!("mock-{wf_id}"),
+                    status: "running".into(),
+                })
+                .collect();
+            Response::List(items)
+        }
         Request::Status { owner, id } => Response::Status(WorkflowDetail {
             owner: owner.clone(),
             worker: "greet".into(),
@@ -109,24 +188,38 @@ fn mock_dispatch(catalog: &Catalog, caller: &str, req: &Request) -> Response {
             start_time: "-".into(),
             close_time: "-".into(),
         }),
-        Request::Cancel { owner, id, run_id } => Response::Cancelled {
-            owner: owner.clone(),
-            worker: "greet".into(),
-            workflow_type: "DemoWorkflow".into(),
-            workflow_id: id.clone(),
-            run_id: run_id.clone(),
-        },
-        Request::Summary => Response::Summary(wire::PromptSummary {
-            running_workflows: Some(1),
-            draining: false,
-        }),
+        Request::Cancel { owner, id, run_id } => {
+            running.lock().unwrap().remove(&(owner.clone(), id.clone()));
+            Response::Cancelled {
+                owner: owner.clone(),
+                worker: "greet".into(),
+                workflow_type: "DemoWorkflow".into(),
+                workflow_id: id.clone(),
+                run_id: run_id.clone(),
+            }
+        }
+        Request::Summary => {
+            let count = running
+                .lock()
+                .unwrap()
+                .keys()
+                .filter(|(entry_owner, _)| entry_owner == caller)
+                .count() as u32;
+            Response::Summary(PromptSummary {
+                running_workflows: Some(count),
+                draining: false,
+            })
+        }
     }
 }
 
-pub fn print_response(resp: Response, mock: bool) {
+pub fn print_response(resp: Response, mock: bool) -> bool {
     let prefix = if mock { "[mock] " } else { "" };
     match resp {
-        Response::Workers(items) => print_workers(&items, prefix),
+        Response::Workers(items) => {
+            print_workers(&items, prefix);
+            true
+        }
         Response::Started {
             owner,
             worker,
@@ -137,8 +230,12 @@ pub fn print_response(resp: Response, mock: bool) {
             println!(
                 "{prefix}started {workflow_type} '{workflow_id}' on {owner}/{worker} (run ID: {run_id})"
             );
+            true
         }
-        Response::List(items) => print_workflows(&items, prefix),
+        Response::List(items) => {
+            print_workflows(&items, prefix);
+            true
+        }
         Response::Status(d) => {
             println!(
                 "{prefix}workflow ID: {}\nrun ID:      {}\nowner:       {}\nworker:      {} ({})\nstatus:      {}\nstarted:     {}\nclosed:      {}",
@@ -151,13 +248,16 @@ pub fn print_response(resp: Response, mock: bool) {
                 d.start_time,
                 d.close_time
             );
+            true
         }
         Response::WorkflowResult(outcome) => match outcome {
             ResultOutcome::Completed { run_id, output } => {
                 println!("{prefix}completed (run ID: {run_id}):\n{output}");
+                true
             }
             ResultOutcome::Running { run_id } => {
                 println!("{prefix}workflow is still running (run ID: {run_id}); no result yet.");
+                true
             }
             ResultOutcome::Unsuccessful {
                 run_id,
@@ -165,9 +265,10 @@ pub fn print_response(resp: Response, mock: bool) {
                 detail,
             } => {
                 eprintln!("{prefix}workflow {status} (run ID: {run_id}): {detail}");
+                false
             }
         },
-        Response::CancelPrepared(_) => {}
+        Response::CancelPrepared(_) => true,
         Response::Cancelled {
             owner,
             worker,
@@ -178,12 +279,17 @@ pub fn print_response(resp: Response, mock: bool) {
             println!(
                 "{prefix}cancellation requested for {workflow_type} '{workflow_id}' on {owner}/{worker} (run ID: {run_id})"
             );
+            true
         }
-        Response::Permissions(report) => print_permissions(&report, prefix),
+        Response::Permissions(report) => {
+            print_permissions(&report, prefix);
+            true
+        }
         Response::Error { message, .. } => {
             eprintln!("error: {message}");
+            false
         }
-        Response::Summary(_) => {}
+        Response::Summary(_) => true,
     }
 }
 
@@ -238,5 +344,80 @@ fn print_permissions(report: &PermissionReport, prefix: &str) {
             "  {} (package {}): read={}, write={}",
             line.worker, line.package, line.read, line.write
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::net::UnixListener;
+
+    #[test]
+    fn test_mock_and_live_prompt_summary_tracking_and_fallback() {
+        let mock = Mode::mock(Catalog::mock(), "alice");
+        assert_eq!(
+            mock.prompt_summary(),
+            Some(PromptSummary {
+                running_workflows: Some(1),
+                draining: false,
+            })
+        );
+
+        mock.send(&Request::Start {
+            owner: "alice".into(),
+            worker: "greet".into(),
+            id: "job-2".into(),
+            args: vec!["Ada".into()],
+        })
+        .unwrap();
+        assert_eq!(mock.prompt_summary().unwrap().running_workflows, Some(2));
+
+        mock.send(&Request::Cancel {
+            owner: "alice".into(),
+            id: "sample-1".into(),
+            run_id: "mock-sample-1".into(),
+        })
+        .unwrap();
+        mock.send(&Request::Cancel {
+            owner: "alice".into(),
+            id: "job-2".into(),
+            run_id: "mock-job-2".into(),
+        })
+        .unwrap();
+        assert_eq!(mock.prompt_summary().unwrap().running_workflows, Some(0));
+
+        // Missing socket fails silently to None without blocking login.
+        let offline = Mode::Live {
+            socket: PathBuf::from("/tmp/opencode/nonexistent-boreal-broker.sock"),
+        };
+        assert_eq!(offline.prompt_summary(), None);
+
+        // Live Unix socket summary round-trips running count and draining state.
+        let sock = Path::new("/tmp/opencode")
+            .join(format!("boreal-client-sum-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&sock);
+        let listener = UnixListener::bind(&sock).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let raw = wire::read_frame(&mut conn).unwrap();
+            assert_eq!(Request::decode(&raw).unwrap(), Request::Summary);
+            let reply = Response::Summary(PromptSummary {
+                running_workflows: Some(4),
+                draining: true,
+            });
+            wire::write_frame(&mut conn, &reply.encode()).unwrap();
+        });
+        let live = Mode::Live {
+            socket: sock.clone(),
+        };
+        assert_eq!(
+            live.prompt_summary(),
+            Some(PromptSummary {
+                running_workflows: Some(4),
+                draining: true,
+            })
+        );
+        server.join().unwrap();
+        let _ = std::fs::remove_file(&sock);
     }
 }

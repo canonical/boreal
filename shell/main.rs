@@ -4,6 +4,7 @@ mod completion;
 mod helix;
 mod highlighter;
 mod menu;
+mod prompt;
 mod rc;
 
 use std::env;
@@ -13,6 +14,7 @@ use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::time::Instant;
 
 use boreal_common::catalog::{Catalog, DEFAULT_ETC_DIR};
 use boreal_common::os;
@@ -21,14 +23,15 @@ use boreal_common::wire::{BROKER_SOCKET, Request, Response};
 use crossterm::cursor::SetCursorStyle;
 use nu_ansi_term::Color;
 use reedline::{
-    CursorConfig, DefaultHinter, DefaultPrompt, DefaultPromptSegment, EditMode, Emacs, KeyCode,
-    KeyModifiers, Keybindings, Reedline, ReedlineEvent, ReedlineMenu, Signal, Vi,
-    default_emacs_keybindings, default_vi_insert_keybindings, default_vi_normal_keybindings,
+    CursorConfig, DefaultHinter, EditMode, Emacs, KeyCode, KeyModifiers, Keybindings, Reedline,
+    ReedlineEvent, ReedlineMenu, Signal, Vi, default_emacs_keybindings,
+    default_vi_insert_keybindings, default_vi_normal_keybindings,
 };
 
 use crate::client::Mode;
 use crate::command::{Action, Context, SecretAction};
 use crate::helix::Helix;
+use crate::prompt::Prompt;
 use crate::rc::Config;
 
 #[repr(C)]
@@ -173,7 +176,7 @@ fn load_runtime() -> Result<(Arc<Context>, Mode), String> {
     let caller = String::from("alice");
     Ok((
         Arc::new(Context::new(catalog.clone(), caller.clone())),
-        Mode::Mock { catalog, caller },
+        Mode::mock(catalog, caller),
     ))
 }
 
@@ -249,19 +252,17 @@ fn handle_secret_action(action: SecretAction) -> Result<(), String> {
     }
 }
 
-fn execute_action(action: Action, mode: &Mode) -> Result<(), String> {
+fn execute_action(action: Action, mode: &Mode) -> Result<bool, String> {
     match action {
-        Action::Exit => Ok(()),
-        Action::Secrets(sec) => handle_secret_action(sec),
+        Action::Exit => Ok(true),
+        Action::Secrets(sec) => handle_secret_action(sec).map(|()| true),
         Action::Workers => {
             let resp = mode.send(&Request::Workers)?;
-            client::print_response(resp, mode.is_mock());
-            Ok(())
+            Ok(client::print_response(resp, mode.is_mock()))
         }
         Action::Permissions { user } => {
             let resp = mode.send(&Request::Permissions { user: Some(user) })?;
-            client::print_response(resp, mode.is_mock());
-            Ok(())
+            Ok(client::print_response(resp, mode.is_mock()))
         }
         Action::Start {
             worker,
@@ -275,23 +276,19 @@ fn execute_action(action: Action, mode: &Mode) -> Result<(), String> {
                 id,
                 args,
             })?;
-            client::print_response(resp, mode.is_mock());
-            Ok(())
+            Ok(client::print_response(resp, mode.is_mock()))
         }
         Action::List { owner } => {
             let resp = mode.send(&Request::List { owner })?;
-            client::print_response(resp, mode.is_mock());
-            Ok(())
+            Ok(client::print_response(resp, mode.is_mock()))
         }
         Action::Status { id, owner } => {
             let resp = mode.send(&Request::Status { owner, id })?;
-            client::print_response(resp, mode.is_mock());
-            Ok(())
+            Ok(client::print_response(resp, mode.is_mock()))
         }
         Action::Result { id, owner } => {
             let resp = mode.send(&Request::Result { owner, id })?;
-            client::print_response(resp, mode.is_mock());
-            Ok(())
+            Ok(client::print_response(resp, mode.is_mock()))
         }
         Action::Cancel { id, owner } => {
             let prep = mode.send(&Request::PrepareCancel {
@@ -301,8 +298,7 @@ fn execute_action(action: Action, mode: &Mode) -> Result<(), String> {
             let detail = match prep {
                 Response::CancelPrepared(d) => d,
                 other => {
-                    client::print_response(other, mode.is_mock());
-                    return Ok(());
+                    return Ok(client::print_response(other, mode.is_mock()));
                 }
             };
             let prompt = format!(
@@ -312,15 +308,14 @@ fn execute_action(action: Action, mode: &Mode) -> Result<(), String> {
             let confirmed = confirm_prompt(&prompt).map_err(|e| e.to_string())?;
             if !confirmed {
                 println!("cancellation aborted.");
-                return Ok(());
+                return Ok(true);
             }
             let resp = mode.send(&Request::Cancel {
                 owner,
                 id,
                 run_id: detail.run_id,
             })?;
-            client::print_response(resp, mode.is_mock());
-            Ok(())
+            Ok(client::print_response(resp, mode.is_mock()))
         }
     }
 }
@@ -377,24 +372,41 @@ fn bind_completion_keys(keys: &mut Keybindings) {
     );
 }
 
-fn build_edit_mode(mode: rc::Mode) -> Box<dyn EditMode> {
+fn build_edit_mode(mode: rc::Mode) -> (Box<dyn EditMode>, Option<Arc<helix::State>>) {
     match mode {
         rc::Mode::Emacs => {
             let mut keys = default_emacs_keybindings();
             bind_completion_keys(&mut keys);
-            Box::new(Emacs::new(keys))
+            (Box::new(Emacs::new(keys)), None)
         }
         rc::Mode::Vi => {
             let mut insert_keys = default_vi_insert_keybindings();
             bind_completion_keys(&mut insert_keys);
             let normal_keys = default_vi_normal_keybindings();
-            Box::new(Vi::new(insert_keys, normal_keys))
+            (Box::new(Vi::new(insert_keys, normal_keys)), None)
         }
         rc::Mode::Helix => {
             let mut insert_keys = default_vi_insert_keybindings();
             bind_completion_keys(&mut insert_keys);
-            Box::new(Helix::new(insert_keys))
+            let state = Arc::new(helix::State::new());
+            (
+                Box::new(Helix::with_state(insert_keys, Arc::clone(&state))),
+                Some(state),
+            )
         }
+    }
+}
+
+fn resolve_prompt_host(is_mock: bool) -> prompt::Host {
+    if is_mock {
+        prompt::Host::Mock
+    } else if !Path::new(DEFAULT_ETC_DIR).exists()
+        && !is_ssh_session()
+        && let Ok(test_host) = env::var("BOREAL_TEST_HOSTNAME")
+    {
+        prompt::Host::Live(os::sanitize_hostname(test_host))
+    } else {
+        prompt::Host::live_system()
     }
 }
 
@@ -415,6 +427,7 @@ fn run_interactive() -> Result<(), Box<dyn Error>> {
         );
     }
 
+    let (edit_mode, helix_state) = build_edit_mode(rc_cfg.edit_mode());
     let mut editor = Reedline::create()
         .with_completer(Box::new(completion::Completer::new(Arc::clone(&ctx))))
         .with_quick_completions(true)
@@ -428,26 +441,55 @@ fn run_interactive() -> Result<(), Box<dyn Error>> {
             vi_insert: Some(SetCursorStyle::SteadyBar),
             vi_normal: Some(SetCursorStyle::SteadyBlock),
         })
-        .with_edit_mode(build_edit_mode(rc_cfg.edit_mode()));
-    let prompt = DefaultPrompt::new(
-        DefaultPromptSegment::Basic("boreal".into()),
-        DefaultPromptSegment::Empty,
+        .with_edit_mode(edit_mode);
+
+    let mut prompt = Prompt::new(
+        ctx.caller(),
+        resolve_prompt_host(mode.is_mock()),
+        helix_state,
     );
+    let mut last_ok = true;
+    let mut last_duration = None;
 
     loop {
+        println!();
+        prompt.refresh(mode.prompt_summary(), last_ok, last_duration);
         match editor.read_line(&prompt)? {
             Signal::Success(line) => match ctx.parse(&line) {
                 Ok(Some(Action::Exit)) => break,
                 Ok(Some(action)) => {
-                    if let Err(err) = execute_action(action, &mode) {
-                        eprintln!("error: {err}");
+                    let started = Instant::now();
+                    match execute_action(action, &mode) {
+                        Ok(ok) => {
+                            last_ok = ok;
+                            last_duration = Some(started.elapsed());
+                        }
+                        Err(err) => {
+                            eprintln!("error: {err}");
+                            last_ok = false;
+                            last_duration = Some(started.elapsed());
+                        }
                     }
                 }
-                Ok(None) => {}
-                Err(command::Error::Quote) => eprintln!("error: unfinished quote or escape"),
-                Err(command::Error::Clap(error)) => error.print()?,
+                Ok(None) => {
+                    last_ok = true;
+                    last_duration = None;
+                }
+                Err(command::Error::Quote) => {
+                    eprintln!("error: unfinished quote or escape");
+                    last_ok = false;
+                    last_duration = None;
+                }
+                Err(command::Error::Clap(error)) => {
+                    last_ok = !error.use_stderr();
+                    last_duration = None;
+                    error.print()?;
+                }
             },
-            Signal::CtrlC => continue,
+            Signal::CtrlC => {
+                last_duration = None;
+                continue;
+            }
             Signal::CtrlD | Signal::ExternalBreak(_) => break,
             _ => continue,
         }

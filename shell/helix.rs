@@ -1,3 +1,6 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
+
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use reedline::{
     Direction, EditCommand, EditMode, FindStop, Keybindings, MotionTarget, PromptEditMode,
@@ -5,10 +8,41 @@ use reedline::{
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Mode {
+pub enum Mode {
     Insert,
     Normal,
     Select,
+}
+
+/// Thread-safe snapshot of the active Helix editing mode for prompt rendering.
+#[derive(Default)]
+pub struct State {
+    raw: AtomicU8,
+}
+
+impl State {
+    pub const fn new() -> Self {
+        Self {
+            raw: AtomicU8::new(0),
+        }
+    }
+
+    pub fn get(&self) -> Mode {
+        match self.raw.load(Ordering::Relaxed) {
+            1 => Mode::Normal,
+            2 => Mode::Select,
+            _ => Mode::Insert,
+        }
+    }
+
+    fn set(&self, mode: Mode) {
+        let code = match mode {
+            Mode::Insert => 0,
+            Mode::Normal => 1,
+            Mode::Select => 2,
+        };
+        self.raw.store(code, Ordering::Relaxed);
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -26,16 +60,29 @@ enum Pending {
 pub struct Helix {
     insert_keys: Keybindings,
     mode: Mode,
+    state: Arc<State>,
     pending: Pending,
 }
 
 impl Helix {
+    #[cfg(test)]
     pub fn new(insert_keys: Keybindings) -> Self {
+        Self::with_state(insert_keys, Arc::new(State::new()))
+    }
+
+    pub fn with_state(insert_keys: Keybindings, state: Arc<State>) -> Self {
+        state.set(Mode::Insert);
         Self {
             insert_keys,
             mode: Mode::Insert,
+            state,
             pending: Pending::None,
         }
+    }
+
+    fn set_mode(&mut self, mode: Mode) {
+        self.mode = mode;
+        self.state.set(mode);
     }
 
     fn is_select(&self) -> bool {
@@ -117,7 +164,7 @@ impl Helix {
     fn handle_insert_key(&mut self, modifiers: KeyModifiers, code: KeyCode) -> ReedlineEvent {
         match (modifiers, code) {
             (KeyModifiers::NONE, KeyCode::Esc) => {
-                self.mode = Mode::Normal;
+                self.set_mode(Mode::Normal);
                 self.pending = Pending::None;
                 ReedlineEvent::Multiple(vec![
                     ReedlineEvent::Esc,
@@ -180,14 +227,14 @@ impl Helix {
         match (modifiers, code) {
             (KeyModifiers::NONE, KeyCode::Esc) => {
                 if self.mode == Mode::Select {
-                    self.mode = Mode::Normal;
+                    self.set_mode(Mode::Normal);
                     ReedlineEvent::Repaint
                 } else {
                     ReedlineEvent::Esc
                 }
             }
             (KeyModifiers::NONE, KeyCode::Enter) => {
-                self.mode = Mode::Insert;
+                self.set_mode(Mode::Insert);
                 ReedlineEvent::Multiple(vec![
                     ReedlineEvent::Esc,
                     ReedlineEvent::Edit(vec![EditCommand::MoveToEnd { select: false }]),
@@ -234,7 +281,7 @@ impl Helix {
                 ReedlineEvent::Edit(vec![EditCommand::MoveLeft { select }])
             }
             (KeyModifiers::NONE, KeyCode::Delete) => {
-                self.mode = Mode::Normal;
+                self.set_mode(Mode::Normal);
                 ReedlineEvent::Edit(vec![EditCommand::CutSelection])
             }
             (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(raw)) => {
@@ -245,11 +292,11 @@ impl Helix {
                 };
                 match ch {
                     'i' => {
-                        self.mode = Mode::Insert;
+                        self.set_mode(Mode::Insert);
                         ReedlineEvent::Multiple(vec![ReedlineEvent::Esc, ReedlineEvent::Repaint])
                     }
                     'a' => {
-                        self.mode = Mode::Insert;
+                        self.set_mode(Mode::Insert);
                         ReedlineEvent::Multiple(vec![
                             ReedlineEvent::Esc,
                             ReedlineEvent::Edit(vec![EditCommand::MoveRight { select: false }]),
@@ -257,7 +304,7 @@ impl Helix {
                         ])
                     }
                     'I' => {
-                        self.mode = Mode::Insert;
+                        self.set_mode(Mode::Insert);
                         ReedlineEvent::Multiple(vec![
                             ReedlineEvent::Esc,
                             ReedlineEvent::Edit(vec![EditCommand::MoveToLineNonBlankStart {
@@ -267,7 +314,7 @@ impl Helix {
                         ])
                     }
                     'A' => {
-                        self.mode = Mode::Insert;
+                        self.set_mode(Mode::Insert);
                         ReedlineEvent::Multiple(vec![
                             ReedlineEvent::Esc,
                             ReedlineEvent::Edit(vec![EditCommand::MoveToLineEnd { select: false }]),
@@ -275,7 +322,7 @@ impl Helix {
                         ])
                     }
                     'v' => {
-                        self.mode = if select { Mode::Normal } else { Mode::Select };
+                        self.set_mode(if select { Mode::Normal } else { Mode::Select });
                         ReedlineEvent::Repaint
                     }
                     ';' => ReedlineEvent::Esc,
@@ -382,11 +429,11 @@ impl Helix {
                         ReedlineEvent::None
                     }
                     'd' => {
-                        self.mode = Mode::Normal;
+                        self.set_mode(Mode::Normal);
                         ReedlineEvent::Edit(vec![EditCommand::CutSelection])
                     }
                     'c' => {
-                        self.mode = Mode::Insert;
+                        self.set_mode(Mode::Insert);
                         ReedlineEvent::Multiple(vec![
                             ReedlineEvent::Edit(vec![EditCommand::CutSelection]),
                             ReedlineEvent::Repaint,
@@ -414,7 +461,7 @@ impl EditMode for Helix {
             }) => match (modifiers, code) {
                 (KeyModifiers::CONTROL, KeyCode::Char('c' | 'C')) => {
                     self.pending = Pending::None;
-                    self.mode = Mode::Insert;
+                    self.set_mode(Mode::Insert);
                     ReedlineEvent::CtrlC
                 }
                 (KeyModifiers::CONTROL, KeyCode::Char('d' | 'D')) => {
@@ -491,17 +538,21 @@ mod tests {
 
         let esc = hx.parse_event(raw_key(KeyCode::Esc, KeyModifiers::NONE));
         assert_eq!(hx.edit_mode(), PromptEditMode::Vi(PromptViMode::Visual));
+        assert_eq!(hx.state.get(), Mode::Normal);
         assert!(matches!(esc, ReedlineEvent::Multiple(_)));
 
         // 'v' toggles select mode, Esc returns to normal mode without dropping selection.
         hx.parse_event(raw_key(KeyCode::Char('v'), KeyModifiers::NONE));
         assert_eq!(hx.mode, Mode::Select);
+        assert_eq!(hx.state.get(), Mode::Select);
         hx.parse_event(raw_key(KeyCode::Esc, KeyModifiers::NONE));
         assert_eq!(hx.mode, Mode::Normal);
+        assert_eq!(hx.state.get(), Mode::Normal);
 
         // 'c' cuts current selection and returns to insert mode.
         let change = hx.parse_event(raw_key(KeyCode::Char('c'), KeyModifiers::NONE));
         assert_eq!(hx.edit_mode(), PromptEditMode::Vi(PromptViMode::Insert));
+        assert_eq!(hx.state.get(), Mode::Insert);
         assert_eq!(
             change,
             ReedlineEvent::Multiple(vec![
