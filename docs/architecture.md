@@ -3,10 +3,9 @@
 Boreal separates reusable lab infrastructure (on `main`) from concrete lab
 deployments (in standalone downstream flakes initialized from
 `templates.default` or on `downstreams/<name>` orphan-branch worktrees under
-`downstreams/`). Downstream labs pin `boreal` in `flake.lock`, register their
-Temporal worker derivations and typed flat argument schemas in
-`boreal.workerPackages`, and declare accounts, SSH public keys, worker
-instances, and permissions in `boreal.users`.
+`downstreams/`). Downstream labs pin `boreal` in `flake.lock` and declare accounts, SSH public
+keys, worker outputs, schedules, and permissions in `boreal.users`. Each worker
+package publishes `schema.yaml` from a build-time `schema` bin.
 
 ## Policy catalogs
 
@@ -17,8 +16,9 @@ store:
 - `/etc/boreal/version` (`0440`, `root:boreal`): downstream lab version
   (`boreal.version`, defaulting to `temporal/Cargo.toml`
   `workspace.package.version`).
-- `/etc/boreal/workers.yaml` (`0440`, `root:boreal`): registered worker
-  `workflowType`, `description`, and typed `args` metadata.
+- `/etc/boreal/schemas.yaml` (`0440`, `root:boreal`): store directories that
+  contain `schema.yaml`. Each file is keyed by worker output name and carries
+  `workflow`, `description`, and ordered `args`.
 - `/etc/boreal/users/<user>/perms.yaml` (`0440`, `root:boreal`): each user's
   default and resolved per-worker `read` (`status`, `result`, `view`, `list`)
   and `write` (`run`, `cancel`) policies (`true` grants all Boreal users,
@@ -40,7 +40,7 @@ store:
     Every request is authenticated using kernel `SO_PEERCRED` (`UID -> passwd`),
     never a caller-supplied username. Before acting on an existing execution,
     `boreal-broker` describes the workflow, resolves its task queue back to the
-    configured worker, verifies `workflowType` matches `/etc/boreal/workers.yaml`,
+    configured worker, verifies `workflow` matches the registered schema,
     and pins `run_id` across `cancel`.
   - `/run/boreal/updater.sock` (`0600 root:root`, verified `SO_PEERCRED` UID `0`)
     for `boreal-updater`.
@@ -55,7 +55,7 @@ store:
   schedule RPCs (`CreateSchedule`, `DescribeSchedule`, `UpdateSchedule`,
   `PatchSchedule`, `DeleteSchedule`, `ListSchedules`, `CountSchedules`,
   `ListScheduleMatchingTimes`) when the target namespace, task queue, and
-  `workflowType` match a registered worker and
+  `workflow` match a registered worker and
   `/etc/boreal/users/<owner>/perms.yaml` grants the listener owner `write`
   (start, cancel, and schedule mutation) or `read` (history and cross-namespace
   describe). List, count, and matching-times stay in the listener owner's

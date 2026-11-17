@@ -21,8 +21,8 @@ collection is never enabled or invoked.
   - `host`: `config.networking.hostName` (`nixosConfigurations.<host>`).
   - `allowSwitch`: `config.system.switch.enable`.
   - `workerUnits`: `boreal-worker-<user>-<worker>.service` units, plus
-    `boreal-scheduler-<user>-<worker>.service` when that package has a
-    `scheduler` output, stopped before
+    `boreal-schedule-<user>-<worker>.service` when that worker enables
+    `schedule`, stopped before
     the final post-drain quiescence check.
   - `brokerSocket`: `/run/boreal/updater.sock`.
 

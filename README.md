@@ -27,14 +27,14 @@ deployment.
   and `kernel.yama.ptrace_scope = 2`. Workers reach Temporal solely through a
   per-worker HTTP/2 gRPC gate in `boreal-broker` that restricts RPC methods,
   `namespace` (`<user>`), and `task_queue` (`<user>-<worker>`). A package
-  `scheduler` output is started as a oneshot in that namespace and may upsert
+  `schedule` output is started as a oneshot in that namespace and may upsert
   Temporal schedules through the same gate.
 - **Kernel-authenticated runtime policy**: `boreal-broker` authenticates callers
   on `/run/boreal/broker.sock` (`0660 boreal-broker:boreal`) via `SO_PEERCRED`,
-  validates typed argument schemas from `/etc/boreal/workers.yaml`, enforces
-  `/etc/boreal/users/<user>/perms.yaml` across `run`, `cancel`, `status`,
-  `result`, `view`, `list`, and `permissions`, and verifies registered
-  `workflowType` and pinned `run_id` on existing executions.
+  validates positional arguments against `/etc/boreal/schemas.yaml` schema
+  directories, enforces `/etc/boreal/users/<user>/perms.yaml` across `run`,
+  `cancel`, `status`, `result`, `view`, `list`, and `permissions`, and verifies
+  the registered `workflow` and pinned `run_id` on existing executions.
 - **Restricted SSH shell & user secrets**: OpenSSH disables SFTP, TCP/Unix/agent
   forwarding, tunnels, and `~/.ssh/rc`. `boreal-shell` renders a two-line
   Starship-style status prompt (`<user> on 󰇅 <host> [ <paused>  <running>] is ❄️ v<version>`
@@ -129,8 +129,8 @@ separate private Git remotes.
     development shell and Temporal worker package builder linking
     `${boreal}/worker` at `.boreal/boreal-worker` without manual `outputHashes`.
 - `nixosModules`:
-  - `default` / `boreal` — `boreal.enable`, `boreal.workerPackages`,
-    `boreal.users`, `boreal.admin`, and `boreal.updater`.
+  - `default` / `boreal` — `boreal.enable`, `boreal.users`, `boreal.admin`,
+    and `boreal.updater`.
   - `vm` — disposable QEMU guest configuration (`boreal.vm.*`).
 - `packages.<system>`: `boreal-broker`, `boreal-shell`, `boreal-admin`, and
   `boreal-updater`.

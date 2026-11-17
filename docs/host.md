@@ -13,62 +13,37 @@ bare-metal hosts, and wires host-specific settings separately. Both
 # lab.nix
 { self, pkgs, ... }:
 let
-  myPackages = self.packages.${pkgs.stdenv.hostPlatform.system};
+  packages = self.packages.${pkgs.stdenv.hostPlatform.system};
 in
 {
   boreal = {
     enable = true;
-
-    workerPackages = {
-      lab-worker = {
-        package = myPackages.lab-worker;
-        workflowType = "DemoWorkflow";
-        description = "Run the greeting workflow";
-        args = [
-          { name = "name"; type = "string"; description = "Recipient name"; }
-          {
-            name = "wait_seconds";
-            type = "int";
-            min = 1;
-            max = 7200;
-            default = 20;
-            description = "Timer delay in seconds";
-          }
-        ];
-      };
-      lab-worker-alt = {
-        package = myPackages.lab-worker-alt;
-        workflowType = "CountWorkflow";
-        description = "Count Unicode scalar values";
-        args = [
-          { name = "name"; type = "string"; description = "Input text"; }
-          {
-            name = "wait_seconds";
-            type = "int";
-            min = 1;
-            max = 7200;
-            default = 20;
-            description = "Timer delay in seconds";
-          }
-        ];
-      };
-    };
 
     users = {
       alice = {
         keys = [ ]; # Add Alice's public SSH key.
         permissions = { read = true; write = false; };
         workers = {
-          greet = { package = "lab-worker"; permissions.write = [ "bob" ]; };
-          count = { package = "lab-worker-alt"; permissions.read = [ "bob" ]; };
+          greet = {
+            package = packages.lab-worker.greet;
+            schedule = {
+              enable = true;
+              package = packages.lab-worker.greet-schedule;
+            };
+            permissions.write = [ "bob" ];
+          };
+          count = {
+            package = packages.lab-worker.count;
+            permissions.read = [ "bob" ];
+          };
         };
       };
       bob = {
         keys = [ ]; # Add Bob's public SSH key.
         editMode = "vi"; # Optional: "emacs" (default), "vi", or "helix" (~/.borealrc).
         workers = {
-          greet.package = "lab-worker";
-          count.package = "lab-worker-alt";
+          greet.package = packages.lab-worker.greet;
+          count.package = packages.lab-worker.count;
         };
       };
     };
@@ -117,13 +92,24 @@ For user `<user>` and worker `<worker>`, Boreal isolates PostgreSQL and
 `TEMPORAL_NAMESPACE=<user>`, and `LAB_TASK_QUEUE=<user>-<worker>`. Do not mix
 differently registered worker packages on the same queue.
 
-To register Temporal schedules, add a `scheduler` bin to the worker package and
-pass `outputs = [ "out" "scheduler" ]` to `buildRustWorker`. The module then
-starts `boreal-scheduler-<user>-<worker>.service`, a oneshot in that worker's
-network namespace. The binary should call `boreal_worker::connect()`, upsert
-schedules with the stock Temporal client, and exit. `out` remains the worker.
-Schedules are rows in Temporal, not a timer: the server starts the workflows,
-and the worker unit executes them.
+Build the worker crate with `boreal.lib.buildRustWorker` and list every bin as
+an output, plus `schema`:
+
+```nix
+outputs = [ "out" "greet" "greet-schedule" "count" "schema" ];
+```
+
+`out` is only the Cargo install prefix. Each other name except `schema` is a
+bin moved to `$<name>/bin/<name>`. The `schema` bin is a build-time
+intermediate: `postInstall` runs it and installs `schema.yaml` as the `schema`
+output. The module writes those directories to `/etc/boreal/schemas.yaml`.
+
+To register Temporal schedules, set `schedule.enable = true` and
+`schedule.package` to the schedule output. The module starts
+`boreal-schedule-<user>-<worker>.service`, a oneshot in that worker's network
+namespace. The binary should call `boreal_worker::connect()`, upsert schedules
+with the stock Temporal client, and exit. Schedules are rows in Temporal, not a
+timer: the server starts the workflows, and the worker unit executes them.
 
 ## User secrets and restricted administration
 
