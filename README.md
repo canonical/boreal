@@ -26,7 +26,9 @@ deployment.
   `/run/netns/boreal-worker-<user>-<worker>` with `ProtectProc = "invisible"`
   and `kernel.yama.ptrace_scope = 2`. Workers reach Temporal solely through a
   per-worker HTTP/2 gRPC gate in `boreal-broker` that restricts RPC methods,
-  `namespace` (`<user>`), and `task_queue` (`<user>-<worker>`).
+  `namespace` (`<user>`), and `task_queue` (`<user>-<worker>`). A package
+  `scheduler` output is started as a oneshot in that namespace and may upsert
+  Temporal schedules through the same gate.
 - **Kernel-authenticated runtime policy**: `boreal-broker` authenticates callers
   on `/run/boreal/broker.sock` (`0660 boreal-broker:boreal`) via `SO_PEERCRED`,
   validates typed argument schemas from `/etc/boreal/workers.yaml`, enforces

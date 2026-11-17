@@ -117,6 +117,14 @@ For user `<user>` and worker `<worker>`, Boreal isolates PostgreSQL and
 `TEMPORAL_NAMESPACE=<user>`, and `LAB_TASK_QUEUE=<user>-<worker>`. Do not mix
 differently registered worker packages on the same queue.
 
+To register Temporal schedules, add a `scheduler` bin to the worker package and
+pass `outputs = [ "out" "scheduler" ]` to `buildRustWorker`. The module then
+starts `boreal-scheduler-<user>-<worker>.service`, a oneshot in that worker's
+network namespace. The binary should call `boreal_worker::connect()`, upsert
+schedules with the stock Temporal client, and exit. `out` remains the worker.
+Schedules are rows in Temporal, not a timer: the server starts the workflows,
+and the worker unit executes them.
+
 ## User secrets and restricted administration
 
 Lab users connect over SSH into `boreal-shell` and manage their own secrets

@@ -23,6 +23,40 @@ downstream Boreal Rust workers:
 - Re-exports `temporalio_client`, `temporalio_common`, `temporalio_macros`,
   `temporalio_sdk`, and `temporalio_workflow`.
 
+## Schedules
+
+A schedule is a Temporal server record, not a long-running process. Downstream
+packages that want one compile a second binary named `scheduler` and pass
+`outputs = [ "out" "scheduler" ]` to `boreal.lib.buildRustWorker`. NixOS starts
+that binary once per user-worker as `boreal-scheduler-<user>-<worker>.service`.
+
+The scheduler uses `connect()` and `task_queue()`, upserts with
+`Client::create_schedule` / `ScheduleHandle::update`, and exits. Do not add a
+Boreal schedule wrapper. The worker gate allows the stock schedule RPCs, clamps
+`catchup_window` to 60 seconds, and rejects a backfill wider than 24 hours.
+While an update drain is closed, an unpaused create, unpause, trigger, or
+backfill fails and the oneshot retries.
+
+```rust
+let client = boreal_worker::connect().await?;
+let queue = boreal_worker::task_queue("hello")?;
+client
+    .create_schedule(
+        "hourly-hello",
+        CreateScheduleOptions::builder()
+            .action(ScheduleAction::start_workflow::<HelloWorkflow>(
+                input,
+                queue,
+                "hourly-hello",
+            ))
+            .spec(ScheduleSpec::from_interval(Duration::from_hours(1)))
+            .build(),
+    )
+    .await?;
+```
+
+`AlreadyExists` does not apply a changed spec. Describe and update in place.
+
 ## Downstream usage
 
 Downstream flakes using `boreal.lib.mkDevShell` and

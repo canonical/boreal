@@ -51,15 +51,24 @@ store:
   `kernel.yama.ptrace_scope = 2` (blocking same-UID `ptrace` from interactive
   sessions). `boreal-broker`'s HTTP/2 gRPC worker gate permits worker
   polling/completion RPCs on `WorkflowService`, plus `StartWorkflowExecution`,
-  `GetWorkflowExecutionHistory`, and `RequestCancelWorkflowExecution` when the
-  target namespace, task queue, and `workflowType` match a registered worker and
+  `GetWorkflowExecutionHistory`, `RequestCancelWorkflowExecution`, and the
+  schedule RPCs (`CreateSchedule`, `DescribeSchedule`, `UpdateSchedule`,
+  `PatchSchedule`, `DeleteSchedule`, `ListSchedules`, `CountSchedules`,
+  `ListScheduleMatchingTimes`) when the target namespace, task queue, and
+  `workflowType` match a registered worker and
   `/etc/boreal/users/<owner>/perms.yaml` grants the listener owner `write`
-  (start and cancel) or `read` (history). Caller identity is the per-worker
-  listener binding, never the `temporal-namespace` header or request namespace.
+  (start, cancel, and schedule mutation) or `read` (history and cross-namespace
+  describe). List, count, and matching-times stay in the listener owner's
+  namespace. Caller identity is the per-worker listener binding, never the
+  `temporal-namespace` header or request namespace.
   Cross-namespace child-workflow commands, external signals, and external
   cancels stay denied. Permitted starts are recorded for updater drain; a closed
   admission gate still accepts one only when that caller namespace already has
-  in-flight tracked work or a live worker lease. Polling RPCs still require
+  in-flight tracked work or a live worker lease. An unpaused schedule create or
+  update, an unpause, a trigger, and a backfill are rejected while the gate is
+  closed, with no inflight exception. Pause, delete, and a paused create stay
+  allowed. Create and update clamp `catchup_window` to 60 seconds, and a
+  backfill wider than 24 hours is rejected. Polling RPCs still require
   `namespace == <user>` and `task_queue == <user>-<worker>`.
 
 ## SSH surface and user secrets

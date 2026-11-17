@@ -20,7 +20,9 @@ collection is never enabled or invoked.
   - `projectDir`: `/etc/nixos`.
   - `host`: `config.networking.hostName` (`nixosConfigurations.<host>`).
   - `allowSwitch`: `config.system.switch.enable`.
-  - `workerUnits`: `boreal-worker-<user>-<worker>.service` units stopped before
+  - `workerUnits`: `boreal-worker-<user>-<worker>.service` units, plus
+    `boreal-scheduler-<user>-<worker>.service` when that package has a
+    `scheduler` output, stopped before
     the final post-drain quiescence check.
   - `brokerSocket`: `/run/boreal/updater.sock`.
 
