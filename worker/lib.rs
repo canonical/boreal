@@ -16,6 +16,15 @@ pub use temporalio_macros;
 pub use temporalio_sdk;
 pub use temporalio_workflow;
 
+#[cfg(feature = "schema")]
+mod schema;
+#[cfg(feature = "schema")]
+pub use schema::{WorkerSchema, emit_schema, render_schema};
+#[cfg(feature = "schema")]
+pub use schemars;
+#[cfg(feature = "schema")]
+pub use validator;
+
 use temporalio_client::{
     Client, ClientOptions, Connection, envconfig::LoadClientConfigProfileOptions,
 };

@@ -26,11 +26,12 @@ downstream Boreal Rust workers:
 ## Schedules
 
 A schedule is a Temporal server record, not a long-running process. Downstream
-packages that want one compile a second binary named `scheduler` and pass
-`outputs = [ "out" "scheduler" ]` to `boreal.lib.buildRustWorker`. NixOS starts
-that binary once per user-worker as `boreal-scheduler-<user>-<worker>.service`.
+packages that want one compile a bin such as `greet-schedule` and pass
+`outputs = [ "out" "greet" "greet-schedule" "schema" ]` to
+`boreal.lib.buildRustWorker`. NixOS starts that binary once per user-worker as
+`boreal-schedule-<user>-<worker>.service` when `schedule.enable` is true.
 
-The scheduler uses `connect()` and `task_queue()`, upserts with
+The schedule bin uses `connect()` and `task_queue()`, upserts with
 `Client::create_schedule` / `ScheduleHandle::update`, and exits. Do not add a
 Boreal schedule wrapper. The worker gate allows the stock schedule RPCs, clamps
 `catchup_window` to 60 seconds, and rejects a backfill wider than 24 hours.
@@ -66,10 +67,19 @@ dependency without maintaining Git `outputHashes` in `flake.nix`:
 
 ```toml
 [dependencies]
-boreal-worker = { path = "../.boreal/boreal-worker" }
+boreal-worker = { path = "../.boreal/boreal-worker", features = ["schema"] }
+schemars = { version = "1", features = ["preserve_order"] }
 serde = { version = "1", features = ["derive"] }
+validator = { version = "0.20", features = ["derive"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
+
+Enable the `schema` feature and add a `schema` bin that calls
+`boreal_worker::emit_schema`. `buildRustWorker` runs that bin and keeps
+`schema.yaml`, not the binary. Input structs derive `JsonSchema` and `Validate`.
+Call `input.validate()?` at the start of the workflow run. Range, length, and
+pattern checks live there; the shell only coerces positional tokens to JSON
+types. The YAML key is `workflow`, not `workflowType`.
 
 ## Checks
 
