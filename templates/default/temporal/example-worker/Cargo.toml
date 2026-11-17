@@ -5,14 +5,23 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[lib]
+path = "lib.rs"
+
 [[bin]]
-name = "example-worker"
+name = "example"
 path = "main.rs"
+
+[[bin]]
+name = "schema"
+path = "schema.rs"
 
 [dependencies]
 boreal-worker.workspace = true
 futures.workspace = true
+schemars.workspace = true
 serde.workspace = true
+validator.workspace = true
 temporalio-common.workspace = true
 temporalio-macros.workspace = true
 temporalio-sdk.workspace = true

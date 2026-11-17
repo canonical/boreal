@@ -7,19 +7,6 @@ in
   boreal = {
     enable = true;
 
-    workerPackages.example-worker = {
-      package = workers.example-worker;
-      workflowType = "ExampleWorkflow";
-      description = "Run the starter example workflow";
-      args = [
-        {
-          name = "message";
-          type = "string";
-          description = "Non-secret text message";
-        }
-      ];
-    };
-
     users.alice = {
       keys = [
         # Add Alice's public SSH key here (never private keys):
@@ -29,7 +16,7 @@ in
         read = false;
         write = false;
       };
-      workers.example.package = "example-worker";
+      workers.example.package = workers.example-worker.example;
     };
   };
 }

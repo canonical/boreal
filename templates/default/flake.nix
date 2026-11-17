@@ -35,6 +35,11 @@
             pname = "example-worker";
             src = ./temporal;
             cargoLock.lockFile = ./temporal/Cargo.lock;
+            outputs = [
+              "out"
+              "example"
+              "schema"
+            ];
           };
         }
         // nixpkgs.lib.optionalAttrs (pkgs.stdenv.hostPlatform.system == "x86_64-linux") {

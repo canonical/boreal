@@ -21,8 +21,8 @@ Boreal framework revision.
 
 2. Customize workflows and users:
    - Replace or add Temporal worker crates under `temporal/`.
-   - Register worker derivations and typed `args` schemas under
-     `boreal.workerPackages` in `lab.nix`.
+   - Point `boreal.users.<name>.workers.<name>.package` at a worker output.
+     `buildRustWorker` runs the `schema` bin and installs `schema.yaml`.
    - Declare lab users, public SSH keys, worker instances, and permissions under
      `boreal.users` in `lab.nix`.
 
