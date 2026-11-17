@@ -157,8 +157,10 @@ in
         "cargoTestFlags"
         "nativeBuildInputs"
         "postUnpack"
+        "postInstall"
         "meta"
       ];
+      hasScheduler = builtins.elem "scheduler" (args.outputs or [ "out" ]);
     in
     pkgs.rustPlatform.buildRustPackage (
       passthrough
@@ -195,6 +197,16 @@ in
           ln -sfn ${borealWorkerSrc} "$sourceRoot/.boreal/boreal-worker"
         ''
         + (args.postUnpack or "");
+        postInstall =
+          (args.postInstall or "")
+          + lib.optionalString hasScheduler ''
+            if [[ ! -x $out/bin/scheduler ]]; then
+              echo "buildRustWorker: outputs contains scheduler, but \$out/bin/scheduler was not installed" >&2
+              exit 1
+            fi
+            mkdir -p "$scheduler/bin"
+            mv "$out/bin/scheduler" "$scheduler/bin/scheduler"
+          '';
         meta = {
           mainProgram = pname;
         }

@@ -19,7 +19,16 @@ let
   workerUnits = lib.concatLists (
     lib.mapAttrsToList (
       user: userCfg:
-      map (worker: "boreal-worker-${user}-${worker}.service") (builtins.attrNames userCfg.workers)
+      lib.concatLists (
+        lib.mapAttrsToList (
+          worker: workerCfg:
+          let
+            pkg = borealCfg.workerPackages.${workerCfg.package}.package or null;
+          in
+          [ "boreal-worker-${user}-${worker}.service" ]
+          ++ lib.optional (pkg != null && pkg ? scheduler) "boreal-scheduler-${user}-${worker}.service"
+        ) userCfg.workers
+      )
     ) borealCfg.users
   );
 

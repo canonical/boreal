@@ -611,6 +611,56 @@ in
               };
             };
           }) workerEntries
+        )
+        // builtins.listToAttrs (
+          lib.concatMap (
+            entry:
+            let
+              pkg = cfg.workerPackages.${entry.cfg.package}.package or null;
+            in
+            if pkg == null || !(pkg ? scheduler) then
+              [ ]
+            else
+              [
+                {
+                  name = "boreal-scheduler-${entry.unitKey}";
+                  value = {
+                    description = "Register Temporal schedules for ${entry.unitKey}";
+                    wantedBy = [ "multi-user.target" ];
+                    after = [
+                      "boreal-netns-worker-${entry.unitKey}.service"
+                      "boreal-temporal-namespaces.service"
+                      "boreal-broker.service"
+                    ];
+                    requires = [ "boreal-netns-worker-${entry.unitKey}.service" ];
+                    wants = [
+                      "boreal-temporal-namespaces.service"
+                      "boreal-broker.service"
+                    ];
+                    restartTriggers = [ pkg.scheduler ];
+                    environment = {
+                      TEMPORAL_ADDRESS = cfg.temporalAddress;
+                      TEMPORAL_NAMESPACE = entry.user;
+                      LAB_TASK_QUEUE = entry.unitKey;
+                    };
+                    serviceConfig = {
+                      Type = "oneshot";
+                      RemainAfterExit = true;
+                      User = entry.user;
+                      NetworkNamespacePath = "/run/netns/boreal-worker-${entry.unitKey}";
+                      ExecStart = "${pkg.scheduler}/bin/scheduler";
+                      Restart = "on-failure";
+                      RestartSec = lib.mkDefault 2;
+                      TimeoutStartSec = 60;
+                      NoNewPrivileges = true;
+                      PrivateTmp = true;
+                      ProtectSystem = "strict";
+                      ProtectProc = "invisible";
+                    };
+                  };
+                }
+              ]
+          ) workerEntries
         );
     })
   ];
