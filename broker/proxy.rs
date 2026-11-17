@@ -16,12 +16,17 @@ use temporalio_common::protos::temporal::api::{
     command::v1::command::Attributes as CommandAttrs,
     common::v1::WorkflowExecution,
     enums::v1::TaskQueueKind,
-    workflow::v1::WorkflowExecutionInfo,
+    schedule::v1::{
+        BackfillRequest, Schedule, SchedulePatch, schedule_action::Action as ScheduleActionKind,
+    },
+    workflow::v1::{NewWorkflowExecutionInfo, WorkflowExecutionInfo},
     workflowservice::v1::{
-        DescribeNamespaceRequest, DescribeWorkflowExecutionRequest,
-        DescribeWorkflowExecutionResponse, GetWorkflowExecutionHistoryRequest,
-        PollActivityTaskQueueRequest, PollActivityTaskQueueResponse, PollNexusTaskQueueRequest,
-        PollWorkflowTaskQueueRequest, PollWorkflowTaskQueueResponse,
+        CountSchedulesRequest, CreateScheduleRequest, DeleteScheduleRequest,
+        DescribeNamespaceRequest, DescribeScheduleRequest, DescribeScheduleResponse,
+        DescribeWorkflowExecutionRequest, DescribeWorkflowExecutionResponse,
+        GetWorkflowExecutionHistoryRequest, ListScheduleMatchingTimesRequest, ListSchedulesRequest,
+        PatchScheduleRequest, PollActivityTaskQueueRequest, PollActivityTaskQueueResponse,
+        PollNexusTaskQueueRequest, PollWorkflowTaskQueueRequest, PollWorkflowTaskQueueResponse,
         RecordActivityTaskHeartbeatByIdRequest, RecordActivityTaskHeartbeatRequest,
         RecordWorkerHeartbeatRequest, RequestCancelWorkflowExecutionRequest,
         RespondActivityTaskCanceledByIdRequest, RespondActivityTaskCanceledRequest,
@@ -30,7 +35,7 @@ use temporalio_common::protos::temporal::api::{
         RespondNexusTaskCompletedRequest, RespondNexusTaskFailedRequest,
         RespondQueryTaskCompletedRequest, RespondWorkflowTaskCompletedRequest,
         RespondWorkflowTaskFailedRequest, ShutdownWorkerRequest, StartWorkflowExecutionRequest,
-        StartWorkflowExecutionResponse,
+        StartWorkflowExecutionResponse, UpdateScheduleRequest,
     },
 };
 use tokio::net::{TcpListener, TcpStream};
@@ -42,6 +47,10 @@ use crate::ledger::{self, Coordinator, TrackedKey};
 
 const MAX_GRPC_BODY_BYTES: usize = 16 * 1024 * 1024;
 const WORKFLOW_SERVICE_PREFIX: &str = "/temporal.api.workflowservice.v1.WorkflowService/";
+const MAX_CATCHUP_SECS: i64 = 60;
+const MIN_CATCHUP_SECS: i64 = 10;
+const MAX_BACKFILL_SECS: i64 = 24 * 60 * 60;
+const MAX_SCHEDULE_QUERY_BYTES: usize = 1024;
 
 #[derive(Clone, Debug)]
 pub struct WorkerBinding {
@@ -228,6 +237,20 @@ enum PostTrack {
     StartWorkflow,
 }
 
+struct GatePermit {
+    track: PostTrack,
+    rewritten: Option<Vec<u8>>,
+    admit: Option<(String, String)>,
+}
+
+fn permit(track: PostTrack) -> GatePermit {
+    GatePermit {
+        track,
+        rewritten: None,
+        admit: None,
+    }
+}
+
 enum Admission {
     Open(u64),
     Delegated {
@@ -245,7 +268,7 @@ async fn authorize_worker_request(
     coordinator: &Coordinator,
     catalog: &Catalog,
     upstream: &UpstreamPool,
-) -> Result<PostTrack, (u8, String)> {
+) -> Result<GatePermit, (u8, String)> {
     let deny = |msg: &str| (7u8, msg.to_owned());
     let bad = |msg: &str| (3u8, msg.to_owned());
 
@@ -259,12 +282,12 @@ async fn authorize_worker_request(
     };
 
     match method {
-        "GetSystemInfo" => Ok(PostTrack::None),
+        "GetSystemInfo" => Ok(permit(PostTrack::None)),
         "DescribeNamespace" => {
             let req = DescribeNamespaceRequest::decode(payload)
                 .map_err(|_| bad("invalid DescribeNamespaceRequest"))?;
             check_ns(&req.namespace)?;
-            Ok(PostTrack::None)
+            Ok(permit(PostTrack::None))
         }
         "PollWorkflowTaskQueue" => {
             let req = PollWorkflowTaskQueueRequest::decode(payload)
@@ -280,7 +303,7 @@ async fn authorize_worker_request(
             } else if tq.name != binding.task_queue {
                 return Err(deny("worker task_queue access denied"));
             }
-            Ok(PostTrack::PollWorkflow)
+            Ok(permit(PostTrack::PollWorkflow))
         }
         "PollActivityTaskQueue" => {
             let req = PollActivityTaskQueueRequest::decode(payload)
@@ -292,7 +315,7 @@ async fn authorize_worker_request(
             if tq.name != binding.task_queue {
                 return Err(deny("worker activity task_queue access denied"));
             }
-            Ok(PostTrack::PollActivity)
+            Ok(permit(PostTrack::PollActivity))
         }
         "PollNexusTaskQueue" => {
             let req = PollNexusTaskQueueRequest::decode(payload)
@@ -304,7 +327,7 @@ async fn authorize_worker_request(
             if tq.name != binding.task_queue {
                 return Err(deny("worker nexus task_queue access denied"));
             }
-            Ok(PostTrack::None)
+            Ok(permit(PostTrack::None))
         }
         "RespondWorkflowTaskCompleted" => {
             let req = RespondWorkflowTaskCompletedRequest::decode(payload)
@@ -345,90 +368,90 @@ async fn authorize_worker_request(
                 let _ = coordinator.track_runs(child_keys);
             }
             coordinator.complete_lease(&req.task_token);
-            Ok(PostTrack::None)
+            Ok(permit(PostTrack::None))
         }
         "RespondWorkflowTaskFailed" => {
             let req = RespondWorkflowTaskFailedRequest::decode(payload)
                 .map_err(|_| bad("invalid RespondWorkflowTaskFailedRequest"))?;
             check_ns(&req.namespace)?;
             coordinator.complete_lease(&req.task_token);
-            Ok(PostTrack::None)
+            Ok(permit(PostTrack::None))
         }
         "RespondQueryTaskCompleted" => {
             let req = RespondQueryTaskCompletedRequest::decode(payload)
                 .map_err(|_| bad("invalid RespondQueryTaskCompletedRequest"))?;
             check_ns(&req.namespace)?;
-            Ok(PostTrack::None)
+            Ok(permit(PostTrack::None))
         }
         "RecordActivityTaskHeartbeat" => {
             let req = RecordActivityTaskHeartbeatRequest::decode(payload)
                 .map_err(|_| bad("invalid RecordActivityTaskHeartbeatRequest"))?;
             check_ns(&req.namespace)?;
-            Ok(PostTrack::None)
+            Ok(permit(PostTrack::None))
         }
         "RecordActivityTaskHeartbeatById" => {
             let req = RecordActivityTaskHeartbeatByIdRequest::decode(payload)
                 .map_err(|_| bad("invalid RecordActivityTaskHeartbeatByIdRequest"))?;
             check_ns(&req.namespace)?;
-            Ok(PostTrack::None)
+            Ok(permit(PostTrack::None))
         }
         "RespondActivityTaskCompleted" => {
             let req = RespondActivityTaskCompletedRequest::decode(payload)
                 .map_err(|_| bad("invalid RespondActivityTaskCompletedRequest"))?;
             check_ns(&req.namespace)?;
             coordinator.complete_lease(&req.task_token);
-            Ok(PostTrack::None)
+            Ok(permit(PostTrack::None))
         }
         "RespondActivityTaskCompletedById" => {
             let req = RespondActivityTaskCompletedByIdRequest::decode(payload)
                 .map_err(|_| bad("invalid RespondActivityTaskCompletedByIdRequest"))?;
             check_ns(&req.namespace)?;
-            Ok(PostTrack::None)
+            Ok(permit(PostTrack::None))
         }
         "RespondActivityTaskFailed" => {
             let req = RespondActivityTaskFailedRequest::decode(payload)
                 .map_err(|_| bad("invalid RespondActivityTaskFailedRequest"))?;
             check_ns(&req.namespace)?;
             coordinator.complete_lease(&req.task_token);
-            Ok(PostTrack::None)
+            Ok(permit(PostTrack::None))
         }
         "RespondActivityTaskFailedById" => {
             let req = RespondActivityTaskFailedByIdRequest::decode(payload)
                 .map_err(|_| bad("invalid RespondActivityTaskFailedByIdRequest"))?;
             check_ns(&req.namespace)?;
-            Ok(PostTrack::None)
+            Ok(permit(PostTrack::None))
         }
         "RespondActivityTaskCanceled" => {
             let req = RespondActivityTaskCanceledRequest::decode(payload)
                 .map_err(|_| bad("invalid RespondActivityTaskCanceledRequest"))?;
             check_ns(&req.namespace)?;
             coordinator.complete_lease(&req.task_token);
-            Ok(PostTrack::None)
+            Ok(permit(PostTrack::None))
         }
         "RespondActivityTaskCanceledById" => {
             let req = RespondActivityTaskCanceledByIdRequest::decode(payload)
                 .map_err(|_| bad("invalid RespondActivityTaskCanceledByIdRequest"))?;
             check_ns(&req.namespace)?;
-            Ok(PostTrack::None)
+            Ok(permit(PostTrack::None))
         }
         "RespondNexusTaskCompleted" => {
             let req = RespondNexusTaskCompletedRequest::decode(payload)
                 .map_err(|_| bad("invalid RespondNexusTaskCompletedRequest"))?;
             check_ns(&req.namespace)?;
-            Ok(PostTrack::None)
+            Ok(permit(PostTrack::None))
         }
         "RespondNexusTaskFailed" => {
             let req = RespondNexusTaskFailedRequest::decode(payload)
                 .map_err(|_| bad("invalid RespondNexusTaskFailedRequest"))?;
             check_ns(&req.namespace)?;
-            Ok(PostTrack::None)
+            Ok(permit(PostTrack::None))
         }
         "GetWorkflowExecutionHistory" => {
             let req = GetWorkflowExecutionHistoryRequest::decode(payload)
                 .map_err(|_| bad("invalid GetWorkflowExecutionHistoryRequest"))?;
             header_matches(header_ns, &req.namespace)?;
             if req.namespace == binding.owner {
-                return Ok(PostTrack::None);
+                return Ok(permit(PostTrack::None));
             }
             let execution = req
                 .execution
@@ -452,14 +475,14 @@ async fn authorize_worker_request(
                 &execution.run_id,
                 false,
             )?;
-            Ok(PostTrack::None)
+            Ok(permit(PostTrack::None))
         }
         "StartWorkflowExecution" => {
             let req = StartWorkflowExecutionRequest::decode(payload)
                 .map_err(|_| bad("invalid StartWorkflowExecutionRequest"))?;
             header_matches(header_ns, &req.namespace)?;
             authorize_start(catalog, &binding.owner, &req)?;
-            Ok(PostTrack::StartWorkflow)
+            Ok(permit(PostTrack::StartWorkflow))
         }
         "RequestCancelWorkflowExecution" => {
             let req = RequestCancelWorkflowExecutionRequest::decode(payload)
@@ -487,7 +510,7 @@ async fn authorize_worker_request(
                 &execution.run_id,
                 true,
             )?;
-            Ok(PostTrack::None)
+            Ok(permit(PostTrack::None))
         }
         "ShutdownWorker" => {
             let req = ShutdownWorkerRequest::decode(payload)
@@ -496,14 +519,30 @@ async fn authorize_worker_request(
             if !req.task_queue.is_empty() && req.task_queue != binding.task_queue {
                 return Err(deny("worker shutdown task_queue mismatch"));
             }
-            Ok(PostTrack::None)
+            Ok(permit(PostTrack::None))
         }
         "RecordWorkerHeartbeat" => {
             let req = RecordWorkerHeartbeatRequest::decode(payload)
                 .map_err(|_| bad("invalid RecordWorkerHeartbeatRequest"))?;
             check_ns(&req.namespace)?;
-            Ok(PostTrack::None)
+            Ok(permit(PostTrack::None))
         }
+        "CreateSchedule" => authorize_create_schedule(payload, header_ns, binding, catalog),
+        "UpdateSchedule" => {
+            authorize_update_schedule(payload, header_ns, binding, catalog, upstream).await
+        }
+        "PatchSchedule" => {
+            authorize_patch_schedule(payload, header_ns, binding, catalog, upstream).await
+        }
+        "DeleteSchedule" => {
+            authorize_delete_schedule(payload, header_ns, binding, catalog, upstream).await
+        }
+        "DescribeSchedule" => {
+            authorize_describe_schedule(payload, header_ns, binding, catalog, upstream).await
+        }
+        "ListSchedules" => authorize_list_schedules(payload, header_ns, binding),
+        "CountSchedules" => authorize_count_schedules(payload, header_ns, binding),
+        "ListScheduleMatchingTimes" => authorize_matching_times(payload, header_ns, binding),
         _ => Err(deny("RPC method is not permitted on Boreal worker gate")),
     }
 }
@@ -515,6 +554,427 @@ fn header_matches(header_ns: Option<&str>, namespace: &str) -> Result<(), (u8, S
         return Err((7, "temporal-namespace header mismatch".to_owned()));
     }
     Ok(())
+}
+
+fn schedule_denied() -> (u8, String) {
+    (7, "worker schedule access denied".to_owned())
+}
+
+fn require_schedule_id(id: &str) -> Result<(), (u8, String)> {
+    catalog::validate_workflow_id(id).map_err(|_| schedule_denied())
+}
+
+fn require_own_namespace(binding: &WorkerBinding, namespace: &str) -> Result<(), (u8, String)> {
+    if namespace == binding.owner {
+        Ok(())
+    } else {
+        Err(schedule_denied())
+    }
+}
+
+fn require_query(query: &str) -> Result<(), (u8, String)> {
+    if query.len() > MAX_SCHEDULE_QUERY_BYTES || query.bytes().any(|b| b.is_ascii_control()) {
+        Err((3, "invalid schedule query".to_owned()))
+    } else {
+        Ok(())
+    }
+}
+
+fn schedule_is_paused(schedule: &Schedule) -> bool {
+    schedule.state.as_ref().is_some_and(|state| state.paused)
+}
+
+fn patch_starts_work(patch: &SchedulePatch) -> bool {
+    patch.trigger_immediately.is_some()
+        || !patch.unpause.is_empty()
+        || !patch.backfill_request.is_empty()
+}
+
+fn backfill_allowed(req: &BackfillRequest) -> bool {
+    let (Some(start), Some(end)) = (req.start_time.as_ref(), req.end_time.as_ref()) else {
+        return false;
+    };
+    if start.seconds < 0 || end.seconds < 0 || start.nanos < 0 || end.nanos < 0 {
+        return false;
+    }
+    if end.seconds < start.seconds || (end.seconds == start.seconds && end.nanos < start.nanos) {
+        return false;
+    }
+    let span = end.seconds - start.seconds;
+    span < MAX_BACKFILL_SECS || (span == MAX_BACKFILL_SECS && end.nanos <= start.nanos)
+}
+
+fn patch_allowed(patch: &SchedulePatch) -> bool {
+    patch.time_skipping_config.is_none() && patch.backfill_request.iter().all(backfill_allowed)
+}
+
+fn catchup_in_range(seconds: i64, nanos: i32) -> bool {
+    nanos == 0 && (MIN_CATCHUP_SECS..=MAX_CATCHUP_SECS).contains(&seconds)
+}
+
+fn clamp_catchup(schedule: &mut Schedule) {
+    let policies = schedule.policies.get_or_insert_with(Default::default);
+    let in_range = policies
+        .catchup_window
+        .as_ref()
+        .is_some_and(|window| catchup_in_range(window.seconds, window.nanos));
+    if in_range {
+        return;
+    }
+    // Temporal's default catchup is a year. An updater unpause would replay it.
+    let window = policies.catchup_window.get_or_insert_with(Default::default);
+    window.seconds = MAX_CATCHUP_SECS;
+    window.nanos = 0;
+}
+
+fn authorize_schedule_action(
+    catalog: &Catalog,
+    caller: &str,
+    namespace: &str,
+    info: &NewWorkflowExecutionInfo,
+) -> Result<(), (u8, String)> {
+    if !info.cron_schedule.is_empty() {
+        return Err(schedule_denied());
+    }
+    if !info.workflow_id.is_empty() {
+        require_schedule_id(&info.workflow_id)?;
+    }
+    let Some(task_queue) = info.task_queue.as_ref() else {
+        return Err(schedule_denied());
+    };
+    if task_queue.kind() == TaskQueueKind::Sticky || task_queue.name.is_empty() {
+        return Err(schedule_denied());
+    }
+    let prefix = format!("{namespace}-");
+    let Some(worker) = task_queue.name.strip_prefix(&prefix) else {
+        return Err(schedule_denied());
+    };
+    if worker.is_empty() {
+        return Err(schedule_denied());
+    }
+    let Ok((_, pkg)) = catalog.worker_and_package(namespace, worker) else {
+        return Err(schedule_denied());
+    };
+    let workflow_type = info
+        .workflow_type
+        .as_ref()
+        .map(|ty| ty.name.as_str())
+        .unwrap_or("");
+    if workflow_type != pkg.workflow_type() || !catalog.can_write(caller, namespace, worker) {
+        return Err(schedule_denied());
+    }
+    Ok(())
+}
+
+fn authorize_schedule_body(
+    catalog: &Catalog,
+    caller: &str,
+    namespace: &str,
+    schedule_id: &str,
+    schedule: &Schedule,
+) -> Result<(), (u8, String)> {
+    require_schedule_id(schedule_id)?;
+    let Some(action) = schedule.action.as_ref() else {
+        return Err(schedule_denied());
+    };
+    let Some(ScheduleActionKind::StartWorkflow(info)) = action.action.as_ref() else {
+        return Err(schedule_denied());
+    };
+    authorize_schedule_action(catalog, caller, namespace, info)
+}
+
+fn admission_workflow_id(schedule_id: &str, schedule: &Schedule) -> String {
+    schedule
+        .action
+        .as_ref()
+        .and_then(|action| match action.action.as_ref() {
+            Some(ScheduleActionKind::StartWorkflow(info)) if !info.workflow_id.is_empty() => {
+                Some(info.workflow_id.clone())
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| schedule_id.to_owned())
+}
+
+fn create_starts_work(schedule: &Schedule, patch: Option<&SchedulePatch>) -> bool {
+    !schedule_is_paused(schedule) || patch.is_some_and(patch_starts_work)
+}
+
+fn authorize_create_schedule(
+    payload: &[u8],
+    header_ns: Option<&str>,
+    binding: &WorkerBinding,
+    catalog: &Catalog,
+) -> Result<GatePermit, (u8, String)> {
+    let mut req = CreateScheduleRequest::decode(payload)
+        .map_err(|_| (3u8, "invalid CreateScheduleRequest".to_owned()))?;
+    header_matches(header_ns, &req.namespace)?;
+    let Some(schedule) = req.schedule.as_mut() else {
+        return Err(schedule_denied());
+    };
+    authorize_schedule_body(
+        catalog,
+        &binding.owner,
+        &req.namespace,
+        &req.schedule_id,
+        schedule,
+    )?;
+    if let Some(patch) = req.initial_patch.as_ref()
+        && !patch_allowed(patch)
+    {
+        return Err(schedule_denied());
+    }
+    let starts = create_starts_work(schedule, req.initial_patch.as_ref());
+    clamp_catchup(schedule);
+    let admit = starts.then_some((
+        req.namespace.clone(),
+        admission_workflow_id(&req.schedule_id, schedule),
+    ));
+    Ok(GatePermit {
+        track: PostTrack::None,
+        rewritten: Some(req.encode_to_vec()),
+        admit,
+    })
+}
+
+fn authorize_list_schedules(
+    payload: &[u8],
+    header_ns: Option<&str>,
+    binding: &WorkerBinding,
+) -> Result<GatePermit, (u8, String)> {
+    let req = ListSchedulesRequest::decode(payload)
+        .map_err(|_| (3u8, "invalid ListSchedulesRequest".to_owned()))?;
+    header_matches(header_ns, &req.namespace)?;
+    require_own_namespace(binding, &req.namespace)?;
+    require_query(&req.query)?;
+    Ok(permit(PostTrack::None))
+}
+
+fn authorize_count_schedules(
+    payload: &[u8],
+    header_ns: Option<&str>,
+    binding: &WorkerBinding,
+) -> Result<GatePermit, (u8, String)> {
+    let req = CountSchedulesRequest::decode(payload)
+        .map_err(|_| (3u8, "invalid CountSchedulesRequest".to_owned()))?;
+    header_matches(header_ns, &req.namespace)?;
+    require_own_namespace(binding, &req.namespace)?;
+    require_query(&req.query)?;
+    Ok(permit(PostTrack::None))
+}
+
+fn authorize_matching_times(
+    payload: &[u8],
+    header_ns: Option<&str>,
+    binding: &WorkerBinding,
+) -> Result<GatePermit, (u8, String)> {
+    let req = ListScheduleMatchingTimesRequest::decode(payload)
+        .map_err(|_| (3u8, "invalid ListScheduleMatchingTimesRequest".to_owned()))?;
+    header_matches(header_ns, &req.namespace)?;
+    require_own_namespace(binding, &req.namespace)?;
+    require_schedule_id(&req.schedule_id)?;
+    Ok(permit(PostTrack::None))
+}
+
+async fn load_schedule(
+    upstream: &UpstreamPool,
+    namespace: &str,
+    schedule_id: &str,
+) -> Result<Schedule, (u8, String)> {
+    let req = DescribeScheduleRequest {
+        namespace: namespace.to_owned(),
+        schedule_id: schedule_id.to_owned(),
+    };
+    let frame = pack_unary_grpc(&req.encode_to_vec());
+    let path = format!("{WORKFLOW_SERVICE_PREFIX}DescribeSchedule");
+    let uri = Uri::builder()
+        .scheme("http")
+        .authority(upstream.addr.as_str())
+        .path_and_query(path)
+        .build()
+        .map_err(|_| (13u8, "failed to construct describe URI".to_owned()))?;
+    let mut out = Request::new(GrpcBody::with_parts(frame, None));
+    *out.method_mut() = http::Method::POST;
+    *out.uri_mut() = uri;
+    *out.version_mut() = http::Version::HTTP_2;
+    out.headers_mut().insert(
+        http::header::CONTENT_TYPE,
+        HeaderValue::from_static("application/grpc"),
+    );
+    out.headers_mut()
+        .insert("te", HeaderValue::from_static("trailers"));
+
+    let resp = upstream.send(out).await.map_err(|err| (14u8, err))?;
+    let (parts, body) = resp.into_parts();
+    let buffered = Limited::new(body, MAX_GRPC_BODY_BYTES)
+        .collect()
+        .await
+        .map_err(|_| (14u8, "failed to collect describe response".to_owned()))?;
+    let trailers = buffered.trailers().cloned();
+    if resp_Parts_has_grpc_error(&parts.headers, trailers.as_ref()) {
+        return Err(grpc_status_error(&parts.headers, trailers.as_ref()));
+    }
+    let bytes = buffered.to_bytes();
+    let payload = unpack_unary_grpc(&bytes).map_err(|(code, msg)| (code, msg.to_owned()))?;
+    let decoded = DescribeScheduleResponse::decode(payload)
+        .map_err(|_| (13u8, "invalid DescribeScheduleResponse".to_owned()))?;
+    decoded.schedule.ok_or_else(|| schedule_denied())
+}
+
+async fn authorize_existing(
+    upstream: &UpstreamPool,
+    catalog: &Catalog,
+    caller: &str,
+    namespace: &str,
+    schedule_id: &str,
+) -> Result<Schedule, (u8, String)> {
+    require_schedule_id(schedule_id)?;
+    let schedule = load_schedule(upstream, namespace, schedule_id).await?;
+    authorize_schedule_body(catalog, caller, namespace, schedule_id, &schedule)?;
+    Ok(schedule)
+}
+
+async fn authorize_update_schedule(
+    payload: &[u8],
+    header_ns: Option<&str>,
+    binding: &WorkerBinding,
+    catalog: &Catalog,
+    upstream: &UpstreamPool,
+) -> Result<GatePermit, (u8, String)> {
+    let mut req = UpdateScheduleRequest::decode(payload)
+        .map_err(|_| (3u8, "invalid UpdateScheduleRequest".to_owned()))?;
+    header_matches(header_ns, &req.namespace)?;
+    authorize_existing(
+        upstream,
+        catalog,
+        &binding.owner,
+        &req.namespace,
+        &req.schedule_id,
+    )
+    .await?;
+    let Some(schedule) = req.schedule.as_mut() else {
+        return Err(schedule_denied());
+    };
+    authorize_schedule_body(
+        catalog,
+        &binding.owner,
+        &req.namespace,
+        &req.schedule_id,
+        schedule,
+    )?;
+    let starts = !schedule_is_paused(schedule);
+    clamp_catchup(schedule);
+    let admit = starts.then_some((
+        req.namespace.clone(),
+        admission_workflow_id(&req.schedule_id, schedule),
+    ));
+    Ok(GatePermit {
+        track: PostTrack::None,
+        rewritten: Some(req.encode_to_vec()),
+        admit,
+    })
+}
+
+async fn authorize_patch_schedule(
+    payload: &[u8],
+    header_ns: Option<&str>,
+    binding: &WorkerBinding,
+    catalog: &Catalog,
+    upstream: &UpstreamPool,
+) -> Result<GatePermit, (u8, String)> {
+    let req = PatchScheduleRequest::decode(payload)
+        .map_err(|_| (3u8, "invalid PatchScheduleRequest".to_owned()))?;
+    header_matches(header_ns, &req.namespace)?;
+    let existing = authorize_existing(
+        upstream,
+        catalog,
+        &binding.owner,
+        &req.namespace,
+        &req.schedule_id,
+    )
+    .await?;
+    let Some(patch) = req.patch.as_ref() else {
+        return Err(schedule_denied());
+    };
+    if !patch_allowed(patch) {
+        return Err(schedule_denied());
+    }
+    let admit = patch_starts_work(patch).then(|| {
+        (
+            req.namespace.clone(),
+            admission_workflow_id(&req.schedule_id, &existing),
+        )
+    });
+    Ok(GatePermit {
+        track: PostTrack::None,
+        rewritten: None,
+        admit,
+    })
+}
+
+async fn authorize_delete_schedule(
+    payload: &[u8],
+    header_ns: Option<&str>,
+    binding: &WorkerBinding,
+    catalog: &Catalog,
+    upstream: &UpstreamPool,
+) -> Result<GatePermit, (u8, String)> {
+    let req = DeleteScheduleRequest::decode(payload)
+        .map_err(|_| (3u8, "invalid DeleteScheduleRequest".to_owned()))?;
+    header_matches(header_ns, &req.namespace)?;
+    authorize_existing(
+        upstream,
+        catalog,
+        &binding.owner,
+        &req.namespace,
+        &req.schedule_id,
+    )
+    .await?;
+    Ok(permit(PostTrack::None))
+}
+
+async fn authorize_describe_schedule(
+    payload: &[u8],
+    header_ns: Option<&str>,
+    binding: &WorkerBinding,
+    catalog: &Catalog,
+    upstream: &UpstreamPool,
+) -> Result<GatePermit, (u8, String)> {
+    let req = DescribeScheduleRequest::decode(payload)
+        .map_err(|_| (3u8, "invalid DescribeScheduleRequest".to_owned()))?;
+    header_matches(header_ns, &req.namespace)?;
+    require_schedule_id(&req.schedule_id)?;
+    if req.namespace == binding.owner {
+        return Ok(permit(PostTrack::None));
+    }
+    let schedule = load_schedule(upstream, &req.namespace, &req.schedule_id).await?;
+    let Some(action) = schedule.action.as_ref() else {
+        return Err(schedule_denied());
+    };
+    let Some(ScheduleActionKind::StartWorkflow(info)) = action.action.as_ref() else {
+        return Err(schedule_denied());
+    };
+    let Some(task_queue) = info.task_queue.as_ref() else {
+        return Err(schedule_denied());
+    };
+    let prefix = format!("{}-", req.namespace);
+    let Some(worker) = task_queue.name.strip_prefix(&prefix) else {
+        return Err(schedule_denied());
+    };
+    let Ok((_, pkg)) = catalog.worker_and_package(&req.namespace, worker) else {
+        return Err(schedule_denied());
+    };
+    let workflow_type = info
+        .workflow_type
+        .as_ref()
+        .map(|ty| ty.name.as_str())
+        .unwrap_or("");
+    if workflow_type != pkg.workflow_type()
+        || !catalog.can_read(&binding.owner, &req.namespace, worker)
+    {
+        return Err(schedule_denied());
+    }
+    Ok(permit(PostTrack::None))
 }
 
 fn authorize_start(
@@ -588,6 +1048,18 @@ fn authorize_described(
         return Err(deny());
     }
     Ok(())
+}
+
+fn admit_schedule(
+    coordinator: &Coordinator,
+    namespace: &str,
+    workflow_id: &str,
+) -> Result<Admission, (u8, String)> {
+    match coordinator.begin_start(namespace, workflow_id) {
+        Ok(seq) => Ok(Admission::Open(seq)),
+        Err(ledger::Error::AdmissionClosed) => Err((9, ledger::Error::AdmissionClosed.detail())),
+        Err(err) => Err((13, err.detail())),
+    }
 }
 
 fn admit_worker_start(
@@ -751,7 +1223,7 @@ async fn handle_worker_rpc(
         Err((code, msg)) => return grpc_error(code, msg),
     };
 
-    let post_track = match authorize_worker_request(
+    let permit = match authorize_worker_request(
         method,
         payload,
         header_ns.as_deref(),
@@ -762,11 +1234,11 @@ async fn handle_worker_rpc(
     )
     .await
     {
-        Ok(mode) => mode,
+        Ok(permit) => permit,
         Err((code, msg)) => return grpc_error(code, &msg),
     };
 
-    let mut admission = if post_track == PostTrack::StartWorkflow {
+    let mut admission = if permit.track == PostTrack::StartWorkflow {
         let Ok(start) = StartWorkflowExecutionRequest::decode(payload) else {
             return grpc_error(3, "invalid StartWorkflowExecutionRequest");
         };
@@ -779,8 +1251,17 @@ async fn handle_worker_rpc(
             Ok(admission) => Some(admission),
             Err((code, msg)) => return grpc_error(code, &msg),
         }
+    } else if let Some((namespace, workflow_id)) = permit.admit.clone() {
+        match admit_schedule(coordinator, &namespace, &workflow_id) {
+            Ok(admission) => Some(admission),
+            Err((code, msg)) => return grpc_error(code, &msg),
+        }
     } else {
         None
+    };
+    let forward_bytes = match permit.rewritten.as_deref() {
+        Some(encoded) => pack_unary_grpc(encoded),
+        None => req_bytes.clone(),
     };
 
     let Ok(uri) = Uri::builder()
@@ -792,12 +1273,15 @@ async fn handle_worker_rpc(
         return grpc_error(13, "failed to construct upstream URI");
     };
 
-    let mut out_req = Request::new(GrpcBody::with_parts(req_bytes, None));
+    let mut out_req = Request::new(GrpcBody::with_parts(forward_bytes, None));
     *out_req.method_mut() = http::Method::POST;
     *out_req.uri_mut() = uri;
     *out_req.version_mut() = http::Version::HTTP_2;
     for (name, val) in &parts.headers {
-        if name == http::header::HOST || name == "grpc-accept-encoding" {
+        if name == http::header::HOST
+            || name == "grpc-accept-encoding"
+            || (permit.rewritten.is_some() && name == http::header::CONTENT_LENGTH)
+        {
             continue;
         }
         out_req.headers_mut().append(name.clone(), val.clone());
@@ -823,7 +1307,7 @@ async fn handle_worker_rpc(
     let trailers = buffered.trailers().cloned();
     let resp_bytes = buffered.to_bytes();
 
-    if post_track == PostTrack::StartWorkflow {
+    if permit.track == PostTrack::StartWorkflow {
         let run_id = if !resp_Parts_has_grpc_error(&resp_parts.headers, trailers.as_ref())
             && let Ok(resp_proto) = unpack_unary_grpc(&resp_bytes)
             && let Ok(decoded) = StartWorkflowExecutionResponse::decode(resp_proto)
@@ -836,11 +1320,15 @@ async fn handle_worker_rpc(
         if let Some(admission) = admission.take() {
             finish_admission(coordinator, admission, run_id);
         }
-    } else if post_track != PostTrack::None
+    } else if permit.admit.is_some() {
+        if let Some(admission) = admission.take() {
+            finish_admission(coordinator, admission, None);
+        }
+    } else if permit.track != PostTrack::None
         && !resp_Parts_has_grpc_error(&resp_parts.headers, trailers.as_ref())
         && let Ok(resp_proto) = unpack_unary_grpc(&resp_bytes)
     {
-        match post_track {
+        match permit.track {
             PostTrack::PollWorkflow => {
                 if let Ok(decoded) = PollWorkflowTaskQueueResponse::decode(resp_proto)
                     && !decoded.task_token.is_empty()
@@ -1402,6 +1890,272 @@ workers:
                 .iter()
                 .any(|key| key.workflow_id == "rig-drain")
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn greet_schedule(paused: bool) -> Schedule {
+        use temporalio_common::protos::temporal::api::{
+            common::v1::WorkflowType,
+            schedule::v1::{ScheduleAction, ScheduleState},
+        };
+        Schedule {
+            action: Some(ScheduleAction {
+                action: Some(ScheduleActionKind::StartWorkflow(
+                    NewWorkflowExecutionInfo {
+                        workflow_id: "hourly-hello".into(),
+                        workflow_type: Some(WorkflowType {
+                            name: "DemoWorkflow".into(),
+                        }),
+                        task_queue: Some(TaskQueue {
+                            name: "alice-greet".into(),
+                            kind: TaskQueueKind::Normal as i32,
+                            normal_name: String::new(),
+                        }),
+                        ..Default::default()
+                    },
+                )),
+            }),
+            state: Some(ScheduleState {
+                paused,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_schedule_catchup_and_backfill_bounds() {
+        let mut schedule = greet_schedule(false);
+        clamp_catchup(&mut schedule);
+        let window = schedule.policies.unwrap().catchup_window.unwrap();
+        assert_eq!(window.seconds, MAX_CATCHUP_SECS);
+        assert_eq!(window.nanos, 0);
+
+        let mut wide = greet_schedule(false);
+        wide.policies
+            .get_or_insert_with(Default::default)
+            .catchup_window
+            .get_or_insert_with(Default::default)
+            .seconds = 365 * 24 * 60 * 60;
+        clamp_catchup(&mut wide);
+        assert_eq!(
+            wide.policies.unwrap().catchup_window.unwrap().seconds,
+            MAX_CATCHUP_SECS
+        );
+
+        let mut backfill = BackfillRequest::default();
+        backfill
+            .start_time
+            .get_or_insert_with(Default::default)
+            .seconds = 1_000;
+        backfill
+            .end_time
+            .get_or_insert_with(Default::default)
+            .seconds = 1_000 + MAX_BACKFILL_SECS;
+        assert!(backfill_allowed(&backfill));
+        backfill.end_time.as_mut().unwrap().seconds += 1;
+        assert!(!backfill_allowed(&backfill));
+        assert!(!backfill_allowed(&BackfillRequest::default()));
+    }
+
+    #[tokio::test]
+    async fn test_worker_gate_authorizes_schedule_rpcs_and_clamps_catchup() {
+        use std::sync::Mutex as StdMutex;
+        use temporalio_common::protos::temporal::api::{
+            schedule::v1::SchedulePatch,
+            workflowservice::v1::{
+                CreateScheduleRequest, CreateScheduleResponse, DeleteScheduleRequest,
+                DeleteScheduleResponse, DescribeScheduleResponse, ListSchedulesRequest,
+                PatchScheduleRequest,
+            },
+        };
+
+        let recorded = Arc::new(StdMutex::new(Vec::new()));
+        let recorded_upstream = Arc::clone(&recorded);
+        let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream_listener.local_addr().unwrap().to_string();
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = upstream_listener.accept().await else {
+                    break;
+                };
+                let recorded_upstream = Arc::clone(&recorded_upstream);
+                tokio::spawn(async move {
+                    let svc = service_fn(move |req: Request<Incoming>| {
+                        let recorded_upstream = Arc::clone(&recorded_upstream);
+                        async move {
+                            let path = req.uri().path().to_owned();
+                            let collected = req.into_body().collect().await.unwrap().to_bytes();
+                            let payload = unpack_unary_grpc(&collected).unwrap_or(&[]);
+                            let body_bytes = if path.ends_with("/CreateSchedule") {
+                                let decoded = CreateScheduleRequest::decode(payload).unwrap();
+                                let secs = decoded
+                                    .schedule
+                                    .and_then(|schedule| schedule.policies)
+                                    .and_then(|policies| policies.catchup_window)
+                                    .map(|window| window.seconds);
+                                recorded_upstream.lock().unwrap().push(secs);
+                                pack_grpc_msg(&CreateScheduleResponse::default())
+                            } else if path.ends_with("/DescribeSchedule") {
+                                pack_grpc_msg(&DescribeScheduleResponse {
+                                    schedule: Some(greet_schedule(true)),
+                                    ..Default::default()
+                                })
+                            } else if path.ends_with("/DeleteSchedule") {
+                                pack_grpc_msg(&DeleteScheduleResponse::default())
+                            } else {
+                                Bytes::new()
+                            };
+                            let mut trailers = HeaderMap::new();
+                            trailers.insert("grpc-status", HeaderValue::from_static("0"));
+                            let mut resp =
+                                Response::new(GrpcBody::with_parts(body_bytes, Some(trailers)));
+                            resp.headers_mut().insert(
+                                http::header::CONTENT_TYPE,
+                                HeaderValue::from_static("application/grpc"),
+                            );
+                            Ok::<_, Infallible>(resp)
+                        }
+                    });
+                    let _ = server_http2::Builder::new(TokioExecutor::new())
+                        .serve_connection(TokioIo::new(stream), svc)
+                        .await;
+                });
+            }
+        });
+
+        let mut users = std::collections::BTreeMap::new();
+        users.insert(
+            "alice".into(),
+            "user: alice\npermissions:\n  read: false\n  write: false\nworkers:\n  greet:\n    package: lab-worker\n    permissions:\n      read: false\n      write: false\n"
+                .into(),
+        );
+        let catalog = Catalog::from_yaml(
+            "lab-worker:\n  workflowType: DemoWorkflow\n  args: []\n",
+            &users,
+        )
+        .unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "boreal-proxy-sched-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let coord = Arc::new(Coordinator::open(&dir).unwrap());
+        let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = proxy_listener.local_addr().unwrap();
+        tokio::spawn(serve_worker_listener(
+            proxy_listener,
+            WorkerBinding {
+                owner: "alice".into(),
+                task_queue: "alice-greet".into(),
+            },
+            upstream_addr,
+            Arc::clone(&coord),
+            Arc::new(catalog),
+        ));
+        let mut client = WorkflowServiceClient::connect(format!("http://{proxy_addr}"))
+            .await
+            .unwrap();
+
+        let mut created = greet_schedule(false);
+        created
+            .policies
+            .get_or_insert_with(Default::default)
+            .catchup_window
+            .get_or_insert_with(Default::default)
+            .seconds = 365 * 24 * 60 * 60;
+        client
+            .create_schedule(CreateScheduleRequest {
+                namespace: "alice".into(),
+                schedule_id: "hourly-hello".into(),
+                schedule: Some(created),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            recorded.lock().unwrap().as_slice(),
+            &[Some(MAX_CATCHUP_SECS)]
+        );
+
+        let mut wrong = greet_schedule(false);
+        if let Some(action) = wrong.action.as_mut()
+            && let Some(ScheduleActionKind::StartWorkflow(info)) = action.action.as_mut()
+        {
+            info.workflow_type = Some(
+                temporalio_common::protos::temporal::api::common::v1::WorkflowType {
+                    name: "OtherWorkflow".into(),
+                },
+            );
+        }
+        let denied = client
+            .create_schedule(CreateScheduleRequest {
+                namespace: "alice".into(),
+                schedule_id: "hourly-hello".into(),
+                schedule: Some(wrong),
+                ..Default::default()
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(denied.code(), Code::PermissionDenied);
+
+        let denied = client
+            .list_schedules(ListSchedulesRequest {
+                namespace: "bob".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(denied.code(), Code::PermissionDenied);
+
+        coord.close_gate("upd-sched", "rev").await.unwrap();
+        let denied = client
+            .create_schedule(CreateScheduleRequest {
+                namespace: "alice".into(),
+                schedule_id: "hourly-hello".into(),
+                schedule: Some(greet_schedule(false)),
+                ..Default::default()
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(denied.code(), Code::FailedPrecondition);
+
+        client
+            .create_schedule(CreateScheduleRequest {
+                namespace: "alice".into(),
+                schedule_id: "paused-hello".into(),
+                schedule: Some(greet_schedule(true)),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        client
+            .delete_schedule(DeleteScheduleRequest {
+                namespace: "alice".into(),
+                schedule_id: "hourly-hello".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let denied = client
+            .patch_schedule(PatchScheduleRequest {
+                namespace: "alice".into(),
+                schedule_id: "hourly-hello".into(),
+                patch: Some(SchedulePatch {
+                    unpause: "resume".into(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(denied.code(), Code::FailedPrecondition);
+        assert_eq!(recorded.lock().unwrap().len(), 2);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
