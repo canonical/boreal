@@ -4,25 +4,17 @@
 }:
 
 let
-  greetWorker = self.lib.buildRustWorker pkgs {
-    pname = "greet-worker";
+  labWorker = self.lib.buildRustWorker pkgs {
+    pname = "lab-worker";
     src = ./vm-worker;
     cargoLock.lockFile = ./vm-worker/Cargo.lock;
-  };
-
-  countWorker = self.lib.buildRustWorker pkgs {
-    pname = "count-worker";
-    src = ./vm-worker;
-    cargoLock.lockFile = ./vm-worker/Cargo.lock;
-  };
-
-  timerArg = {
-    name = "wait_seconds";
-    type = "int";
-    min = 1;
-    max = 7200;
-    default = 20;
-    description = "Timer duration in seconds";
+    outputs = [
+      "out"
+      "greet"
+      "greet-schedule"
+      "count"
+      "schema"
+    ];
   };
 
   temporalCli = "${pkgs.temporal-cli}/bin/temporal";
@@ -74,35 +66,6 @@ pkgs.testers.runNixOSTest {
 
       boreal = {
         enable = true;
-        workerPackages = {
-          lab-worker = {
-            package = greetWorker;
-            workflowType = "DemoWorkflow";
-            description = "Run durable greeting or child workflow";
-            args = [
-              {
-                name = "name";
-                type = "string";
-                description = "Recipient name";
-              }
-              timerArg
-            ];
-          };
-          lab-worker-alt = {
-            package = countWorker;
-            workflowType = "CountWorkflow";
-            description = "Count Unicode scalar values";
-            args = [
-              {
-                name = "name";
-                type = "string";
-                description = "Input text";
-              }
-              timerArg
-            ];
-          };
-        };
-
         users = {
           alice = {
             permissions = {
@@ -111,19 +74,26 @@ pkgs.testers.runNixOSTest {
             };
             workers = {
               greet = {
-                package = "lab-worker";
+                package = labWorker.greet;
+                schedule = {
+                  enable = true;
+                  package = labWorker.greet-schedule;
+                };
                 permissions.write = [ "bob" ];
               };
               count = {
-                package = "lab-worker-alt";
+                package = labWorker.count;
                 permissions.read = [ "bob" ];
               };
             };
           };
           bob = {
             workers = {
-              greet.package = "lab-worker";
-              count.package = "lab-worker-alt";
+              greet = {
+                package = labWorker.greet;
+                schedule.enable = false;
+              };
+              count.package = labWorker.count;
             };
           };
           carol = { };
@@ -146,6 +116,7 @@ pkgs.testers.runNixOSTest {
         "boreal-temporal-namespaces.service",
         "boreal-broker.service",
         "boreal-worker-alice-greet.service",
+        "boreal-schedule-alice-greet.service",
         "boreal-worker-alice-count.service",
         "boreal-worker-bob-greet.service",
         "boreal-worker-bob-count.service",

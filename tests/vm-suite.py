@@ -164,7 +164,7 @@ if user != "bob":
 if user != "alice":
     protected.append("/home/alice")
 if user == "admin":
-    protected.extend(["/etc/boreal/workers.yaml", "/run/boreal/broker.sock"])
+    protected.extend(["/etc/boreal/schemas.yaml", "/run/boreal/broker.sock"])
 
 for path in protected:
     try:
@@ -455,7 +455,7 @@ def test_ssh_shell_permissions_secrets_and_recovery() -> None:
     try:
         bob.wait_for(b"Boreal lab shell (bob)", "bob on 󰇅 ".encode())
         bob.send(b"permissions alice\r")
-        bob.wait_for(b"greet (package lab-worker): read=allowed, write=allowed")
+        bob.wait_for(b"greet (package greet): read=allowed, write=allowed")
 
         bob.send(b"run greet bob-del-1 'FromBob' 120 --owner alice\r")
         bob.wait_for(b"started DemoWorkflow 'bob-del-1' on alice/greet")
