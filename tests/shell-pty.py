@@ -405,15 +405,24 @@ def main():
         version_file = etc_dir / "version"
         version_file.write_text("0.2.0\n", encoding="utf-8")
         version_file.chmod(0o400)
-        workers_yaml = etc_dir / "workers.yaml"
-        workers_yaml.write_text(
-            "lab-worker:\n  workflowType: DemoWorkflow\n  args:\n  - name: name\n    type: string\n",
+        schema_dir = tmp_path / "schema"
+        schema_dir.mkdir()
+        schema_dir.chmod(0o755)
+        schema_yaml = schema_dir / "schema.yaml"
+        schema_yaml.write_text(
+            "greet:\n  workflow: DemoWorkflow\n  args:\n  - name: name\n    type: string\n",
             encoding="utf-8",
         )
-        workers_yaml.chmod(0o400)
+        schema_yaml.chmod(0o444)
+        schemas_yaml = etc_dir / "schemas.yaml"
+        schemas_yaml.write_text(
+            f"directories:\n  - {schema_dir}\n",
+            encoding="utf-8",
+        )
+        schemas_yaml.chmod(0o400)
         perms_yaml = etc_dir / "users" / "alice" / "perms.yaml"
         perms_yaml.write_text(
-            "user: alice\npermissions: {read: false, write: false}\nworkers:\n  greet:\n    package: lab-worker\n    permissions: {read: false, write: false}\n",
+            "user: alice\npermissions: {read: false, write: false}\nworkers:\n  greet:\n    package: greet\n    permissions: {read: false, write: false}\n",
             encoding="utf-8",
         )
         perms_yaml.chmod(0o400)
@@ -490,7 +499,8 @@ def main():
                 env = orig_env
         finally:
             version_file.chmod(0o600)
-            workers_yaml.chmod(0o600)
+            schemas_yaml.chmod(0o600)
+            schema_yaml.chmod(0o600)
             perms_yaml.chmod(0o600)
 
     print("PTY Starship prompt, styles, cursor, edit modes, completion, history, confirmation, and secrets: passed")

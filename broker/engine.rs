@@ -922,7 +922,7 @@ mod tests {
     fn demo_catalog() -> Catalog {
         let workers = "\
 lab-worker:
-  workflowType: DemoWorkflow
+  workflow: DemoWorkflow
   description: Greet
   args:
   - name: name
@@ -933,7 +933,7 @@ lab-worker:
     max: 7200
     default: 20
 lab-worker-alt:
-  workflowType: CountWorkflow
+  workflow: CountWorkflow
   description: Count
   args:
   - name: name
@@ -1347,7 +1347,7 @@ workers:
             "carol".into(),
             "user: carol\npermissions: {read: false, write: false}\nworkers: {}\n".into(),
         );
-        let workers = "lab-worker:\n  workflowType: DemoWorkflow\n  args:\n  - name: name\n    type: string\nlab-worker-alt:\n  workflowType: CountWorkflow\n";
+        let workers = "lab-worker:\n  workflow: DemoWorkflow\n  args:\n  - name: name\n    type: string\nlab-worker-alt:\n  workflow: CountWorkflow\n";
         let catalog = Catalog::from_yaml(workers, &users).unwrap();
 
         let dir = std::env::temp_dir().join(format!("boreal-engine-test-4-{}", std::process::id()));

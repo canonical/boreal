@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
-use std::path::Path;
+use std::os::unix::fs::MetadataExt;
+use std::path::{Path, PathBuf};
 
 use crate::os;
 use crate::wire::{PermissionReport, WorkerEntry, WorkerPermissionLine};
@@ -112,8 +113,8 @@ pub fn write_json_str(out: &mut String, s: &str) {
 #[derive(Clone, Debug, PartialEq)]
 pub enum ArgKind {
     String,
-    Int { min: Option<i64>, max: Option<i64> },
-    Float { min: Option<f64>, max: Option<f64> },
+    Int,
+    Float,
     Bool,
     Enum { choices: Vec<String> },
 }
@@ -122,20 +123,11 @@ impl ArgKind {
     pub fn type_label(&self) -> String {
         match self {
             Self::String => "string".into(),
-            Self::Int { min, max } => format_bounds("int", *min, *max),
-            Self::Float { min, max } => format_bounds("float", *min, *max),
+            Self::Int => "int".into(),
+            Self::Float => "float".into(),
             Self::Bool => "bool".into(),
             Self::Enum { choices } => format!("enum({})", choices.join("|")),
         }
-    }
-}
-
-fn format_bounds<T: std::fmt::Display>(kind: &str, min: Option<T>, max: Option<T>) -> String {
-    match (min, max) {
-        (Some(lo), Some(hi)) => format!("{kind}[{lo}..={hi}]"),
-        (Some(lo), None) => format!("{kind}[>={lo}]"),
-        (None, Some(hi)) => format!("{kind}[<={hi}]"),
-        (None, None) => kind.into(),
     }
 }
 
@@ -190,29 +182,13 @@ impl Arg {
                     )))
                 }
             }
-            ArgKind::Int { min, max } => {
+            ArgKind::Int => {
                 let value = raw.parse::<i64>().map_err(|_| {
                     Error::InvalidArgument(format!("argument '{}' must be an integer", self.name))
                 })?;
-                if let Some(lo) = min
-                    && value < *lo
-                {
-                    return Err(Error::InvalidArgument(format!(
-                        "argument '{}' must be >= {lo}",
-                        self.name
-                    )));
-                }
-                if let Some(hi) = max
-                    && value > *hi
-                {
-                    return Err(Error::InvalidArgument(format!(
-                        "argument '{}' must be <= {hi}",
-                        self.name
-                    )));
-                }
                 Ok(Scalar::Int(value))
             }
-            ArgKind::Float { min, max } => {
+            ArgKind::Float => {
                 let value = raw.parse::<f64>().map_err(|_| {
                     Error::InvalidArgument(format!(
                         "argument '{}' must be a floating-point number",
@@ -222,22 +198,6 @@ impl Arg {
                 if !value.is_finite() {
                     return Err(Error::InvalidArgument(format!(
                         "argument '{}' must be finite",
-                        self.name
-                    )));
-                }
-                if let Some(lo) = min
-                    && value < *lo
-                {
-                    return Err(Error::InvalidArgument(format!(
-                        "argument '{}' must be >= {lo}",
-                        self.name
-                    )));
-                }
-                if let Some(hi) = max
-                    && value > *hi
-                {
-                    return Err(Error::InvalidArgument(format!(
-                        "argument '{}' must be <= {hi}",
                         self.name
                     )));
                 }
@@ -503,15 +463,21 @@ impl Catalog {
     pub fn load_from_dir(dir: &Path, expected_uid: Option<u32>) -> Result<Self, Error> {
         os::verify_dir_owner_and_mode(dir, expected_uid, 0o027)
             .map_err(|e| Error::InvalidCatalog(e.detail()))?;
-        let workers_bytes = os::read_owned_file(
-            &dir.join("workers.yaml"),
+        let schemas_bytes = os::read_owned_file(
+            &dir.join("schemas.yaml"),
             expected_uid,
             0o227,
             MAX_YAML_BYTES,
         )
         .map_err(|e| Error::InvalidCatalog(e.detail()))?;
-        let workers_text = String::from_utf8(workers_bytes)
-            .map_err(|_| Error::InvalidCatalog("workers.yaml is not valid UTF-8".into()))?;
+        let schemas_text = String::from_utf8(schemas_bytes)
+            .map_err(|_| Error::InvalidCatalog("schemas.yaml is not valid UTF-8".into()))?;
+        let schema_dirs = parse_schema_directories(&schemas_text)?;
+        let mut schema_texts = Vec::with_capacity(schema_dirs.len());
+        for schema_dir in &schema_dirs {
+            let text = read_schema_file(schema_dir, expected_uid)?;
+            schema_texts.push(text);
+        }
 
         let users_dir = dir.join("users");
         os::verify_dir_owner_and_mode(&users_dir, expected_uid, 0o027)
@@ -540,7 +506,7 @@ impl Catalog {
             user_texts.insert(user_name.to_owned(), perms_text);
         }
 
-        let mut catalog = Self::from_yaml(&workers_text, &user_texts)?;
+        let mut catalog = Self::from_schema_texts(&schema_texts, &user_texts)?;
         match os::read_owned_file(&dir.join("version"), expected_uid, 0o227, MAX_VERSION_BYTES) {
             Ok(raw_ver) => {
                 let text = String::from_utf8(raw_ver)
@@ -562,12 +528,28 @@ impl Catalog {
     }
 
     pub fn from_yaml(
-        workers_yaml: &str,
+        schema_yaml: &str,
         users_yaml: &BTreeMap<String, String>,
     ) -> Result<Self, Error> {
-        let workers_doc = yaml::parse(workers_yaml)
-            .map_err(|e| Error::InvalidCatalog(format!("workers.yaml parse error: {e:?}")))?;
-        let packages = parse_packages(&workers_doc)?;
+        Self::from_schema_texts(&[schema_yaml.to_owned()], users_yaml)
+    }
+
+    fn from_schema_texts(
+        schema_texts: &[String],
+        users_yaml: &BTreeMap<String, String>,
+    ) -> Result<Self, Error> {
+        let mut packages = BTreeMap::new();
+        for text in schema_texts {
+            let doc = yaml::parse(text)
+                .map_err(|e| Error::InvalidCatalog(format!("schema.yaml parse error: {e:?}")))?;
+            for (name, package) in parse_packages(&doc)? {
+                if packages.insert(name.clone(), package).is_some() {
+                    return Err(Error::InvalidCatalog(format!(
+                        "duplicate schema key '{name}'"
+                    )));
+                }
+            }
+        }
 
         let mut users = BTreeMap::new();
         for (dir_user, text) in users_yaml {
@@ -594,8 +576,8 @@ impl Catalog {
 
     pub fn mock() -> Self {
         let workers_yaml = "\
-lab-worker:
-  workflowType: DemoWorkflow
+greet:
+  workflow: DemoWorkflow
   description: Schedule a durable timer and greet the named recipient
   args:
   - name: name
@@ -603,12 +585,10 @@ lab-worker:
     description: Recipient name
   - name: wait_seconds
     type: int
-    min: 1
-    max: 7200
     default: 20
     description: Durable timer duration in seconds
-lab-worker-alt:
-  workflowType: CountWorkflow
+count:
+  workflow: CountWorkflow
   description: Schedule a durable timer and count Unicode scalar values
   args:
   - name: name
@@ -616,8 +596,6 @@ lab-worker-alt:
     description: Input text to count
   - name: wait_seconds
     type: int
-    min: 1
-    max: 7200
     default: 20
     description: Durable timer duration in seconds
 ";
@@ -631,12 +609,12 @@ permissions:
   write: false
 workers:
   greet:
-    package: lab-worker
+    package: greet
     permissions:
       read: true
       write: [bob]
   count:
-    package: lab-worker-alt
+    package: count
     permissions:
       read: [bob]
       write: false
@@ -652,12 +630,12 @@ permissions:
   write: false
 workers:
   greet:
-    package: lab-worker
+    package: greet
     permissions:
       read: [alice]
       write: [alice]
   count:
-    package: lab-worker-alt
+    package: count
     permissions:
       read: [alice]
       write: false
@@ -954,7 +932,7 @@ workers:
         })?;
         if package.workflow_type != workflow_type {
             return Err(Error::ExecutionMismatch(format!(
-                "execution workflowType '{workflow_type}' does not match registered '{}'",
+                "execution workflow '{workflow_type}' does not match registered '{}'",
                 package.workflow_type
             )));
         }
@@ -966,13 +944,84 @@ workers:
     }
 }
 
+fn parse_schema_directories(text: &str) -> Result<Vec<PathBuf>, Error> {
+    let doc = yaml::parse(text)
+        .map_err(|e| Error::InvalidCatalog(format!("schemas.yaml parse error: {e:?}")))?;
+    let map = match &doc {
+        Value::Map(map) => map,
+        Value::Null => return Ok(Vec::new()),
+        _ => {
+            return Err(Error::InvalidCatalog(
+                "schemas.yaml root must be a mapping".into(),
+            ));
+        }
+    };
+    let seq = match map.get("directories") {
+        None | Some(Value::Null) => return Ok(Vec::new()),
+        Some(Value::Seq(items)) => items,
+        Some(_) => {
+            return Err(Error::InvalidCatalog(
+                "schemas.yaml directories must be a list".into(),
+            ));
+        }
+    };
+    let mut dirs = Vec::with_capacity(seq.len());
+    for item in seq {
+        let raw = item.as_str().ok_or_else(|| {
+            Error::InvalidCatalog("schemas.yaml directory entries must be strings".into())
+        })?;
+        let path = PathBuf::from(raw);
+        if !path.is_absolute()
+            || path
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return Err(Error::InvalidCatalog(format!(
+                "schema directory '{raw}' must be an absolute path without '..'"
+            )));
+        }
+        dirs.push(path);
+    }
+    Ok(dirs)
+}
+
+fn read_schema_file(dir: &Path, expected_uid: Option<u32>) -> Result<String, Error> {
+    let meta = fs::symlink_metadata(dir).map_err(|e| Error::InvalidCatalog(e.to_string()))?;
+    if meta.file_type().is_symlink() || !meta.is_dir() {
+        return Err(Error::InvalidCatalog(format!(
+            "{} must be a non-symlink directory",
+            dir.display()
+        )));
+    }
+    if let Some(uid) = expected_uid
+        && meta.uid() != uid
+    {
+        return Err(Error::InvalidCatalog(format!(
+            "{} is owned by uid {}, expected {uid}",
+            dir.display(),
+            meta.uid()
+        )));
+    }
+    if meta.mode() & 0o022 != 0 {
+        return Err(Error::InvalidCatalog(format!(
+            "{} is writable by group or other",
+            dir.display()
+        )));
+    }
+    let path = dir.join("schema.yaml");
+    let bytes = os::read_owned_file(&path, expected_uid, 0o022, MAX_YAML_BYTES)
+        .map_err(|e| Error::InvalidCatalog(e.detail()))?;
+    String::from_utf8(bytes)
+        .map_err(|_| Error::InvalidCatalog(format!("{} is not valid UTF-8", path.display())))
+}
+
 fn parse_packages(doc: &Value) -> Result<BTreeMap<String, Package>, Error> {
     let map = match doc {
         Value::Null => return Ok(BTreeMap::new()),
         Value::Map(m) => m,
         _ => {
             return Err(Error::InvalidCatalog(
-                "workers.yaml root must be a mapping".into(),
+                "schema.yaml root must be a mapping".into(),
             ));
         }
     };
@@ -987,11 +1036,11 @@ fn parse_packages(doc: &Value) -> Result<BTreeMap<String, Package>, Error> {
             .as_map()
             .ok_or_else(|| Error::InvalidCatalog(format!("package '{name}' must be a mapping")))?;
         let workflow_type = pkg_map
-            .get("workflowType")
+            .get("workflow")
             .and_then(Value::as_str)
             .filter(|s| !s.trim().is_empty())
             .ok_or_else(|| {
-                Error::InvalidCatalog(format!("package '{name}' requires non-empty workflowType"))
+                Error::InvalidCatalog(format!("package '{name}' requires non-empty workflow"))
             })?
             .to_owned();
         let description = match pkg_map.get("description") {
@@ -1074,32 +1123,25 @@ fn parse_arg(pkg: &str, val: &Value) -> Result<Arg, Error> {
     let has_choices = map
         .get("choices")
         .is_some_and(|v| !matches!(v, Value::Null));
-    let has_min = map.get("min").is_some_and(|v| !matches!(v, Value::Null));
-    let has_max = map.get("max").is_some_and(|v| !matches!(v, Value::Null));
 
     let kind = match type_name {
         "string" => {
-            if has_choices || has_min || has_max {
+            if has_choices {
                 return Err(Error::InvalidCatalog(format!(
-                    "string argument '{name}' cannot have choices or bounds"
+                    "string argument '{name}' cannot have choices"
                 )));
             }
             ArgKind::String
         }
         "bool" => {
-            if has_choices || has_min || has_max {
+            if has_choices {
                 return Err(Error::InvalidCatalog(format!(
-                    "bool argument '{name}' cannot have choices or bounds"
+                    "bool argument '{name}' cannot have choices"
                 )));
             }
             ArgKind::Bool
         }
         "enum" => {
-            if has_min || has_max {
-                return Err(Error::InvalidCatalog(format!(
-                    "enum argument '{name}' cannot have min/max bounds"
-                )));
-            }
             let seq = map
                 .get("choices")
                 .and_then(Value::as_seq)
@@ -1131,26 +1173,7 @@ fn parse_arg(pkg: &str, val: &Value) -> Result<Arg, Error> {
                     "int argument '{name}' cannot have choices"
                 )));
             }
-            let min = match map.get("min") {
-                Some(Value::Null) | None => None,
-                Some(v) => Some(v.as_i64().ok_or_else(|| {
-                    Error::InvalidCatalog(format!("int min in '{name}' must be an integer"))
-                })?),
-            };
-            let max = match map.get("max") {
-                Some(Value::Null) | None => None,
-                Some(v) => Some(v.as_i64().ok_or_else(|| {
-                    Error::InvalidCatalog(format!("int max in '{name}' must be an integer"))
-                })?),
-            };
-            if let (Some(lo), Some(hi)) = (min, max)
-                && lo > hi
-            {
-                return Err(Error::InvalidCatalog(format!(
-                    "inverted bounds on '{name}'"
-                )));
-            }
-            ArgKind::Int { min, max }
+            ArgKind::Int
         }
         "float" => {
             if has_choices {
@@ -1158,26 +1181,7 @@ fn parse_arg(pkg: &str, val: &Value) -> Result<Arg, Error> {
                     "float argument '{name}' cannot have choices"
                 )));
             }
-            let min = match map.get("min") {
-                Some(Value::Null) | None => None,
-                Some(v) => Some(v.as_f64().filter(|f| f.is_finite()).ok_or_else(|| {
-                    Error::InvalidCatalog(format!("float min in '{name}' must be finite"))
-                })?),
-            };
-            let max = match map.get("max") {
-                Some(Value::Null) | None => None,
-                Some(v) => Some(v.as_f64().filter(|f| f.is_finite()).ok_or_else(|| {
-                    Error::InvalidCatalog(format!("float max in '{name}' must be finite"))
-                })?),
-            };
-            if let (Some(lo), Some(hi)) = (min, max)
-                && lo > hi
-            {
-                return Err(Error::InvalidCatalog(format!(
-                    "inverted bounds on '{name}'"
-                )));
-            }
-            ArgKind::Float { min, max }
+            ArgKind::Float
         }
         other => {
             return Err(Error::InvalidCatalog(format!(
@@ -1220,28 +1224,15 @@ fn parse_default(name: &str, kind: &ArgKind, val: &Value) -> Result<Scalar, Erro
             }
             Ok(Scalar::Str(s.to_owned()))
         }
-        ArgKind::Int { min, max } => {
-            let v = val.as_i64().ok_or_else(|| {
-                Error::InvalidCatalog(format!("default for '{name}' must be int"))
-            })?;
-            if min.is_some_and(|lo| v < lo) || max.is_some_and(|hi| v > hi) {
-                return Err(Error::InvalidCatalog(format!(
-                    "default for '{name}' is out of bounds"
-                )));
-            }
-            Ok(Scalar::Int(v))
-        }
-        ArgKind::Float { min, max } => {
-            let v = val.as_f64().filter(|f| f.is_finite()).ok_or_else(|| {
-                Error::InvalidCatalog(format!("default for '{name}' must be float"))
-            })?;
-            if min.is_some_and(|lo| v < lo) || max.is_some_and(|hi| v > hi) {
-                return Err(Error::InvalidCatalog(format!(
-                    "default for '{name}' is out of bounds"
-                )));
-            }
-            Ok(Scalar::Float(v))
-        }
+        ArgKind::Int => val
+            .as_i64()
+            .map(Scalar::Int)
+            .ok_or_else(|| Error::InvalidCatalog(format!("default for '{name}' must be int"))),
+        ArgKind::Float => val
+            .as_f64()
+            .filter(|f| f.is_finite())
+            .map(Scalar::Float)
+            .ok_or_else(|| Error::InvalidCatalog(format!("default for '{name}' must be float"))),
     }
 }
 
@@ -1365,12 +1356,12 @@ permissions:
   write: false
 workers:
   greet:
-    package: lab-worker
+    package: greet
     permissions:
       read: true
       write: [bob]
   count:
-    package: lab-worker-alt
+    package: count
     permissions:
       read: [bob]
       write: false
@@ -1386,7 +1377,7 @@ permissions:
   write: false
 workers:
   greet:
-    package: lab-worker
+    package: greet
     permissions:
       read: false
       write: false
@@ -1405,27 +1396,23 @@ workers: {}
             .into(),
         );
         let workers = "\
-lab-worker:
-  workflowType: DemoWorkflow
+greet:
+  workflow: DemoWorkflow
   description: Greet
   args:
   - name: name
     type: string
   - name: wait_seconds
     type: int
-    min: 1
-    max: 7200
     default: 20
-lab-worker-alt:
-  workflowType: CountWorkflow
+count:
+  workflow: CountWorkflow
   description: Count
   args:
   - name: name
     type: string
   - name: wait_seconds
     type: int
-    min: 1
-    max: 7200
     default: 20
 ";
         let cat = Catalog::from_yaml(workers, &users).unwrap();
@@ -1443,9 +1430,10 @@ lab-worker-alt:
             pkg.validate_and_encode(&["Alice \"A\"".into()]).unwrap(),
             r#"{"name":"Alice \"A\"","wait_seconds":20}"#
         );
-        assert!(
+        assert_eq!(
             pkg.validate_and_encode(&["Alice".into(), "0".into()])
-                .is_err()
+                .unwrap(),
+            r#"{"name":"Alice","wait_seconds":0}"#
         );
         assert!(pkg.validate_and_encode(&[]).is_err());
 
@@ -1494,9 +1482,21 @@ lab-worker-alt:
             .mode(0o700)
             .create(dir.join("users"))
             .unwrap();
-        let workers = dir.join("workers.yaml");
-        fs::write(&workers, "w:\n  workflowType: Demo\n").unwrap();
-        fs::set_permissions(&workers, fs::Permissions::from_mode(0o400)).unwrap();
+        let schema_dir = dir.join("schema");
+        fs::DirBuilder::new()
+            .mode(0o755)
+            .create(&schema_dir)
+            .unwrap();
+        let schema = schema_dir.join("schema.yaml");
+        fs::write(&schema, "w:\n  workflow: Demo\n").unwrap();
+        fs::set_permissions(&schema, fs::Permissions::from_mode(0o444)).unwrap();
+        let schemas = dir.join("schemas.yaml");
+        fs::write(
+            &schemas,
+            format!("directories:\n  - {}\n", schema_dir.display()),
+        )
+        .unwrap();
+        fs::set_permissions(&schemas, fs::Permissions::from_mode(0o400)).unwrap();
 
         let fallback = Catalog::load_from_dir(&dir, None).unwrap();
         assert_eq!(fallback.version(), "0.1.0");

@@ -1587,13 +1587,13 @@ mod tests {
     fn cross_user_catalog() -> Catalog {
         let workers = "\
 rig-worker:
-  workflowType: RigWorkflow
+  workflow: RigWorkflow
   description: Shared rig
   args:
   - name: manifest
     type: string
 private-worker:
-  workflowType: PrivateWorkflow
+  workflow: PrivateWorkflow
   description: Private
   args:
   - name: manifest
@@ -2032,7 +2032,7 @@ workers:
                 .into(),
         );
         let catalog = Catalog::from_yaml(
-            "lab-worker:\n  workflowType: DemoWorkflow\n  args: []\n",
+            "lab-worker:\n  workflow: DemoWorkflow\n  args: []\n",
             &users,
         )
         .unwrap();

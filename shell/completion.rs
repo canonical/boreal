@@ -350,7 +350,7 @@ mod tests {
         // Enum and bool argument completion from dynamic catalog!
         let workers_yaml = "\
 train-pkg:
-  workflowType: TrainWf
+  workflow: TrainWf
   args:
   - name: mode
     type: enum
