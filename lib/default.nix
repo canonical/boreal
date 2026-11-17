@@ -64,18 +64,24 @@ in
       failed = builtins.filter (entry: !entry.assertion) evaluated.assertions;
       failureText = lib.concatMapStringsSep "\n" (entry: "- ${entry.message}") failed;
       versionEtc = evaluated.environment.etc."boreal/version";
-      workersEtc = evaluated.environment.etc."boreal/workers.yaml";
+      schemasEtc = evaluated.environment.etc."boreal/schemas.yaml";
       userPolicySources = map (user: evaluated.environment.etc."boreal/users/${user}/perms.yaml".source) (
         builtins.attrNames evaluated.boreal.users
       );
-      allYamlSources = [ workersEtc.source ] ++ userPolicySources;
+      schemaOutputs = lib.unique (
+        lib.concatLists (
+          lib.mapAttrsToList (
+            _: userCfg: lib.mapAttrsToList (_: workerCfg: workerCfg.package.schema) userCfg.workers
+          ) evaluated.boreal.users
+        )
+      );
     in
     if failed != [ ] then
       throw "Boreal lab check failed assertions:\n${failureText}"
     else
       assert evaluated.boreal.enable;
       assert versionEtc.user == "root" && versionEtc.group == "boreal" && versionEtc.mode == "0440";
-      assert workersEtc.user == "root" && workersEtc.group == "boreal" && workersEtc.mode == "0440";
+      assert schemasEtc.user == "root" && schemasEtc.group == "boreal" && schemasEtc.mode == "0440";
       assert builtins.all (
         user:
         let
@@ -89,7 +95,16 @@ in
         }
         ''
           set -eu
-          for policy in ${lib.escapeShellArgs allYamlSources}; do
+          if grep -Eq 'ssh-' ${schemasEtc.source}; then
+            echo "Unexpected key in schemas.yaml" >&2
+            exit 1
+          fi
+          remarshal --if yaml --of json ${schemasEtc.source} > /dev/null
+          for schema in ${lib.escapeShellArgs schemaOutputs}; do
+            test -f "$schema/schema.yaml"
+            remarshal --if yaml --of json "$schema/schema.yaml" > /dev/null
+          done
+          for policy in ${lib.escapeShellArgs userPolicySources}; do
             if grep -Eq 'ssh-|/nix/store/' "$policy"; then
               echo "Unexpected key or store path in $policy" >&2
               exit 1
@@ -153,6 +168,7 @@ in
         "pname"
         "version"
         "src"
+        "outputs"
         "cargoBuildFlags"
         "cargoTestFlags"
         "nativeBuildInputs"
@@ -160,8 +176,16 @@ in
         "postInstall"
         "meta"
       ];
-      hasScheduler = builtins.elem "scheduler" (args.outputs or [ "out" ]);
+      outputs =
+        args.outputs or [
+          "out"
+          "schema"
+        ];
+      binOutputs = builtins.filter (name: name != "out" && name != "schema") outputs;
     in
+    assert lib.assertMsg (builtins.elem "out" outputs) "buildRustWorker: outputs must include out";
+    assert lib.assertMsg (builtins.elem "schema" outputs)
+      "buildRustWorker: outputs must include schema";
     pkgs.rustPlatform.buildRustPackage (
       passthrough
       // {
@@ -197,15 +221,38 @@ in
           ln -sfn ${borealWorkerSrc} "$sourceRoot/.boreal/boreal-worker"
         ''
         + (args.postUnpack or "");
+        outputs = outputs;
+        # stdenv fixup expands ${!output}. Hyphenated names such as
+        # greet-schedule are valid Nix outputs but not bash identifiers.
+        dontFixup = true;
         postInstall =
           (args.postInstall or "")
-          + lib.optionalString hasScheduler ''
-            if [[ ! -x $out/bin/scheduler ]]; then
-              echo "buildRustWorker: outputs contains scheduler, but \$out/bin/scheduler was not installed" >&2
+          + ''
+            if [[ ! -x $out/bin/schema ]]; then
+              echo "buildRustWorker: \$out/bin/schema was not installed" >&2
               exit 1
             fi
-            mkdir -p "$scheduler/bin"
-            mv "$out/bin/scheduler" "$scheduler/bin/scheduler"
+            schema_out="$(printenv schema)"
+            mkdir -p "$schema_out"
+            "$out/bin/schema" > "$schema_out/schema.yaml"
+            rm -f "$out/bin/schema"
+          ''
+          + lib.concatMapStrings (name: ''
+            if [[ ! -x "$out/bin/"${lib.escapeShellArg name} ]]; then
+              echo "buildRustWorker: \$out/bin/${name} was not installed" >&2
+              exit 1
+            fi
+            dest="$(printenv ${lib.escapeShellArg name})"
+            mkdir -p "$dest/bin"
+            mv "$out/bin/"${lib.escapeShellArg name} "$dest/bin/"${lib.escapeShellArg name}
+          '') binOutputs
+          + ''
+            if command -v strip >/dev/null; then
+              for output in $outputs; do
+                prefix="$(printenv "$output")"
+                find "$prefix" -type f -executable -exec strip -S -p {} + || true
+              done
+            fi
           '';
         meta = {
           mainProgram = pname;

@@ -22,11 +22,8 @@ let
       lib.concatLists (
         lib.mapAttrsToList (
           worker: workerCfg:
-          let
-            pkg = borealCfg.workerPackages.${workerCfg.package}.package or null;
-          in
           [ "boreal-worker-${user}-${worker}.service" ]
-          ++ lib.optional (pkg != null && pkg ? scheduler) "boreal-scheduler-${user}-${worker}.service"
+          ++ lib.optional workerCfg.schedule.enable "boreal-schedule-${user}-${worker}.service"
         ) userCfg.workers
       )
     ) borealCfg.users

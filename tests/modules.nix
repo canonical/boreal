@@ -8,21 +8,62 @@ let
   inherit (nixpkgs) lib;
   system = pkgs.stdenv.hostPlatform.system;
 
-  trainBin = pkgs.writeShellScriptBin "train-worker" "exit 0";
-  evalBin = pkgs.writeShellScriptBin "eval-worker" "exit 0";
+  mkWorker =
+    {
+      name,
+      workflow,
+      description ? "",
+    }:
+    pkgs.runCommand name
+      {
+        outputs = [
+          "out"
+          name
+          "schema"
+        ];
+      }
+      ''
+                dest="$(printenv ${name})"
+                schema_out="$(printenv schema)"
+                mkdir -p "$out" "$dest/bin" "$schema_out"
+                printf '#!/bin/sh\nexit 0\n' > "$dest/bin/${name}"
+                chmod +x "$dest/bin/${name}"
+                cat > "$schema_out/schema.yaml" <<EOF
+        ${name}:
+          workflow: ${workflow}
+          description: "${description}"
+          args: []
+        EOF
+      '';
+  trainBin = mkWorker {
+    name = "train";
+    workflow = "TrainWorkflow";
+    description = "Run a training job";
+  };
+  evalBin = mkWorker {
+    name = "eval";
+    workflow = "EvalWorkflow";
+    description = "Evaluate a checkpoint";
+  };
   helloBin =
     pkgs.runCommand "hello-worker"
       {
         outputs = [
           "out"
-          "scheduler"
+          "hello"
+          "hello-schedule"
+          "schema"
         ];
       }
       ''
-        mkdir -p "$out/bin" "$scheduler/bin"
-        printf '#!/bin/sh\nexit 0\n' > "$out/bin/hello-worker"
-        printf '#!/bin/sh\nexit 0\n' > "$scheduler/bin/scheduler"
-        chmod +x "$out/bin/hello-worker" "$scheduler/bin/scheduler"
+        hello="$(printenv hello)"
+        schedule="$(printenv hello-schedule)"
+        schema_out="$(printenv schema)"
+        mkdir -p "$out" "$hello/bin" "$schedule/bin" "$schema_out"
+        printf '#!/bin/sh\nexit 0\n' > "$hello/bin/hello"
+        printf '#!/bin/sh\nexit 0\n' > "$schedule/bin/hello-schedule"
+        chmod +x "$hello/bin/hello" "$schedule/bin/hello-schedule"
+        printf 'hello:\n  workflow: HelloWorkflow\n  args: []\n' > "$schema_out/schema.yaml"
       '';
   updaterStub = pkgs.writeShellScriptBin "boreal-updater" "exit 0";
   shellStub = pkgs.writeShellScriptBin "boreal-shell" "exit 0";
@@ -57,59 +98,6 @@ let
       shellPackage = shellStub;
       brokerPackage = brokerStub;
       admin.package = adminStub;
-      workerPackages = {
-        train-worker = {
-          package = trainBin;
-          workflowType = "TrainWorkflow";
-          description = "Run a training job";
-          args = [
-            {
-              name = "dataset";
-              type = "string";
-              description = "Dataset name";
-            }
-            {
-              name = "mode";
-              type = "enum";
-              choices = [
-                "fast"
-                "accurate"
-              ];
-              default = "fast";
-            }
-            {
-              name = "epochs";
-              type = "int";
-              min = 1;
-              max = 500;
-              default = 10;
-            }
-            {
-              name = "learning_rate";
-              type = "float";
-              min = 0.0;
-              max = 1.0;
-              default = 0.05;
-            }
-            {
-              name = "dry_run";
-              type = "bool";
-              default = false;
-            }
-          ];
-        };
-        eval-worker = {
-          package = evalBin;
-          workflowType = "EvalWorkflow";
-          description = "Evaluate a checkpoint";
-          args = [
-            {
-              name = "checkpoint";
-              type = "string";
-            }
-          ];
-        };
-      };
       users = {
         alice = {
           keys = [ "ssh-ed25519 AAAA alice-test-key" ];
@@ -119,14 +107,14 @@ let
           };
           workers = {
             train = {
-              package = "train-worker";
+              package = trainBin.train;
               permissions.write = [
                 "bob"
                 "bob"
               ];
             };
             eval = {
-              package = "eval-worker";
+              package = evalBin.eval;
               permissions.read = [ "bob" ];
             };
           };
@@ -134,7 +122,7 @@ let
         bob = {
           keys = [ "ssh-ed25519 BBBB bob-test-key" ];
           editMode = "helix";
-          workers.eval.package = "eval-worker";
+          workers.eval.package = evalBin.eval;
         };
       };
       updater = {
@@ -155,136 +143,33 @@ let
     config: text:
     builtins.any (entry: !entry.assertion && lib.hasInfix text entry.message) config.assertions;
 
-  mkWorkerPkgHost =
-    pkgSpec:
-    mkHost {
-      boreal = {
-        enable = true;
-        workerPackages.bad-worker = {
-          package = trainBin;
-          workflowType = "BadWorkflow";
-        }
-        // pkgSpec;
-      };
-    };
-
-  unknownPackage = mkHost {
+  missingSchema = mkHost {
     boreal = {
       enable = true;
-      users.alice.workers.train.package = "unregistered";
+      users.alice.workers.train.package = pkgs.writeShellScriptBin "train" "exit 0";
     };
   };
-  emptyWorkflowType = mkWorkerPkgHost { workflowType = "   "; };
-  invalidArgName = mkWorkerPkgHost {
-    args = [
-      {
-        name = "bad-arg";
-        type = "string";
-      }
-    ];
+  missingSchedulePackage = mkHost {
+    boreal = {
+      enable = true;
+      users.alice.workers.train = {
+        package = trainBin.train;
+        schedule.enable = true;
+      };
+    };
   };
-  duplicateArgName = mkWorkerPkgHost {
-    args = [
-      {
-        name = "x";
-        type = "string";
-      }
-      {
-        name = "x";
-        type = "int";
-      }
-    ];
+  otherTrain = mkWorker {
+    name = "train";
+    workflow = "OtherWorkflow";
   };
-  optionalBeforeRequired = mkWorkerPkgHost {
-    args = [
-      {
-        name = "opt";
-        type = "int";
-        default = 1;
-      }
-      {
-        name = "req";
-        type = "string";
-      }
-    ];
-  };
-  missingEnumChoices = mkWorkerPkgHost {
-    args = [
-      {
-        name = "kind";
-        type = "enum";
-      }
-    ];
-  };
-  unexpectedChoices = mkWorkerPkgHost {
-    args = [
-      {
-        name = "kind";
-        type = "string";
-        choices = [ "a" ];
-      }
-    ];
-  };
-  invertedBounds = mkWorkerPkgHost {
-    args = [
-      {
-        name = "n";
-        type = "int";
-        min = 10;
-        max = 5;
-      }
-    ];
-  };
-  boundsOnString = mkWorkerPkgHost {
-    args = [
-      {
-        name = "s";
-        type = "string";
-        min = 1;
-      }
-    ];
-  };
-  floatBoundOnInt = mkWorkerPkgHost {
-    args = [
-      {
-        name = "n";
-        type = "int";
-        min = 1.5;
-      }
-    ];
-  };
-  defaultTypeMismatch = mkWorkerPkgHost {
-    args = [
-      {
-        name = "n";
-        type = "int";
-        default = "ten";
-      }
-    ];
-  };
-  defaultOutOfBounds = mkWorkerPkgHost {
-    args = [
-      {
-        name = "n";
-        type = "int";
-        min = 1;
-        max = 10;
-        default = 20;
-      }
-    ];
-  };
-  defaultInvalidChoice = mkWorkerPkgHost {
-    args = [
-      {
-        name = "kind";
-        type = "enum";
-        choices = [
-          "a"
-          "b"
-        ];
-        default = "c";
-      }
-    ];
+  duplicateOutputName = mkHost {
+    boreal = {
+      enable = true;
+      users.alice.workers = {
+        one.package = trainBin.train;
+        two.package = otherTrain.train;
+      };
+    };
   };
   unknownDefaultPermUser = mkHost {
     boreal = {
@@ -295,12 +180,8 @@ let
   unknownWorkerPermUser = mkHost {
     boreal = {
       enable = true;
-      workerPackages.eval-worker = {
-        package = evalBin;
-        workflowType = "EvalWorkflow";
-      };
       users.alice.workers.eval = {
-        package = "eval-worker";
+        package = evalBin.eval;
         permissions.read = [ "mallory" ];
       };
     };
@@ -320,23 +201,15 @@ let
   invalidWorkerName = mkHost {
     boreal = {
       enable = true;
-      workerPackages.eval-worker = {
-        package = evalBin;
-        workflowType = "EvalWorkflow";
-      };
-      users.alice.workers."BadName".package = "eval-worker";
+      users.alice.workers."BadName".package = evalBin.eval;
     };
   };
   collidingUnitKey = mkHost {
     boreal = {
       enable = true;
-      workerPackages.eval-worker = {
-        package = evalBin;
-        workflowType = "EvalWorkflow";
-      };
       users = {
-        alice.workers."bob-eval".package = "eval-worker";
-        alice-bob.workers.eval.package = "eval-worker";
+        alice.workers."bob-eval".package = evalBin.eval;
+        alice-bob.workers.eval.package = evalBin.eval;
       };
     };
   };
@@ -352,18 +225,28 @@ let
       version = "0.1.0 beta";
     };
   };
-  workerVersionPkg = pkgs.runCommand "versioned-worker" { version = "0.4.2"; } ''
-    mkdir -p "$out/bin"
-    printf '#!/bin/sh\nexit 0\n' > "$out/bin/versioned-worker"
-    chmod +x "$out/bin/versioned-worker"
-  '';
+  workerVersionPkg =
+    pkgs.runCommand "versioned-worker"
+      {
+        version = "0.4.2";
+        outputs = [
+          "out"
+          "versioned"
+          "schema"
+        ];
+      }
+      ''
+        dest="$(printenv versioned)"
+        schema_out="$(printenv schema)"
+        mkdir -p "$out" "$dest/bin" "$schema_out"
+        printf '#!/bin/sh\nexit 0\n' > "$dest/bin/versioned"
+        chmod +x "$dest/bin/versioned"
+        printf 'versioned:\n  workflow: VersionedWorkflow\n  args: []\n' > "$schema_out/schema.yaml"
+      '';
   workerVersionHost = mkHost {
     boreal = {
       enable = true;
-      workerPackages.v-worker = {
-        package = workerVersionPkg;
-        workflowType = "VersionedWorkflow";
-      };
+      users.alice.workers.v.package = workerVersionPkg.versioned;
     };
   };
   mockDownstreamRoot = pkgs.runCommand "mock-downstream-root" { } ''
@@ -426,68 +309,18 @@ let
     }).config;
 
   versionEtc = configured.environment.etc."boreal/version";
-  workersEtc = configured.environment.etc."boreal/workers.yaml";
+  schemasEtc = configured.environment.etc."boreal/schemas.yaml";
   alicePermsEtc = configured.environment.etc."boreal/users/alice/perms.yaml";
   bobPermsEtc = configured.environment.etc."boreal/users/bob/perms.yaml";
   updaterEtc = configured.environment.etc."boreal/updater.yaml";
   adminEtc = configured.environment.etc."boreal-admin/policy.yaml";
 
-  expectedWorkersCatalog = pkgs.writeText "expected-workers.json" (
+  expectedSchemas = pkgs.writeText "expected-schemas.json" (
     builtins.toJSON {
-      train-worker = {
-        workflowType = "TrainWorkflow";
-        description = "Run a training job";
-        args = [
-          {
-            name = "dataset";
-            type = "string";
-            description = "Dataset name";
-          }
-          {
-            name = "mode";
-            type = "enum";
-            description = "";
-            choices = [
-              "fast"
-              "accurate"
-            ];
-            default = "fast";
-          }
-          {
-            name = "epochs";
-            type = "int";
-            description = "";
-            min = 1;
-            max = 500;
-            default = 10;
-          }
-          {
-            name = "learning_rate";
-            type = "float";
-            description = "";
-            min = 0.0;
-            max = 1.0;
-            default = 0.05;
-          }
-          {
-            name = "dry_run";
-            type = "bool";
-            description = "";
-            default = false;
-          }
-        ];
-      };
-      eval-worker = {
-        workflowType = "EvalWorkflow";
-        description = "Evaluate a checkpoint";
-        args = [
-          {
-            name = "checkpoint";
-            type = "string";
-            description = "";
-          }
-        ];
-      };
+      directories = [
+        evalBin.schema
+        trainBin.schema
+      ];
     }
   );
 
@@ -500,14 +333,14 @@ let
       };
       workers = {
         train = {
-          package = "train-worker";
+          package = "train";
           permissions = {
             read = true;
             write = [ "bob" ];
           };
         };
         eval = {
-          package = "eval-worker";
+          package = "eval";
           permissions = {
             read = [ "bob" ];
             write = false;
@@ -526,7 +359,7 @@ let
       };
       workers = {
         eval = {
-          package = "eval-worker";
+          package = "eval";
           permissions = {
             read = false;
             write = false;
@@ -569,11 +402,13 @@ let
         enable = true;
         package = updaterStub;
       };
-      workerPackages.hello = {
-        package = helloBin;
-        workflowType = "HelloWorkflow";
+      users.alice.workers.hello = {
+        package = helloBin.hello;
+        schedule = {
+          enable = true;
+          package = helloBin.hello-schedule;
+        };
       };
-      users.alice.workers.hello.package = "hello";
     };
   };
 in
@@ -610,7 +445,7 @@ assert selfManifestHost.boreal.version == "1.2.3";
 assert selfManifestHost.environment.etc."boreal/version".text == "1.2.3\n";
 assert versionEtc.user == "root" && versionEtc.group == "boreal" && versionEtc.mode == "0440";
 assert versionEtc.text == "0.1.0\n";
-assert workersEtc.user == "root" && workersEtc.group == "boreal" && workersEtc.mode == "0440";
+assert schemasEtc.user == "root" && schemasEtc.group == "boreal" && schemasEtc.mode == "0440";
 assert
   alicePermsEtc.user == "root" && alicePermsEtc.group == "boreal" && alicePermsEtc.mode == "0440";
 assert bobPermsEtc.user == "root" && bobPermsEtc.group == "boreal" && bobPermsEtc.mode == "0440";
@@ -646,29 +481,28 @@ assert
   configured.systemd.services.boreal-worker-alice-train.environment.LAB_TASK_QUEUE == "alice-train";
 assert
   configured.systemd.services.boreal-worker-alice-train.serviceConfig.ExecStart
-  == "${trainBin}/bin/train-worker";
+  == "${trainBin.train}/bin/train";
 assert
   configured.systemd.services.boreal-worker-alice-eval.serviceConfig.ExecStart
-  == "${evalBin}/bin/eval-worker";
-assert !configured.systemd.services ? boreal-scheduler-alice-train;
-assert schedulerHost.systemd.services.boreal-scheduler-alice-hello.serviceConfig.Type == "oneshot";
-assert schedulerHost.systemd.services.boreal-scheduler-alice-hello.serviceConfig.RemainAfterExit;
-assert schedulerHost.systemd.services.boreal-scheduler-alice-hello.serviceConfig.User == "alice";
+  == "${evalBin.eval}/bin/eval";
+assert !configured.systemd.services ? boreal-schedule-alice-train;
+assert schedulerHost.systemd.services.boreal-schedule-alice-hello.serviceConfig.Type == "oneshot";
+assert schedulerHost.systemd.services.boreal-schedule-alice-hello.serviceConfig.RemainAfterExit;
+assert schedulerHost.systemd.services.boreal-schedule-alice-hello.serviceConfig.User == "alice";
 assert
-  schedulerHost.systemd.services.boreal-scheduler-alice-hello.serviceConfig.NetworkNamespacePath
+  schedulerHost.systemd.services.boreal-schedule-alice-hello.serviceConfig.NetworkNamespacePath
   == "/run/netns/boreal-worker-alice-hello";
 assert
-  schedulerHost.systemd.services.boreal-scheduler-alice-hello.serviceConfig.ExecStart
-  == "${helloBin.scheduler}/bin/scheduler";
+  schedulerHost.systemd.services.boreal-schedule-alice-hello.serviceConfig.ExecStart
+  == "${helloBin.hello-schedule}/bin/hello-schedule";
 assert
-  schedulerHost.systemd.services.boreal-scheduler-alice-hello.environment.TEMPORAL_NAMESPACE
+  schedulerHost.systemd.services.boreal-schedule-alice-hello.environment.TEMPORAL_NAMESPACE
   == "alice";
 assert
-  schedulerHost.systemd.services.boreal-scheduler-alice-hello.environment.LAB_TASK_QUEUE
+  schedulerHost.systemd.services.boreal-schedule-alice-hello.environment.LAB_TASK_QUEUE
   == "alice-hello";
-assert
-  !(schedulerHost.systemd.services.boreal-scheduler-alice-hello.serviceConfig ? PrivateNetwork);
-assert lib.hasInfix "boreal-scheduler-alice-hello.service" (
+assert !(schedulerHost.systemd.services.boreal-schedule-alice-hello.serviceConfig ? PrivateNetwork);
+assert lib.hasInfix "boreal-schedule-alice-hello.service" (
   builtins.readFile schedulerHost.environment.etc."boreal/updater.yaml".source
 );
 assert configured.systemd.services.boreal-updater.serviceConfig.User == "root";
@@ -677,19 +511,9 @@ assert !configured.systemd.services.boreal-updater.stopIfChanged;
 assert
   configured.systemd.services.boreal-updater.serviceConfig.ExecStart
   == "${updaterStub}/bin/boreal-updater run";
-assert assertionFailed unknownPackage "boreal.workerPackages";
-assert assertionFailed emptyWorkflowType "workflowType";
-assert assertionFailed invalidArgName "argument names";
-assert assertionFailed duplicateArgName "argument names";
-assert assertionFailed optionalBeforeRequired "precede optional";
-assert assertionFailed missingEnumChoices "choices";
-assert assertionFailed unexpectedChoices "choices";
-assert assertionFailed invertedBounds "min/max";
-assert assertionFailed boundsOnString "min/max";
-assert assertionFailed floatBoundOnInt "min/max";
-assert assertionFailed defaultTypeMismatch "default values";
-assert assertionFailed defaultOutOfBounds "default values";
-assert assertionFailed defaultInvalidChoice "default values";
+assert assertionFailed missingSchema "schema output";
+assert assertionFailed missingSchedulePackage "schedule.package";
+assert assertionFailed duplicateOutputName "output names must be unique";
 assert assertionFailed unknownDefaultPermUser "declared in boreal.users";
 assert assertionFailed unknownWorkerPermUser "declared in boreal.users";
 assert assertionFailed rootUser "must not be root";
@@ -764,11 +588,15 @@ pkgs.runCommand "boreal-module-tests"
   ''
     set -eu
     test -e "$labCheckDrv"
-    if grep -Eq 'ssh-|/nix/store/' ${workersEtc.source} ${alicePermsEtc.source} ${bobPermsEtc.source} ${updaterEtc.source}; then
-      echo "Key or store path leaked into generated policy YAML" >&2
+    if grep -Eq 'ssh-' ${schemasEtc.source} ${alicePermsEtc.source} ${bobPermsEtc.source} ${updaterEtc.source}; then
+      echo "Key leaked into generated policy YAML" >&2
       exit 1
     fi
-    remarshal --if yaml --of json ${workersEtc.source} > workers.json
+    if grep -Eq '/nix/store/' ${alicePermsEtc.source} ${bobPermsEtc.source} ${updaterEtc.source}; then
+      echo "Store path leaked into generated policy YAML" >&2
+      exit 1
+    fi
+    remarshal --if yaml --of json ${schemasEtc.source} > schemas.json
     remarshal --if yaml --of json ${alicePermsEtc.source} > alice.json
     remarshal --if yaml --of json ${bobPermsEtc.source} > bob.json
     remarshal --if yaml --of json ${updaterEtc.source} > updater.json
@@ -778,7 +606,7 @@ pkgs.runCommand "boreal-module-tests"
     import json, pathlib
 
     for actual_path, expected_path in [
-        ("workers.json", "${expectedWorkersCatalog}"),
+        ("schemas.json", "${expectedSchemas}"),
         ("alice.json", "${expectedAlicePolicy}"),
         ("bob.json", "${expectedBobPolicy}"),
         ("updater.json", "${expectedUpdaterPolicy}"),

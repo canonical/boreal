@@ -19,7 +19,6 @@ let
   permissionType = types.either types.bool (types.listOf types.str);
   nonEmpty = text: builtins.match "^[[:space:]]*$" text == null;
   validName = name: builtins.match "^[a-z][a-z0-9_-]*$" name != null;
-  validArgName = name: builtins.match "^[a-z][a-z0-9_]*$" name != null;
   reservedUsers = [
     "root"
     "admin"
@@ -52,7 +51,7 @@ let
       write = normalizeGrant userCfg.permissions.write;
     };
     workers = lib.mapAttrs (_: workerCfg: {
-      inherit (workerCfg) package;
+      package = workerCfg.package.outputName;
       permissions = resolveWorkerPermissions userCfg workerCfg;
     }) userCfg.workers;
   };
@@ -62,96 +61,6 @@ let
     yamlFormat.generate (lib.strings.sanitizeDerivationName "boreal-rc-${user}.yaml") {
       edit_mode = userCfg.editMode;
     };
-
-  mkArgSpec =
-    arg:
-    {
-      inherit (arg) name type description;
-    }
-    // lib.optionalAttrs (arg.type == "enum") {
-      inherit (arg) choices;
-    }
-    // lib.optionalAttrs (arg.min != null) {
-      inherit (arg) min;
-    }
-    // lib.optionalAttrs (arg.max != null) {
-      inherit (arg) max;
-    }
-    // lib.optionalAttrs (arg.default != null) {
-      inherit (arg) default;
-    };
-
-  mkWorkersCatalog = lib.mapAttrs (_: pkgCfg: {
-    inherit (pkgCfg) workflowType description;
-    args = map mkArgSpec pkgCfg.args;
-  }) cfg.workerPackages;
-
-  validArgOrder =
-    args:
-    (builtins.foldl'
-      (
-        state: arg:
-        let
-          isOptional = arg.default != null;
-        in
-        {
-          seenOptional = state.seenOptional || isOptional;
-          ok = state.ok && !(state.seenOptional && !isOptional);
-        }
-      )
-      {
-        seenOptional = false;
-        ok = true;
-      }
-      args
-    ).ok;
-
-  validArgBounds =
-    arg:
-    let
-      isNumeric = arg.type == "int" || arg.type == "float";
-      boundsAllowed = if isNumeric then true else arg.min == null && arg.max == null;
-      intBoundsValid =
-        arg.type != "int"
-        || ((arg.min == null || builtins.isInt arg.min) && (arg.max == null || builtins.isInt arg.max));
-      orderValid = arg.min == null || arg.max == null || arg.min <= arg.max;
-    in
-    boundsAllowed && intBoundsValid && orderValid;
-
-  validArgChoices =
-    arg:
-    if arg.type == "enum" then
-      arg.choices != [ ]
-      && lib.all nonEmpty arg.choices
-      && builtins.length arg.choices == builtins.length (lib.unique arg.choices)
-    else
-      arg.choices == [ ];
-
-  validArgDefault =
-    arg:
-    if arg.default == null then
-      true
-    else
-      let
-        typeMatches =
-          if arg.type == "string" then
-            builtins.isString arg.default
-          else if arg.type == "enum" then
-            builtins.isString arg.default && builtins.elem arg.default arg.choices
-          else if arg.type == "int" then
-            builtins.isInt arg.default
-          else if arg.type == "float" then
-            builtins.isInt arg.default || builtins.isFloat arg.default
-          else
-            builtins.isBool arg.default;
-        withinBounds =
-          !(builtins.isInt arg.default || builtins.isFloat arg.default)
-          || ((arg.min == null || arg.default >= arg.min) && (arg.max == null || arg.default <= arg.max));
-      in
-      typeMatches && withinBounds;
-
-  workerPackageNames = builtins.attrNames cfg.workerPackages;
-  workerPackageValues = builtins.attrValues cfg.workerPackages;
 
   templateManifest = builtins.fromTOML (builtins.readFile ../templates/default/temporal/Cargo.toml);
   selfTemporalVersion =
@@ -165,8 +74,31 @@ let
     else
       null;
   workerDerivedVersion = lib.findFirst (v: v != null && nonEmpty v) null (
-    map (name: cfg.workerPackages.${name}.package.version or null) workerPackageNames
+    map (entry: entry.cfg.package.version or null) workerEntries
   );
+  schemaOf = pkg: pkg.schema or null;
+  schemaDirs = lib.unique (
+    lib.filter (dir: dir != null) (map (entry: schemaOf entry.cfg.package) workerEntries)
+  );
+  outputGroups = lib.groupBy (entry: entry.cfg.package.outputName or "out") workerEntries;
+  outputNameCollision = lib.any (
+    entries:
+    let
+      paths = lib.unique (
+        lib.filter (path: path != null) (
+          map (
+            entry:
+            let
+              schema = schemaOf entry.cfg.package;
+            in
+            if schema == null then null else schema.outPath
+          ) entries
+        )
+      );
+    in
+    builtins.length paths > 1
+  ) (builtins.attrValues outputGroups);
+  binOf = pkg: "${pkg}/bin/${pkg.outputName}";
   defaultLabVersion =
     if selfTemporalVersion != null && nonEmpty selfTemporalVersion then
       selfTemporalVersion
@@ -201,68 +133,20 @@ let
     ) cfg.users
   );
 
-  argModule = types.submodule {
-    options = {
-      name = mkOption {
-        type = types.str;
-        description = "Workflow input field and shell argument name.";
-      };
-
-      type = mkOption {
-        type = types.enum [
-          "string"
-          "int"
-          "float"
-          "bool"
-          "enum"
-        ];
-        description = "Scalar argument type used for validation and JSON encoding.";
-      };
-
-      description = mkOption {
-        type = types.str;
-        default = "";
-        description = "Short human-readable argument description.";
-      };
-
-      choices = mkOption {
-        type = types.listOf types.str;
-        default = [ ];
-        description = "Allowed values when type is enum.";
-      };
-
-      min = mkOption {
-        type = types.nullOr types.number;
-        default = null;
-        description = "Inclusive lower bound for int or float arguments.";
-      };
-
-      max = mkOption {
-        type = types.nullOr types.number;
-        default = null;
-        description = "Inclusive upper bound for int or float arguments.";
-      };
-
-      default = mkOption {
-        type = types.nullOr (
-          types.oneOf [
-            types.str
-            types.number
-            types.bool
-          ]
-        );
-        default = null;
-        description = "Optional default value; arguments with null default are required.";
-      };
-    };
-  };
 in
 {
   imports = [
     (lib.mkRemovedOptionModule [
       "boreal"
       "poc"
-    ] "Use boreal.enable, boreal.workerPackages, boreal.users, and boreal.updater instead.")
+    ] "Use boreal.enable, boreal.users, and boreal.updater instead.")
+    (lib.mkRemovedOptionModule
+      [
+        "boreal"
+        "workerPackages"
+      ]
+      "Set boreal.users.<user>.workers.<name>.package to a worker output. Its schema output is listed in /etc/boreal/schemas.yaml."
+    )
   ];
 
   options.boreal = {
@@ -293,38 +177,6 @@ in
       default = pkgs.callPackage ../packages/broker.nix { };
       defaultText = lib.literalExpression "pkgs.callPackage ../packages/broker.nix { }";
       description = "Boreal policy broker and worker gRPC gate package.";
-    };
-
-    workerPackages = mkOption {
-      default = { };
-      description = "Registered Boreal worker packages and their workflow schemas.";
-      type = types.attrsOf (
-        types.submodule {
-          options = {
-            package = mkOption {
-              type = types.package;
-              description = "Executable package running this Temporal worker.";
-            };
-
-            workflowType = mkOption {
-              type = types.str;
-              description = "Registered Temporal workflow type name.";
-            };
-
-            description = mkOption {
-              type = types.str;
-              default = "";
-              description = "Short summary shown in shell listings and completions.";
-            };
-
-            args = mkOption {
-              type = types.listOf argModule;
-              default = [ ];
-              description = "Ordered flat input arguments serialized as a JSON object.";
-            };
-          };
-        }
-      );
     };
 
     users = mkOption {
@@ -378,8 +230,22 @@ in
                 types.submodule {
                   options = {
                     package = mkOption {
-                      type = types.str;
-                      description = "Name of a worker registered in boreal.workerPackages.";
+                      type = types.package;
+                      description = "Worker executable output. The bin name is the output name, and the sibling schema output supplies schema.yaml.";
+                    };
+
+                    schedule = {
+                      enable = mkOption {
+                        type = types.bool;
+                        default = false;
+                        description = "Start boreal-schedule-<user>-<worker> with schedule.package.";
+                      };
+
+                      package = mkOption {
+                        type = types.nullOr types.package;
+                        default = null;
+                        description = "Schedule executable output. Required when enable is true. The bin name is the output name.";
+                      };
                     };
 
                     permissions = {
@@ -418,38 +284,18 @@ in
           message = "boreal.temporalAddress must not be empty.";
         }
         {
-          assertion = lib.all validName workerPackageNames;
-          message = "Every boreal.workerPackages key must match ^[a-z][a-z0-9_-]*$.";
+          assertion = lib.all (entry: schemaOf entry.cfg.package != null) workerEntries;
+          message = "Every Boreal worker package must have a schema output containing schema.yaml.";
         }
         {
-          assertion = lib.all (pkgCfg: nonEmpty pkgCfg.workflowType) workerPackageValues;
-          message = "Every boreal.workerPackages entry must declare a non-empty workflowType.";
+          assertion = !outputNameCollision;
+          message = "Worker output names must be unique across different schema outputs.";
         }
         {
           assertion = lib.all (
-            pkgCfg:
-            let
-              argNames = map (arg: arg.name) pkgCfg.args;
-            in
-            lib.all validArgName argNames && builtins.length argNames == builtins.length (lib.unique argNames)
-          ) workerPackageValues;
-          message = "Worker argument names must be unique per package and match ^[a-z][a-z0-9_]*$.";
-        }
-        {
-          assertion = lib.all (pkgCfg: validArgOrder pkgCfg.args) workerPackageValues;
-          message = "Required worker arguments (default = null) must precede optional arguments.";
-        }
-        {
-          assertion = lib.all (pkgCfg: lib.all validArgChoices pkgCfg.args) workerPackageValues;
-          message = "Enum worker arguments require unique non-empty choices; non-enum arguments must omit choices.";
-        }
-        {
-          assertion = lib.all (pkgCfg: lib.all validArgBounds pkgCfg.args) workerPackageValues;
-          message = "Worker argument min/max bounds are valid only on int/float types with min <= max.";
-        }
-        {
-          assertion = lib.all (pkgCfg: lib.all validArgDefault pkgCfg.args) workerPackageValues;
-          message = "Worker argument default values must match their declared type, choices, and min/max bounds.";
+            entry: !entry.cfg.schedule.enable || entry.cfg.schedule.package != null
+          ) workerEntries;
+          message = "boreal.users.<user>.workers.<name>.schedule.package is required when schedule.enable is true.";
         }
         {
           assertion = lib.all (user: !(builtins.elem user reservedUsers) && validName user) userNames;
@@ -462,10 +308,6 @@ in
         {
           assertion = builtins.length unitKeys == builtins.length (lib.unique unitKeys);
           message = "Boreal user-worker identifiers (<user>-<worker>) must be unique across boreal.users.";
-        }
-        {
-          assertion = lib.all (entry: builtins.hasAttr entry.cfg.package cfg.workerPackages) workerEntries;
-          message = "Every Boreal user worker package must be declared in boreal.workerPackages.";
         }
         {
           assertion = lib.all (target: builtins.hasAttr target cfg.users) referencedUsers;
@@ -518,8 +360,10 @@ in
           group = "boreal";
           mode = "0440";
         };
-        "boreal/workers.yaml" = {
-          source = yamlFormat.generate "boreal-workers.yaml" mkWorkersCatalog;
+        "boreal/schemas.yaml" = {
+          source = yamlFormat.generate "boreal-schemas.yaml" {
+            directories = map toString schemaDirs;
+          };
           user = "root";
           group = "boreal";
           mode = "0440";
@@ -596,11 +440,7 @@ in
               serviceConfig = {
                 User = entry.user;
                 NetworkNamespacePath = "/run/netns/boreal-worker-${entry.unitKey}";
-                ExecStart =
-                  if builtins.hasAttr entry.cfg.package cfg.workerPackages then
-                    lib.getExe cfg.workerPackages.${entry.cfg.package}.package
-                  else
-                    "/bin/false";
+                ExecStart = binOf entry.cfg.package;
                 Restart = "on-failure";
                 RestartSec = lib.mkDefault 2;
                 TimeoutStopSec = "infinity";
@@ -616,14 +456,14 @@ in
           lib.concatMap (
             entry:
             let
-              pkg = cfg.workerPackages.${entry.cfg.package}.package or null;
+              pkg = entry.cfg.schedule.package;
             in
-            if pkg == null || !(pkg ? scheduler) then
+            if !entry.cfg.schedule.enable || pkg == null then
               [ ]
             else
               [
                 {
-                  name = "boreal-scheduler-${entry.unitKey}";
+                  name = "boreal-schedule-${entry.unitKey}";
                   value = {
                     description = "Register Temporal schedules for ${entry.unitKey}";
                     wantedBy = [ "multi-user.target" ];
@@ -637,7 +477,7 @@ in
                       "boreal-temporal-namespaces.service"
                       "boreal-broker.service"
                     ];
-                    restartTriggers = [ pkg.scheduler ];
+                    restartTriggers = [ pkg ];
                     environment = {
                       TEMPORAL_ADDRESS = cfg.temporalAddress;
                       TEMPORAL_NAMESPACE = entry.user;
@@ -648,7 +488,7 @@ in
                       RemainAfterExit = true;
                       User = entry.user;
                       NetworkNamespacePath = "/run/netns/boreal-worker-${entry.unitKey}";
-                      ExecStart = "${pkg.scheduler}/bin/scheduler";
+                      ExecStart = binOf pkg;
                       Restart = "on-failure";
                       RestartSec = lib.mkDefault 2;
                       TimeoutStartSec = 60;
