@@ -278,6 +278,15 @@ fn project_arg(worker: &str, name: &str, raw: &Value, resolved: &Value) -> Resul
             ));
         }
     };
+    if type_name == "int"
+        && default
+            .as_ref()
+            .is_some_and(|value| value.as_i64().is_none())
+    {
+        return Err(format!(
+            "argument '{name}' on '{worker}' has a default outside the positional integer range"
+        ));
+    }
     Ok(Arg {
         name: name.to_owned(),
         type_name,
@@ -547,6 +556,21 @@ mod tests {
             render_schema(&[WorkerSchema::new::<Nested>("nested", "NestedWorkflow", "")]).unwrap();
         assert!(yaml.contains("input_schema: |-"), "{yaml}");
         assert!(yaml.contains("#/\u{24}defs/DemoInput"), "{yaml}");
+        assert!(!yaml.contains("  args:"), "{yaml}");
+    }
+
+    #[test]
+    fn test_render_schema_preserves_large_unsigned_defaults() {
+        fn default_timestamp() -> u64 {
+            u64::MAX
+        }
+        #[derive(Serialize, Deserialize, JsonSchema)]
+        struct Input {
+            #[serde(default = "default_timestamp")]
+            timestamp: u64,
+        }
+        let yaml = render_schema(&[WorkerSchema::new::<Input>("demo", "Demo", "")]).unwrap();
+        assert!(yaml.contains("18446744073709551615"), "{yaml}");
         assert!(!yaml.contains("  args:"), "{yaml}");
     }
 }
