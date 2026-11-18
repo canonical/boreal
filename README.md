@@ -40,7 +40,9 @@ deployment.
   Starship-style status prompt (`<user> on 󰇅 <host> [ <paused>  <running>] is ❄️ v<version>`
   from `temporal/Cargo.toml`, with line-2 red `󰞴` drain badge and modal `❯`/`❮`
   indicators), drives commands, live `view` TUI inspection, and
-  permission-filtered completions from `/etc/boreal/`, requires `[y/N]`
+  permission-filtered completions from `/etc/boreal/`. The private
+  `~/boreal.history` keeps up to 2,000 interactive command selectors, never
+  workflow inputs or scripted invocations. The shell requires `[y/N]`
   confirmation before `cancel`, allows non-interactive `run`, `list`, `status`,
   and `result`, and stores secrets under `~/.config/boreal/secrets` (`0700`/`0600`)
   via hidden TTY prompt or `ssh <user>@<host> "secrets set <name>" < file`.

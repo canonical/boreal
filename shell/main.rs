@@ -3,6 +3,7 @@ mod command;
 mod completion;
 mod helix;
 mod highlighter;
+mod history;
 mod menu;
 mod prompt;
 mod rc;
@@ -425,6 +426,29 @@ fn load_rc_config() -> Config {
     }
 }
 
+fn load_history() -> Box<dyn reedline::History> {
+    let uid = os::current_euid();
+    let home = if !Path::new(DEFAULT_ETC_DIR).exists()
+        && !is_ssh_session()
+        && let Ok(test_home) = env::var("BOREAL_TEST_HOME")
+    {
+        Ok(PathBuf::from(test_home))
+    } else {
+        os::user_by_uid(uid)
+            .map(|user| user.home().to_owned())
+            .map_err(|e| e.detail())
+    };
+    match home.and_then(|home| history::open(&home, uid).map_err(|e| e.to_string())) {
+        Ok(history) => history,
+        Err(e) => {
+            eprintln!(
+                "boreal-shell: warning: cannot open ~/boreal.history ({e}); using session history"
+            );
+            history::memory()
+        }
+    }
+}
+
 fn bind_completion_keys(keys: &mut Keybindings) {
     keys.add_binding(
         KeyModifiers::NONE,
@@ -493,16 +517,17 @@ fn run_interactive() -> Result<(), Box<dyn Error>> {
 
     if mode.is_mock() {
         println!("Boreal shell preview: standalone mock-only mode (/etc/boreal not present).");
-        println!("Type help for commands; history is kept in memory for this session.");
+        println!("Type help for commands.");
     } else {
         println!(
-            "Boreal lab shell ({}). Type help for commands; history is kept in memory.",
+            "Boreal lab shell ({}). Type help for commands.",
             ctx.caller()
         );
     }
 
     let (edit_mode, helix_state) = build_edit_mode(rc_cfg.edit_mode());
     let mut editor = Reedline::create()
+        .with_history(load_history())
         .with_completer(Box::new(completion::Completer::new(Arc::clone(&ctx))))
         .with_quick_completions(true)
         .with_highlighter(Box::new(highlighter::Highlighter::new(Arc::clone(&ctx))))
