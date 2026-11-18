@@ -1,4 +1,7 @@
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    lab_core::run_worker(lab_core::Workload::Count).await
+async fn main() -> lab_core::LabResult<()> {
+    let worker = std::env::args()
+        .nth(1)
+        .ok_or("usage: lab-worker-alt <worker-name>")?;
+    boreal_worker::run_worker(&worker, lab_core::count::worker_options).await
 }

@@ -1,10 +1,11 @@
 use std::time::Duration;
 
-pub use boreal_worker::{Result as LabResult, connect};
+pub use boreal_worker::{Result as LabResult, connect, task_queue};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use temporalio_macros::{activities, workflow, workflow_methods};
 use temporalio_sdk::{
-    ActivityExecutionError, ActivityOptions, TimerResult, WorkerOptions, WorkflowContext,
+    ActivityExecutionError, ActivityOptions, ApplicationFailure, TimerResult, WorkflowContext,
     WorkflowContextView, WorkflowResult, WorkflowTermination,
     activities::{ActivityContext, ActivityError},
 };
@@ -12,20 +13,44 @@ use temporalio_sdk::{
 pub const DEFAULT_WAIT_SECONDS: u64 = 20;
 pub const MAX_WAIT_SECONDS: u64 = 120 * 60;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct DemoInput {
+    /// Recipient name or input text to count
     pub name: String,
+    /// Durable timer duration in seconds
+    #[serde(default = "default_wait_seconds")]
     pub wait_seconds: u64,
 }
 
+fn default_wait_seconds() -> u64 {
+    DEFAULT_WAIT_SECONDS
+}
+
 pub fn validate_input(name: String, wait_seconds: u64) -> LabResult<DemoInput> {
-    if name.trim().is_empty() {
-        return Err("name must not be empty".into());
+    let input = DemoInput { name, wait_seconds };
+    input.validate()?;
+    Ok(input)
+}
+
+impl DemoInput {
+    fn validate(&self) -> Result<(), &'static str> {
+        if self.name.trim().is_empty() {
+            return Err("name must not be empty");
+        }
+        if !(1..=MAX_WAIT_SECONDS).contains(&self.wait_seconds) {
+            return Err("wait seconds must be between 1 and 7200");
+        }
+        Ok(())
     }
-    if !(1..=MAX_WAIT_SECONDS).contains(&wait_seconds) {
-        return Err("wait seconds must be between 1 and 7200".into());
-    }
-    Ok(DemoInput { name, wait_seconds })
+}
+
+fn validate_workflow_input(input: &DemoInput) -> Result<(), WorkflowTermination> {
+    input.validate().map_err(|message| {
+        WorkflowTermination::failed_application(ApplicationFailure::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            message,
+        )))
+    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -35,16 +60,12 @@ pub enum Workload {
 }
 
 impl Workload {
-    pub fn default_queue(self) -> &'static str {
+    pub fn worker_name(self) -> &'static str {
         match self {
-            Self::Greet => "lab",
-            Self::Count => "lab-count",
+            Self::Greet => "greet",
+            Self::Count => "count",
         }
     }
-}
-
-pub fn task_queue(workload: Workload) -> LabResult<String> {
-    boreal_worker::task_queue(workload.default_queue())
 }
 
 pub struct DemoActivities;
@@ -65,6 +86,13 @@ pub struct DemoWorkflow {
     input: DemoInput,
 }
 
+impl DemoWorkflow {
+    /// Marker for `ScheduleAction::start_workflow`. The schedule payload is passed separately.
+    pub fn scheduled(input: DemoInput) -> Self {
+        Self { input }
+    }
+}
+
 #[workflow_methods]
 impl DemoWorkflow {
     #[init]
@@ -75,6 +103,7 @@ impl DemoWorkflow {
     #[run]
     pub async fn run(ctx: &mut WorkflowContext<Self>) -> WorkflowResult<String> {
         let input = ctx.state(|state| state.input.clone());
+        validate_workflow_input(&input)?;
         // Durable Temporal timer persisted in event history.
         if ctx.timer(Duration::from_secs(input.wait_seconds)).await == TimerResult::Cancelled {
             return Err(WorkflowTermination::cancelled());
@@ -126,6 +155,7 @@ impl CountWorkflow {
     #[run]
     pub async fn run(ctx: &mut WorkflowContext<Self>) -> WorkflowResult<String> {
         let input = ctx.state(|state| state.input.clone());
+        validate_workflow_input(&input)?;
         if ctx.timer(Duration::from_secs(input.wait_seconds)).await == TimerResult::Cancelled {
             return Err(WorkflowTermination::cancelled());
         }
@@ -144,23 +174,85 @@ impl CountWorkflow {
     }
 }
 
-pub async fn run_worker(workload: Workload) -> LabResult<()> {
-    boreal_worker::run_worker(workload.default_queue(), |queue| {
-        let options = match workload {
-            Workload::Greet => WorkerOptions::new(queue)
-                .graceful_shutdown_period(boreal_worker::DEFAULT_SHUTDOWN_GRACE)
-                .register_activities(DemoActivities)
-                .register_workflow::<DemoWorkflow>()?
-                .build(),
-            Workload::Count => WorkerOptions::new(queue)
-                .graceful_shutdown_period(boreal_worker::DEFAULT_SHUTDOWN_GRACE)
-                .register_activities(CountActivities)
-                .register_workflow::<CountWorkflow>()?
-                .build(),
-        };
-        Ok(options)
-    })
-    .await
+pub async fn register_greet_schedule(worker_name: &str) -> LabResult<()> {
+    use boreal_worker::temporalio_client::schedules::{
+        CreateScheduleOptions, ScheduleAction, ScheduleError, ScheduleOverlapPolicy, ScheduleSpec,
+    };
+
+    const SCHEDULE_ID: &str = "greet-30s";
+
+    fn already_exists(err: &ScheduleError) -> bool {
+        match err {
+            ScheduleError::Rpc(status) => status.code() as i32 == 6,
+            _ => false,
+        }
+    }
+
+    let queue = task_queue(worker_name)?;
+    let client = connect().await?;
+    let spec = ScheduleSpec::from_interval(Duration::from_secs(30));
+    let input = DemoInput {
+        name: "Scheduler".into(),
+        wait_seconds: 1,
+    };
+    let action = ScheduleAction::start_workflow(
+        DemoWorkflow::scheduled(input.clone()),
+        input,
+        queue,
+        SCHEDULE_ID,
+    );
+    let opts = CreateScheduleOptions::builder()
+        .action(action.clone())
+        .spec(spec.clone())
+        .overlap_policy(ScheduleOverlapPolicy::Skip)
+        .build();
+    match client.create_schedule(SCHEDULE_ID, opts).await {
+        Ok(_) => Ok(()),
+        Err(err) if already_exists(&err) => client
+            .get_schedule_handle(SCHEDULE_ID)
+            .update(
+                move |update| {
+                    update
+                        .set_spec(spec)
+                        .set_action(action)
+                        .set_paused(false)
+                        .set_overlap_policy(ScheduleOverlapPolicy::Skip)
+                        .set_catchup_window(Duration::from_secs(60));
+                },
+                Default::default(),
+            )
+            .await
+            .map_err(Into::into),
+        Err(err) => Err(err.into()),
+    }
+}
+
+pub mod greet {
+    use super::{DemoActivities, DemoWorkflow};
+
+    boreal_worker::declare_worker! {
+        package = "lab-worker",
+        workflows = {
+            export greet: DemoWorkflow => "Schedule a durable timer and greet the named recipient",
+        },
+        configure = |opts| opts
+            .graceful_shutdown_period(boreal_worker::DEFAULT_SHUTDOWN_GRACE)
+            .register_activities(DemoActivities),
+    }
+}
+
+pub mod count {
+    use super::{CountActivities, CountWorkflow};
+
+    boreal_worker::declare_worker! {
+        package = "lab-worker-alt",
+        workflows = {
+            export count: CountWorkflow => "Schedule a durable timer and count Unicode scalar values",
+        },
+        configure = |opts| opts
+            .graceful_shutdown_period(boreal_worker::DEFAULT_SHUTDOWN_GRACE)
+            .register_activities(CountActivities),
+    }
 }
 
 #[cfg(test)]
@@ -177,16 +269,6 @@ mod tests {
                 .unwrap()
                 .wait_seconds,
             7200
-        );
-    }
-
-    #[test]
-    fn test_workloads_use_distinct_default_queues() {
-        assert_eq!(Workload::Greet.default_queue(), "lab");
-        assert_eq!(Workload::Count.default_queue(), "lab-count");
-        assert_ne!(
-            Workload::Greet.default_queue(),
-            Workload::Count.default_queue()
         );
     }
 

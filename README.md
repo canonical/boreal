@@ -2,10 +2,10 @@
 
 Reference downstream lab consuming `github:canonical/boreal`. This orphan
 branch (`downstreams/demo-lab`) lives in gitignored `downstreams/demo-lab`
-inside a Boreal checkout (or standalone with
-`--override-input boreal <url> --no-write-lock-file`; ensure committed
-`flake.lock` files resolve remote URLs rather than local `file://` overrides
-before staging updates with `boreal-updater`).
+inside a Boreal checkout. The current lock points to an older local Boreal
+revision, so use the override below to get `declare_worker!` and the worker-name
+argument. Before deploying from another machine, refresh the lock against a
+remote Boreal revision that includes those changes.
 
 Note: `downstreams/demo-lab` shares a disposable demo SSH public key across
 `alice`, `bob`, and `admin` for local VM testing; replace those keys with
@@ -34,9 +34,10 @@ ssh -p 2222 alice@127.0.0.1
 # Inside boreal-shell:
 workers
 permissions
-start greet alice-run-1 'Alice Smith' 5
+run greet alice-run-1 'Alice Smith' 5
 status alice-run-1
 result alice-run-1
+run count alice-run-2 'Élan' 1
 secrets set api_token
 secrets list
 exit

@@ -9,6 +9,11 @@ license.workspace = true
 name = "lab-worker-alt"
 path = "main.rs"
 
+[[bin]]
+name = "schema"
+path = "schema.rs"
+
 [dependencies]
+boreal-worker.workspace = true
 lab-core = { path = "../lab-core" }
 tokio.workspace = true

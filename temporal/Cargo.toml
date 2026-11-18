@@ -9,8 +9,9 @@ rust-version = "1.92"
 license = "MIT"
 
 [workspace.dependencies]
-boreal-worker = { path = "../.boreal/boreal-worker" }
+boreal-worker = { path = "../.boreal/boreal-worker", features = ["schema"] }
 futures = "0.3"
+schemars = "1"
 serde = { version = "1", features = ["derive"] }
 temporalio-client = "~1.2.0"
 temporalio-common = "~1.2.0"

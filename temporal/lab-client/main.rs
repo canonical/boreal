@@ -65,7 +65,8 @@ async fn main() -> lab_core::LabResult<()> {
             id,
             input,
         } => {
-            let options = WorkflowStartOptions::new(task_queue(workload)?, id).build();
+            let options =
+                WorkflowStartOptions::new(task_queue(workload.worker_name())?, id).build();
             match workload {
                 Workload::Greet => {
                     let handle = client

@@ -9,6 +9,15 @@ license.workspace = true
 name = "lab-worker"
 path = "main.rs"
 
+[[bin]]
+name = "schema"
+path = "schema.rs"
+
+[[bin]]
+name = "scheduler"
+path = "scheduler.rs"
+
 [dependencies]
+boreal-worker.workspace = true
 lab-core = { path = "../lab-core" }
 tokio.workspace = true
