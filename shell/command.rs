@@ -47,7 +47,52 @@ pub enum Action {
         user: String,
     },
     Secrets(SecretAction),
+    Prompt(Missing),
     Exit,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Missing {
+    Run(Launch),
+    Target {
+        kind: Target,
+        owner: Option<String>,
+        id: Option<String>,
+    },
+    Permissions,
+    Secret {
+        remove: bool,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Launch {
+    pub owner: Option<String>,
+    pub worker: Option<String>,
+    pub workflow: Option<String>,
+    pub id: Option<String>,
+    pub input: RunInput,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Target {
+    List,
+    Status,
+    Result,
+    View,
+    Cancel,
+}
+
+impl Target {
+    pub fn action(self, owner: String, id: Option<String>) -> Option<Action> {
+        Some(match self {
+            Self::List => Action::List { owner },
+            Self::Status => Action::Status { owner, id: id? },
+            Self::Result => Action::Result { owner, id: id? },
+            Self::View => Action::View { owner, id: id? },
+            Self::Cancel => Action::Cancel { owner, id: id? },
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -75,6 +120,20 @@ impl Context {
 
     pub fn caller(&self) -> &str {
         &self.caller
+    }
+
+    pub fn run_package(&self, owner: &str, worker: &str) -> Result<&catalog::Package, String> {
+        let (_, package) = self
+            .catalog
+            .worker_and_package(owner, worker)
+            .map_err(|e| e.detail())?;
+        if !self.catalog.can_write(&self.caller, owner, worker) {
+            return Err(format!(
+                "permission denied: '{}' cannot run '{owner}/{worker}'",
+                self.caller
+            ));
+        }
+        Ok(package)
     }
 
     pub fn cli(&self, run_owner_hint: Option<&str>) -> Command {
@@ -117,7 +176,6 @@ impl Context {
             .collect();
 
         let worker_arg = Arg::new("worker")
-            .required(true)
             .help("Registered worker name")
             .value_parser(PossibleValuesParser::new(worker_values));
 
@@ -161,22 +219,22 @@ impl Context {
 
         let status_cmd = Command::new("status")
             .about("Describe a workflow")
-            .arg(Arg::new("id").required(true).help("Workflow ID"))
+            .arg(Arg::new("id").help("Workflow ID"))
             .arg(owner_arg(&readable, &self.caller));
 
         let result_cmd = Command::new("result")
             .about("Show a workflow result")
-            .arg(Arg::new("id").required(true).help("Workflow ID"))
+            .arg(Arg::new("id").help("Workflow ID"))
             .arg(owner_arg(&readable, &self.caller));
 
         let view_cmd = Command::new("view")
             .about("Inspect a workflow run in a live TUI")
-            .arg(Arg::new("id").required(true).help("Workflow ID"))
+            .arg(Arg::new("id").help("Workflow ID"))
             .arg(owner_arg(&readable, &self.caller));
 
         let cancel_cmd = Command::new("cancel")
             .about("Cancel a workflow")
-            .arg(Arg::new("id").required(true).help("Workflow ID"))
+            .arg(Arg::new("id").help("Workflow ID"))
             .arg(owner_arg(&writable, &self.caller));
 
         let mut perm_arg = Arg::new("user")
@@ -189,8 +247,6 @@ impl Context {
             ));
         if perm_users.contains(&self.caller.as_str()) {
             perm_arg = perm_arg.default_value(self.caller.clone());
-        } else {
-            perm_arg = perm_arg.required(true);
         }
         let perms_cmd = Command::new("permissions")
             .about("Show a user's permissions")
@@ -203,17 +259,24 @@ impl Context {
             .subcommand(
                 Command::new("set")
                     .about("Prompt for a secret without echo (or read from SSH stdin)")
-                    .arg(Arg::new("name").required(true).help("Secret file name")),
+                    .arg(Arg::new("name").help("Secret file name")),
             )
             .subcommand(
                 Command::new("remove")
                     .about("Delete a secret after confirmation")
-                    .arg(Arg::new("name").required(true).help("Secret file name")),
+                    .arg(Arg::new("name").help("Secret file name")),
             );
 
         Command::new("boreal")
             .about("Boreal lab shell")
             .subcommand_required(true)
+            .arg(
+                Arg::new("no-ask")
+                    .long("no-ask")
+                    .global(true)
+                    .action(ArgAction::SetTrue)
+                    .help("Fail instead of prompting for missing values"),
+            )
             .subcommand(Command::new("workers").about("List available workers"))
             .subcommand(run_cmd)
             .subcommand(list_cmd)
@@ -226,12 +289,22 @@ impl Context {
             .subcommand(Command::new("exit").about("Exit the shell"))
     }
 
+    #[cfg(test)]
     pub fn parse(&self, line: &str) -> Result<Option<Action>, Error> {
         let words = shlex::split(line).ok_or(Error::Quote)?;
         self.parse_words(&words)
     }
 
+    pub fn parse_interactive(&self, line: &str) -> Result<Option<Action>, Error> {
+        let words = shlex::split(line).ok_or(Error::Quote)?;
+        self.parse_mode(&words, true)
+    }
+
     pub fn parse_words(&self, words: &[String]) -> Result<Option<Action>, Error> {
+        self.parse_mode(words, false)
+    }
+
+    fn parse_mode(&self, words: &[String], interactive: bool) -> Result<Option<Action>, Error> {
         if words.is_empty() {
             return Ok(None);
         }
@@ -241,16 +314,17 @@ impl Context {
                 std::iter::once("boreal").chain(words.iter().map(String::as_str)),
             )
             .map_err(Error::Clap)?;
+        let ask = interactive && !matches.get_flag("no-ask");
 
         let action = match matches.subcommand() {
             Some(("workers", _)) => Action::Workers,
             Some(("run", sub)) => {
-                let worker = sub.get_one::<String>("worker").unwrap().clone();
+                let worker = sub.get_one::<String>("worker").cloned();
                 let workflow = sub.get_one::<String>("workflow").cloned();
                 let flag_id = sub.get_one::<String>("id");
                 let positional = sub.get_one::<String>("legacy-id");
-                let id = flag_id.or(positional).cloned().unwrap_or_else(new_id);
-                let owner = sub.get_one::<String>("owner").unwrap().clone();
+                let id = flag_id.or(positional).cloned();
+                let owner = sub.get_one::<String>("owner").cloned();
                 let mut args: Vec<String> = sub
                     .get_many::<String>("args")
                     .map_or_else(Vec::new, |vals| vals.cloned().collect());
@@ -270,103 +344,72 @@ impl Context {
                     None => RunInput::Positional(args),
                 };
 
-                if let Err(e) = catalog::validate_workflow_id(&id) {
-                    return Err(Error::Clap(
-                        cmd.error(ErrorKind::ValueValidation, e.detail()),
-                    ));
-                }
-                let Ok((w, pkg)) = self.catalog.worker_and_package(&owner, &worker) else {
-                    return Err(Error::Clap(cmd.error(
-                        ErrorKind::InvalidValue,
-                        format!("owner '{owner}' has no worker named '{worker}'"),
-                    )));
+                self.prepare_run(
+                    Launch {
+                        owner,
+                        worker,
+                        workflow,
+                        id,
+                        input,
+                    },
+                    ask,
+                )
+                .map_err(|e| Error::Clap(cmd.error(ErrorKind::ValueValidation, e)))?
+            }
+            Some((name @ ("list" | "status" | "result" | "view" | "cancel"), sub)) => {
+                let kind = match name {
+                    "list" => Target::List,
+                    "status" => Target::Status,
+                    "result" => Target::Result,
+                    "view" => Target::View,
+                    _ => Target::Cancel,
                 };
-                if !self.catalog.can_write(&self.caller, &owner, w.name()) {
+                let owner = sub.get_one::<String>("owner").cloned();
+                let id = sub.try_get_one::<String>("id").ok().flatten().cloned();
+                if let Some(id) = &id {
+                    validate_id_or_clap(&mut cmd, id)?;
+                }
+                if let Some(action) = owner
+                    .clone()
+                    .and_then(|owner| kind.action(owner, id.clone()))
+                {
+                    action
+                } else if ask {
+                    Action::Prompt(Missing::Target { kind, owner, id })
+                } else {
                     return Err(Error::Clap(cmd.error(
-                        ErrorKind::InvalidValue,
-                        format!(
-                            "permission denied: '{}' cannot run '{owner}/{worker}'",
-                            self.caller
-                        ),
+                        ErrorKind::ValueValidation,
+                        if owner.is_none() {
+                            "specify --owner"
+                        } else {
+                            "specify a workflow ID"
+                        },
                     )));
                 }
-                if let Err(e) = pkg
-                    .select(workflow.as_deref())
-                    .and_then(|workflow| match &input {
-                        RunInput::Positional(args) => workflow.validate_and_encode(args),
-                        RunInput::Json(raw) if raw == "-" => Ok(String::new()),
-                        RunInput::Json(raw) => workflow.validate_json(raw),
-                    })
-                {
+            }
+            Some(("permissions", sub)) => match sub.get_one::<String>("user").cloned() {
+                Some(user) => Action::Permissions { user },
+                None if ask => Action::Prompt(Missing::Permissions),
+                None => {
                     return Err(Error::Clap(
-                        cmd.error(ErrorKind::ValueValidation, e.detail()),
+                        cmd.error(ErrorKind::ValueValidation, "specify an account"),
                     ));
                 }
-                Action::Run {
-                    worker,
-                    workflow,
-                    id,
-                    input,
-                    owner,
-                }
-            }
-            Some(("list", sub)) => Action::List {
-                owner: sub.get_one::<String>("owner").unwrap().clone(),
-            },
-            Some(("status", sub)) => {
-                let id = sub.get_one::<String>("id").unwrap().clone();
-                validate_id_or_clap(&mut cmd, &id)?;
-                Action::Status {
-                    id,
-                    owner: sub.get_one::<String>("owner").unwrap().clone(),
-                }
-            }
-            Some(("result", sub)) => {
-                let id = sub.get_one::<String>("id").unwrap().clone();
-                validate_id_or_clap(&mut cmd, &id)?;
-                Action::Result {
-                    id,
-                    owner: sub.get_one::<String>("owner").unwrap().clone(),
-                }
-            }
-            Some(("view", sub)) => {
-                let id = sub.get_one::<String>("id").unwrap().clone();
-                validate_id_or_clap(&mut cmd, &id)?;
-                Action::View {
-                    id,
-                    owner: sub.get_one::<String>("owner").unwrap().clone(),
-                }
-            }
-            Some(("cancel", sub)) => {
-                let id = sub.get_one::<String>("id").unwrap().clone();
-                validate_id_or_clap(&mut cmd, &id)?;
-                Action::Cancel {
-                    id,
-                    owner: sub.get_one::<String>("owner").unwrap().clone(),
-                }
-            }
-            Some(("permissions", sub)) => Action::Permissions {
-                user: sub.get_one::<String>("user").unwrap().clone(),
             },
             Some(("secrets", sub)) => match sub.subcommand() {
                 Some(("list", _)) => Action::Secrets(SecretAction::List),
-                Some(("set", s)) => {
-                    let name = s.get_one::<String>("name").unwrap().clone();
-                    if let Err(e) = secret::validate_name(&name) {
-                        return Err(Error::Clap(
-                            cmd.error(ErrorKind::ValueValidation, e.detail()),
-                        ));
+                Some((verb @ ("set" | "remove"), s)) => {
+                    let remove = verb == "remove";
+                    match s.get_one::<String>("name").cloned() {
+                        Some(name) => named_secret(name, remove)
+                            .map_err(|e| Error::Clap(cmd.error(ErrorKind::ValueValidation, e)))?,
+                        None if ask => Action::Prompt(Missing::Secret { remove }),
+                        None => {
+                            return Err(Error::Clap(
+                                cmd.error(ErrorKind::ValueValidation, "specify a secret name"),
+                            ));
+                        }
                     }
-                    Action::Secrets(SecretAction::Set { name })
-                }
-                Some(("remove", s)) => {
-                    let name = s.get_one::<String>("name").unwrap().clone();
-                    if let Err(e) = secret::validate_name(&name) {
-                        return Err(Error::Clap(
-                            cmd.error(ErrorKind::ValueValidation, e.detail()),
-                        ));
-                    }
-                    Action::Secrets(SecretAction::Remove { name })
                 }
                 _ => unreachable!(),
             },
@@ -375,10 +418,67 @@ impl Context {
         };
         Ok(Some(action))
     }
+
+    pub fn prepare_run(&self, launch: Launch, ask: bool) -> Result<Action, String> {
+        if let Some(id) = &launch.id {
+            catalog::validate_workflow_id(id).map_err(|e| e.detail())?;
+        }
+        let (Some(owner), Some(worker)) = (&launch.owner, &launch.worker) else {
+            return if ask {
+                Ok(Action::Prompt(Missing::Run(launch)))
+            } else {
+                Err(if launch.owner.is_none() {
+                    "specify --owner"
+                } else {
+                    "specify a worker"
+                }
+                .into())
+            };
+        };
+        let package = self.run_package(owner, worker)?;
+        if launch.workflow.is_none() && package.only_workflow().is_none() && ask {
+            return Ok(Action::Prompt(Missing::Run(launch)));
+        }
+        let workflow = package
+            .select(launch.workflow.as_deref())
+            .map_err(|e| e.detail())?;
+        match &launch.input {
+            RunInput::Positional(args) => {
+                if ask
+                    && (!workflow.accepts_positionals() && args.is_empty()
+                        || args.len() < workflow.required_count()
+                        || launch.id.is_none() && args.is_empty() && !workflow.args().is_empty())
+                {
+                    return Ok(Action::Prompt(Missing::Run(launch)));
+                }
+                workflow.validate_and_encode(args).map_err(|e| e.detail())?;
+            }
+            RunInput::Json(raw) if raw != "-" => {
+                workflow.validate_json(raw).map_err(|e| e.detail())?;
+            }
+            RunInput::Json(_) => {}
+        }
+        Ok(Action::Run {
+            owner: owner.to_owned(),
+            worker: worker.to_owned(),
+            workflow: launch.workflow,
+            id: launch.id.unwrap_or_else(new_id),
+            input: launch.input,
+        })
+    }
 }
 
 pub fn new_id() -> String {
     uuid::Uuid::new_v4().to_string()
+}
+
+pub fn named_secret(name: String, remove: bool) -> Result<Action, String> {
+    secret::validate_name(&name).map_err(|e| e.detail())?;
+    Ok(Action::Secrets(if remove {
+        SecretAction::Remove { name }
+    } else {
+        SecretAction::Set { name }
+    }))
 }
 
 fn owner_arg(allowed: &[&str], caller: &str) -> Arg {
@@ -393,8 +493,6 @@ fn owner_arg(allowed: &[&str], caller: &str) -> Arg {
         .value_parser(PossibleValuesParser::new(values));
     if allowed.contains(&caller) {
         arg = arg.default_value(caller.to_owned());
-    } else {
-        arg = arg.required(true);
     }
     arg
 }
@@ -412,6 +510,26 @@ pub enum Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_missing_values_prompt_only_in_interactive_mode() {
+        let ctx = Context::mock();
+        let incomplete = ["run", "run greet", "status", "cancel", "secrets set"];
+        for line in incomplete {
+            assert!(
+                matches!(ctx.parse_interactive(line), Ok(Some(Action::Prompt(_)))),
+                "{line}"
+            );
+            assert!(ctx.parse(line).is_err(), "{line}");
+        }
+        assert!(ctx.parse_interactive("run greet --no-ask").is_err());
+        assert!(
+            matches!(ctx.parse_interactive("run greet --id job Alice 5"), Ok(Some(Action::Run { id, .. })) if id == "job")
+        );
+        assert!(
+            matches!(ctx.parse(r#"run greet --input-json '{"name":"Alice"}'"#), Ok(Some(Action::Run { id, input: RunInput::Json(_), .. })) if uuid::Uuid::parse_str(&id).is_ok())
+        );
+    }
 
     #[test]
     fn test_parses_dynamic_commands_and_filters_by_permission() {

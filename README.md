@@ -58,6 +58,32 @@ deployment.
 
 See [architecture](docs/architecture.md) and [updater](updater/README.md).
 
+## Run a workflow
+
+In the interactive lab shell, `run greet` opens a form for missing input.
+Press Enter to accept a dimmed default, use Left/Right to choose an enum
+variant, and press Esc to edit a previous answer. Ctrl+C abandons the form;
+nothing starts until you confirm the summary. Field help comes from the Rust
+input type's doc comments. If the form cannot represent an input shape, use
+`--input-json` instead.
+
+A complete invocation such as `run greet --id greet-1 Alice 5` starts directly.
+Use `--no-ask` to reject missing values rather than opening a form. For a worker
+with multiple exports, select an alias with `--workflow` or choose it in the
+form. If `--id` is omitted, Boreal generates a workflow ID.
+
+For scripts, use a non-interactive SSH command. It never prompts:
+
+```sh
+ssh -T alice@lab-infra.local \
+  'run greet --id greet-1 --input-json -' < input.json
+```
+
+`--input-json -` reads JSON from stdin. Supplying an inline JSON argument also
+works if the remote command preserves its quoting. JSON and positional inputs
+cannot be combined. Success is printed on stdout; errors go to stderr with a
+nonzero exit status. Don't put secrets in workflow inputs.
+
 ## Framework development
 
 ```sh

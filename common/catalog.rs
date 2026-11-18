@@ -302,6 +302,21 @@ impl Workflow {
         &self.input
     }
 
+    pub fn positional_prefix(&self, raw: &[String]) -> Result<input::Value, Error> {
+        if raw.len() > self.args.len() {
+            return Err(Error::InvalidArgument(
+                "too many positional workflow inputs".into(),
+            ));
+        }
+        let fields = self
+            .args
+            .iter()
+            .zip(raw)
+            .map(|(arg, raw)| Ok((arg.name.clone(), arg.parse_input(raw)?.value())))
+            .collect::<Result<input::Map<_, _>, Error>>()?;
+        Ok(input::Value::Object(fields))
+    }
+
     pub fn required_count(&self) -> usize {
         self.args.iter().filter(|a| a.is_required()).count()
     }

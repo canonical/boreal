@@ -104,6 +104,7 @@ fn canonical(line: &str) -> Option<String> {
             .split_once('=')
             .map_or((word, None), |(flag, value)| (flag, Some(value)));
         match flag {
+            "--no-ask" if attached.is_none() => {}
             "--owner" if owner.is_none() => owner = Some(name(attached.or_else(|| args.next())?)?),
             "--workflow" if run && workflow.is_none() => {
                 workflow = Some(name(attached.or_else(|| args.next())?)?);
@@ -142,8 +143,10 @@ fn canonical(line: &str) -> Option<String> {
 
     let mut entry = cmd.to_owned();
     if run {
-        entry.push(' ');
-        entry.push_str(worker?);
+        if let Some(worker) = worker {
+            entry.push(' ');
+            entry.push_str(worker);
+        }
         if let Some(id) = id {
             entry.push_str(" --id ");
             entry.push_str(id);
@@ -152,9 +155,9 @@ fn canonical(line: &str) -> Option<String> {
             entry.push_str(" --workflow ");
             entry.push_str(workflow);
         }
-    } else if required_id {
+    } else if required_id && let Some(id) = id {
         entry.push(' ');
-        entry.push_str(id?);
+        entry.push_str(id);
     }
     if let Some(owner) = owner {
         entry.push_str(" --owner ");
@@ -397,6 +400,8 @@ mod tests {
     #[test]
     fn history_keeps_only_selectors() {
         let cases = [
+            ("run", Some("run")),
+            ("status", Some("status")),
             (
                 "run greet first private-value --workflow greeting --owner bob",
                 Some("run greet --id first --workflow greeting --owner bob"),

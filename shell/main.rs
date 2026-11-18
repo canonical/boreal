@@ -1,6 +1,7 @@
 mod client;
 mod command;
 mod completion;
+mod form;
 mod helix;
 mod highlighter;
 mod history;
@@ -17,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use boreal_common::catalog::{Catalog, DEFAULT_ETC_DIR};
+use boreal_common::catalog::{self, Catalog, DEFAULT_ETC_DIR};
 use boreal_common::input;
 use boreal_common::os;
 use boreal_common::secret::{self, MAX_SECRET_BYTES, Store};
@@ -31,7 +32,7 @@ use reedline::{
 };
 
 use crate::client::Mode;
-use crate::command::{Action, Context, SecretAction};
+use crate::command::{Action, Context, Launch, Missing, SecretAction, Target};
 use crate::helix::Helix;
 use crate::prompt::Prompt;
 use crate::rc::Config;
@@ -300,6 +301,7 @@ fn handle_secret_action(action: SecretAction) -> Result<(), String> {
 fn execute_action(action: Action, mode: &Mode, interactive: bool) -> Result<bool, String> {
     match action {
         Action::Exit => Ok(true),
+        Action::Prompt(_) => Err("unresolved interactive prompt".into()),
         Action::Secrets(sec) => handle_secret_action(sec).map(|()| true),
         Action::Workers => {
             let resp = mode.send(&Request::Workers)?;
@@ -392,6 +394,140 @@ fn execute_action(action: Action, mode: &Mode, interactive: bool) -> Result<bool
             })?;
             Ok(client::print_response(resp, mode.is_mock()))
         }
+    }
+}
+
+fn choose_account(ctx: &Context, writable: bool) -> Result<Option<String>, String> {
+    let accounts = if writable {
+        ctx.catalog().writable_owners(ctx.caller())
+    } else {
+        ctx.catalog().readable_owners(ctx.caller())
+    };
+    form::choose(
+        "--owner",
+        &accounts.into_iter().map(str::to_owned).collect::<Vec<_>>(),
+    )
+}
+
+fn complete_launch(mut launch: Launch, ctx: &Context) -> Result<Option<Action>, String> {
+    let owner = match launch.owner.as_ref() {
+        Some(owner) => owner.clone(),
+        None => match choose_account(ctx, true)? {
+            Some(owner) => owner,
+            None => return Ok(None),
+        },
+    };
+    let worker = match launch.worker.as_ref() {
+        Some(worker) => worker.clone(),
+        None => {
+            let policy = ctx.catalog().require_user(&owner).map_err(|e| e.detail())?;
+            let names: Vec<_> = policy
+                .workers()
+                .keys()
+                .filter(|worker| ctx.catalog().can_write(ctx.caller(), &owner, worker))
+                .cloned()
+                .collect();
+            let Some(worker) = form::choose("Worker", &names)? else {
+                return Ok(None);
+            };
+            worker
+        }
+    };
+    let package = ctx.run_package(&owner, &worker)?;
+    if launch.workflow.is_none() && package.only_workflow().is_none() {
+        let names: Vec<_> = package
+            .workflows()
+            .map(|(alias, _)| alias.to_owned())
+            .collect();
+        let Some(alias) = form::choose("--workflow", &names)? else {
+            return Ok(None);
+        };
+        launch.workflow = Some(alias);
+    }
+    let workflow = package
+        .select(launch.workflow.as_deref())
+        .map_err(|e| e.detail())?;
+    launch.owner = Some(owner);
+    launch.worker = Some(worker);
+    if let RunInput::Positional(args) = &launch.input {
+        let initial = workflow.positional_prefix(args).map_err(|e| e.detail())?;
+        let default_id = launch
+            .id
+            .as_ref()
+            .map_or_else(command::new_id, Clone::clone);
+        let Some((id, raw)) = form::run(launch.id, default_id, workflow.input_schema(), initial)?
+        else {
+            return Ok(None);
+        };
+        launch.id = Some(id);
+        launch.input = RunInput::Json(raw);
+    }
+    ctx.prepare_run(launch, false).map(Some)
+}
+
+fn choose_workflow_id(
+    ctx: &Context,
+    mode: &Mode,
+    owner: &str,
+    kind: Target,
+) -> Result<Option<String>, String> {
+    if ctx.catalog().has_any_read(ctx.caller(), owner)
+        && let Response::List(entries) = mode.send(&Request::List {
+            owner: owner.to_owned(),
+        })?
+    {
+        let mut ids: Vec<_> = entries
+            .into_iter()
+            .filter(|entry| {
+                kind != Target::Cancel
+                    || ctx.catalog().can_write(ctx.caller(), owner, &entry.worker)
+            })
+            .map(|entry| entry.workflow_id)
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        if !ids.is_empty() {
+            return form::choose("Workflow ID", &ids);
+        }
+    }
+    form::text("Workflow ID")
+}
+
+fn complete_action(action: Action, ctx: &Context, mode: &Mode) -> Result<Option<Action>, String> {
+    match action {
+        Action::Prompt(Missing::Run(launch)) => complete_launch(launch, ctx),
+        Action::Prompt(Missing::Target { kind, owner, id }) => {
+            let owner = match owner {
+                Some(owner) => owner,
+                None => match choose_account(ctx, kind == Target::Cancel)? {
+                    Some(owner) => owner,
+                    None => return Ok(None),
+                },
+            };
+            let id = if kind == Target::List || id.is_some() {
+                id
+            } else {
+                let Some(id) = choose_workflow_id(ctx, mode, &owner, kind)? else {
+                    return Ok(None);
+                };
+                catalog::validate_workflow_id(&id).map_err(|e| e.detail())?;
+                Some(id)
+            };
+            Ok(kind.action(owner, id))
+        }
+        Action::Prompt(Missing::Permissions) => {
+            let names: Vec<_> = ctx
+                .catalog()
+                .visible_permission_users(ctx.caller())
+                .into_iter()
+                .map(str::to_owned)
+                .collect();
+            Ok(form::choose("Account", &names)?.map(|user| Action::Permissions { user }))
+        }
+        Action::Prompt(Missing::Secret { remove }) => form::text("Secret name")?
+            .map(|name| command::named_secret(name, remove))
+            .transpose(),
+        other => Ok(Some(other)),
     }
 }
 
@@ -550,30 +686,43 @@ fn run_interactive() -> Result<(), Box<dyn Error>> {
     );
     let _title_guard = prompt::TitleGuard::enter(prompt.window_title());
     let mut last_ok = true;
+    let mut warned_history = false;
 
     loop {
         println!();
         prompt.refresh(mode.prompt_summary(), last_ok);
         match editor.read_line(&prompt)? {
-            Signal::Success(line) => match ctx.parse(&line) {
-                Ok(Some(Action::Exit)) => break,
-                Ok(Some(action)) => match execute_action(action, &mode, true) {
-                    Ok(ok) => last_ok = ok,
-                    Err(err) => {
-                        eprintln!("error: {err}");
+            Signal::Success(line) => {
+                if let Err(e) = editor.sync_history()
+                    && !warned_history
+                {
+                    eprintln!("boreal-shell: warning: could not sync ~/boreal.history ({e})");
+                    warned_history = true;
+                }
+                match ctx.parse_interactive(&line) {
+                    Ok(Some(Action::Exit)) => break,
+                    Ok(Some(action)) => {
+                        match complete_action(action, &ctx, &mode).and_then(|action| {
+                            action.map_or(Ok(true), |action| execute_action(action, &mode, true))
+                        }) {
+                            Ok(ok) => last_ok = ok,
+                            Err(err) => {
+                                eprintln!("error: {err}");
+                                last_ok = false;
+                            }
+                        }
+                    }
+                    Ok(None) => last_ok = true,
+                    Err(command::Error::Quote) => {
+                        eprintln!("error: unfinished quote or escape");
                         last_ok = false;
                     }
-                },
-                Ok(None) => last_ok = true,
-                Err(command::Error::Quote) => {
-                    eprintln!("error: unfinished quote or escape");
-                    last_ok = false;
+                    Err(command::Error::Clap(error)) => {
+                        last_ok = !error.use_stderr();
+                        error.print()?;
+                    }
                 }
-                Err(command::Error::Clap(error)) => {
-                    last_ok = !error.use_stderr();
-                    error.print()?;
-                }
-            },
+            }
             Signal::CtrlC => continue,
             Signal::CtrlD | Signal::ExternalBreak(_) => break,
             _ => continue,
