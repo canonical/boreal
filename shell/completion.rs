@@ -25,6 +25,8 @@ impl Completer {
             return Vec::new();
         }
         let mut owner = self.ctx.caller().to_owned();
+        let mut workflow = None;
+        let mut completing_workflow = false;
         let mut positionals = Vec::new();
         let mut idx = 1usize;
         while idx < previous.len() {
@@ -42,6 +44,20 @@ impl Completer {
                 idx += 1;
                 continue;
             }
+            if tok == "--workflow" {
+                let Some(val) = previous.get(idx + 1) else {
+                    completing_workflow = true;
+                    break;
+                };
+                workflow = Some(val.as_str());
+                idx += 2;
+                continue;
+            }
+            if let Some(val) = tok.strip_prefix("--workflow=") {
+                workflow = Some(val);
+                idx += 1;
+                continue;
+            }
             if tok.starts_with('-') {
                 idx += 1;
                 continue;
@@ -50,11 +66,9 @@ impl Completer {
             idx += 1;
         }
         // positionals[0] = worker, positionals[1] = workflow_id, positionals[2..] = schema args
-        if positionals.len() < 2 {
+        let Some(worker) = positionals.first().copied() else {
             return Vec::new();
-        }
-        let worker = positionals[0];
-        let arg_index = positionals.len() - 2;
+        };
         let Ok((w, pkg)) = self.ctx.catalog().worker_and_package(&owner, worker) else {
             return Vec::new();
         };
@@ -65,7 +79,23 @@ impl Completer {
         {
             return Vec::new();
         }
-        let Some(spec) = pkg.args().get(arg_index) else {
+        if completing_workflow {
+            return pkg
+                .workflows()
+                .map(|(alias, workflow)| {
+                    (
+                        alias.to_owned(),
+                        (!workflow.description().is_empty())
+                            .then(|| workflow.description().to_owned()),
+                    )
+                })
+                .collect();
+        }
+        let Some(spec) = positionals
+            .len()
+            .checked_sub(2)
+            .and_then(|index| pkg.select(workflow).ok()?.args().get(index))
+        else {
             return Vec::new();
         };
         let desc = if spec.description().is_empty() {

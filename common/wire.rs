@@ -45,6 +45,7 @@ pub enum Request {
     Run {
         owner: String,
         worker: String,
+        workflow: Option<String>,
         id: String,
         args: Vec<String>,
     },
@@ -470,13 +471,17 @@ impl Request {
             Self::Run {
                 owner,
                 worker,
+                workflow,
                 id,
                 args,
             } => {
-                enc.u8(2);
+                enc.u8(if workflow.is_some() { 11 } else { 2 });
                 enc.str(owner);
                 enc.str(worker);
                 enc.str(id);
+                if let Some(alias) = workflow {
+                    enc.str(alias);
+                }
                 enc.u32(args.len() as u32);
                 for arg in args {
                     enc.str(arg);
@@ -525,10 +530,11 @@ impl Request {
         let mut dec = Decoder::new(bytes);
         let req = match dec.u8()? {
             1 => Self::Workers,
-            2 => {
+            tag @ (2 | 11) => {
                 let owner = dec.str()?;
                 let worker = dec.str()?;
                 let id = dec.str()?;
+                let workflow = if tag == 11 { Some(dec.str()?) } else { None };
                 let count = dec.u32()? as usize;
                 if count > 256 {
                     return Err(Error::Decode("too many workflow arguments"));
@@ -540,6 +546,7 @@ impl Request {
                 Self::Run {
                     owner,
                     worker,
+                    workflow,
                     id,
                     args,
                 }
@@ -1107,8 +1114,16 @@ mod tests {
             Request::Run {
                 owner: "alice".into(),
                 worker: "greet".into(),
+                workflow: None,
                 id: "run-1".into(),
                 args: vec!["Élan".into(), "5".into()],
+            },
+            Request::Run {
+                owner: "alice".into(),
+                worker: "tools".into(),
+                workflow: Some("count".into()),
+                id: "run-2".into(),
+                args: vec!["Élan".into()],
             },
             Request::Cancel {
                 owner: "alice".into(),

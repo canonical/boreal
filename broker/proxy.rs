@@ -660,7 +660,9 @@ fn authorize_schedule_action(
         .as_ref()
         .map(|ty| ty.name.as_str())
         .unwrap_or("");
-    if workflow_type != pkg.workflow_type() || !catalog.can_write(caller, namespace, worker) {
+    if pkg.workflow_by_type(workflow_type).is_none()
+        || !catalog.can_write(caller, namespace, worker)
+    {
         return Err(schedule_denied());
     }
     Ok(())
@@ -969,7 +971,7 @@ async fn authorize_describe_schedule(
         .as_ref()
         .map(|ty| ty.name.as_str())
         .unwrap_or("");
-    if workflow_type != pkg.workflow_type()
+    if pkg.workflow_by_type(workflow_type).is_none()
         || !catalog.can_read(&binding.owner, &req.namespace, worker)
     {
         return Err(schedule_denied());
@@ -1007,7 +1009,9 @@ fn authorize_start(
         .as_ref()
         .map(|ty| ty.name.as_str())
         .unwrap_or("");
-    if workflow_type != pkg.workflow_type() || !catalog.can_write(caller, &req.namespace, worker) {
+    if pkg.workflow_by_type(workflow_type).is_none()
+        || !catalog.can_write(caller, &req.namespace, worker)
+    {
         return Err(deny("worker start denied"));
     }
     Ok(())

@@ -210,9 +210,7 @@ impl Arg {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Package {
     name: String,
-    workflow_type: String,
-    description: String,
-    args: Vec<Arg>,
+    workflows: BTreeMap<String, Workflow>,
 }
 
 impl Package {
@@ -220,6 +218,57 @@ impl Package {
         &self.name
     }
 
+    pub fn workflows(&self) -> impl Iterator<Item = (&str, &Workflow)> {
+        self.workflows
+            .iter()
+            .map(|(alias, workflow)| (alias.as_str(), workflow))
+    }
+
+    pub fn only_workflow(&self) -> Option<&Workflow> {
+        if self.workflows.len() == 1 {
+            self.workflows.values().next()
+        } else {
+            None
+        }
+    }
+
+    pub fn select(&self, alias: Option<&str>) -> Result<&Workflow, Error> {
+        match alias {
+            Some(alias) => self.workflows.get(alias).ok_or_else(|| {
+                Error::InvalidArgument(format!(
+                    "unknown workflow '{alias}' for package '{}'",
+                    self.name
+                ))
+            }),
+            None => self.only_workflow().ok_or_else(|| {
+                Error::InvalidArgument(format!(
+                    "package '{}' requires --workflow ({})",
+                    self.name,
+                    self.workflows
+                        .keys()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))
+            }),
+        }
+    }
+
+    pub fn workflow_by_type(&self, workflow_type: &str) -> Option<&Workflow> {
+        self.workflows
+            .values()
+            .find(|workflow| workflow.workflow_type == workflow_type)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Workflow {
+    workflow_type: String,
+    description: String,
+    args: Vec<Arg>,
+}
+
+impl Workflow {
     pub fn workflow_type(&self) -> &str {
         &self.workflow_type
     }
@@ -386,7 +435,7 @@ impl UserPolicy {
 pub struct VerifiedWorker<'a> {
     pub owner: &'a str,
     pub worker: &'a Worker,
-    pub package: &'a Package,
+    pub workflow: &'a Workflow,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -827,15 +876,19 @@ workers:
                 let pkg = self.packages.get(&worker.package).ok_or_else(|| {
                     Error::InvalidCatalog(format!("missing package '{}'", worker.package))
                 })?;
-                out.push(WorkerEntry {
+                out.extend(pkg.workflows.iter().map(|(alias, workflow)| WorkerEntry {
                     owner: owner.clone(),
                     worker: wname.clone(),
-                    workflow_type: pkg.workflow_type.clone(),
+                    workflow_type: workflow.workflow_type.clone(),
                     read,
                     write,
-                    signature: pkg.signature(),
-                    description: pkg.description.clone(),
-                });
+                    signature: if pkg.workflows.len() == 1 {
+                        workflow.signature()
+                    } else {
+                        format!("--workflow {alias} {}", workflow.signature())
+                    },
+                    description: workflow.description.clone(),
+                }));
             }
         }
         Ok(out)
@@ -930,16 +983,16 @@ workers:
         let package = self.packages.get(&worker.package).ok_or_else(|| {
             Error::InvalidCatalog(format!("missing package '{}'", worker.package))
         })?;
-        if package.workflow_type != workflow_type {
-            return Err(Error::ExecutionMismatch(format!(
-                "execution workflow '{workflow_type}' does not match registered '{}'",
-                package.workflow_type
-            )));
-        }
+        let workflow = package.workflow_by_type(workflow_type).ok_or_else(|| {
+            Error::ExecutionMismatch(format!(
+                "execution workflow '{workflow_type}' is not exported by '{}'",
+                package.name
+            ))
+        })?;
         Ok(VerifiedWorker {
             owner,
             worker,
-            package,
+            workflow,
         })
     }
 }
@@ -1035,65 +1088,113 @@ fn parse_packages(doc: &Value) -> Result<BTreeMap<String, Package>, Error> {
         let pkg_map = val
             .as_map()
             .ok_or_else(|| Error::InvalidCatalog(format!("package '{name}' must be a mapping")))?;
-        let workflow_type = pkg_map
-            .get("workflow")
-            .and_then(Value::as_str)
-            .filter(|s| !s.trim().is_empty())
-            .ok_or_else(|| {
-                Error::InvalidCatalog(format!("package '{name}' requires non-empty workflow"))
-            })?
-            .to_owned();
-        let description = match pkg_map.get("description") {
-            Some(Value::Str(s)) => s.clone(),
-            None | Some(Value::Null) => String::new(),
-            _ => {
+        let workflows = if let Some(exports) = pkg_map.get("workflows") {
+            if ["workflow", "description", "args"]
+                .iter()
+                .any(|key| pkg_map.contains_key(*key))
+            {
                 return Err(Error::InvalidCatalog(format!(
-                    "package '{name}' description must be a string"
+                    "package '{name}' mixes single and named workflow fields"
                 )));
             }
+            let exports = exports
+                .as_map()
+                .filter(|exports| !exports.is_empty())
+                .ok_or_else(|| {
+                    Error::InvalidCatalog(format!(
+                        "package '{name}' workflows must be a non-empty mapping"
+                    ))
+                })?;
+            let mut types = BTreeSet::new();
+            let mut workflows = BTreeMap::new();
+            for (alias, entry) in exports {
+                if !valid_arg_ident(alias) {
+                    return Err(Error::InvalidCatalog(format!(
+                        "invalid workflow alias '{alias}' in package '{name}'"
+                    )));
+                }
+                let context = format!("{name}/{alias}");
+                let map = entry.as_map().ok_or_else(|| {
+                    Error::InvalidCatalog(format!("workflow '{context}' must be a mapping"))
+                })?;
+                let workflow = parse_workflow(&context, map)?;
+                if !types.insert(workflow.workflow_type.clone()) {
+                    return Err(Error::InvalidCatalog(format!(
+                        "duplicate Temporal workflow '{}' in package '{name}'",
+                        workflow.workflow_type
+                    )));
+                }
+                workflows.insert(alias.clone(), workflow);
+            }
+            workflows
+        } else {
+            BTreeMap::from([(name.clone(), parse_workflow(name, pkg_map)?)])
         };
-        let raw_args = match pkg_map.get("args") {
-            Some(Value::Seq(items)) => items.as_slice(),
-            None | Some(Value::Null) => &[],
-            _ => {
-                return Err(Error::InvalidCatalog(format!(
-                    "package '{name}' args must be a sequence"
-                )));
-            }
-        };
-        let mut args = Vec::with_capacity(raw_args.len());
-        let mut seen = BTreeSet::new();
-        let mut seen_optional = false;
-        for raw_arg in raw_args {
-            let arg = parse_arg(name, raw_arg)?;
-            if !seen.insert(arg.name.clone()) {
-                return Err(Error::InvalidCatalog(format!(
-                    "duplicate argument '{}' in package '{name}'",
-                    arg.name
-                )));
-            }
-            if arg.is_required() && seen_optional {
-                return Err(Error::InvalidCatalog(format!(
-                    "required argument '{}' follows optional argument in '{name}'",
-                    arg.name
-                )));
-            }
-            if !arg.is_required() {
-                seen_optional = true;
-            }
-            args.push(arg);
-        }
         packages.insert(
             name.clone(),
             Package {
                 name: name.clone(),
-                workflow_type,
-                description,
-                args,
+                workflows,
             },
         );
     }
     Ok(packages)
+}
+
+fn parse_workflow(name: &str, map: &BTreeMap<String, Value>) -> Result<Workflow, Error> {
+    let workflow_type = map
+        .get("workflow")
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| {
+            Error::InvalidCatalog(format!("package '{name}' requires non-empty workflow"))
+        })?
+        .to_owned();
+    let description = match map.get("description") {
+        Some(Value::Str(s)) => s.clone(),
+        None | Some(Value::Null) => String::new(),
+        _ => {
+            return Err(Error::InvalidCatalog(format!(
+                "package '{name}' description must be a string"
+            )));
+        }
+    };
+    let raw_args = match map.get("args") {
+        Some(Value::Seq(items)) => items.as_slice(),
+        None | Some(Value::Null) => &[],
+        _ => {
+            return Err(Error::InvalidCatalog(format!(
+                "package '{name}' args must be a sequence"
+            )));
+        }
+    };
+    let mut args = Vec::with_capacity(raw_args.len());
+    let mut seen = BTreeSet::new();
+    let mut seen_optional = false;
+    for raw_arg in raw_args {
+        let arg = parse_arg(name, raw_arg)?;
+        if !seen.insert(arg.name.clone()) {
+            return Err(Error::InvalidCatalog(format!(
+                "duplicate argument '{}' in package '{name}'",
+                arg.name
+            )));
+        }
+        if arg.is_required() && seen_optional {
+            return Err(Error::InvalidCatalog(format!(
+                "required argument '{}' follows optional argument in '{name}'",
+                arg.name
+            )));
+        }
+        if !arg.is_required() {
+            seen_optional = true;
+        }
+        args.push(arg);
+    }
+    Ok(Workflow {
+        workflow_type,
+        description,
+        args,
+    })
 }
 
 fn parse_arg(pkg: &str, val: &Value) -> Result<Arg, Error> {
@@ -1426,16 +1527,20 @@ count:
         assert!(!cat.can_read("mallory", "alice", "greet"));
 
         let (_, pkg) = cat.worker_and_package("alice", "greet").unwrap();
+        let workflow = pkg.select(None).unwrap();
         assert_eq!(
-            pkg.validate_and_encode(&["Alice \"A\"".into()]).unwrap(),
+            workflow
+                .validate_and_encode(&["Alice \"A\"".into()])
+                .unwrap(),
             r#"{"name":"Alice \"A\"","wait_seconds":20}"#
         );
         assert_eq!(
-            pkg.validate_and_encode(&["Alice".into(), "0".into()])
+            workflow
+                .validate_and_encode(&["Alice".into(), "0".into()])
                 .unwrap(),
             r#"{"name":"Alice","wait_seconds":0}"#
         );
-        assert!(pkg.validate_and_encode(&[]).is_err());
+        assert!(workflow.validate_and_encode(&[]).is_err());
 
         let verified = cat
             .verify_execution("alice", "alice-greet", "DemoWorkflow", "run-123")
@@ -1455,6 +1560,59 @@ count:
         );
         assert_eq!(cat.version(), default_lab_version());
         assert_eq!(default_lab_version(), "0.1.0");
+    }
+
+    #[test]
+    fn test_named_workflows_share_queue_but_validate_separately() {
+        let schemas = "\
+example:
+  workflows:
+    greet:
+      workflow: Greet
+      args:
+        - name: name
+          type: string
+    count:
+      workflow: Count
+      args:
+        - name: limit
+          type: int
+";
+        let users = BTreeMap::from([(
+            "alice".into(),
+            "\
+user: alice
+permissions: {read: false, write: false}
+workers:
+  tools:
+    package: example
+    permissions: {read: false, write: false}
+"
+            .into(),
+        )]);
+        let catalog = Catalog::from_yaml(schemas, &users).unwrap();
+        let (_, package) = catalog.worker_and_package("alice", "tools").unwrap();
+        assert!(package.select(None).is_err());
+        assert!(package.select(Some("missing")).is_err());
+        for (alias, ty, input) in [
+            ("greet", "Greet", r#"{"name":"7"}"#),
+            ("count", "Count", r#"{"limit":7}"#),
+        ] {
+            let workflow = package.select(Some(alias)).unwrap();
+            assert_eq!(workflow.validate_and_encode(&["7".into()]).unwrap(), input);
+            assert_eq!(
+                catalog
+                    .verify_execution("alice", "alice-tools", ty, "run-id")
+                    .unwrap()
+                    .workflow,
+                workflow
+            );
+        }
+        assert!(
+            catalog
+                .verify_execution("alice", "alice-tools", "Internal", "run-id")
+                .is_err()
+        );
     }
 
     #[test]

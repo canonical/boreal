@@ -63,6 +63,7 @@ impl<B: Backend> Engine<B> {
             Request::Run {
                 owner,
                 worker,
+                workflow,
                 id,
                 args,
             } => {
@@ -79,7 +80,10 @@ impl<B: Backend> Engine<B> {
                         ),
                     ));
                 }
-                let encoded = pkg.validate_and_encode(&args).map_err(map_catalog_err)?;
+                let workflow = pkg.select(workflow.as_deref()).map_err(map_catalog_err)?;
+                let encoded = workflow
+                    .validate_and_encode(&args)
+                    .map_err(map_catalog_err)?;
                 let task_queue = format!("{owner}-{}", w.name());
                 let seq = self
                     .coordinator
@@ -87,7 +91,7 @@ impl<B: Backend> Engine<B> {
                     .map_err(map_ledger_err)?;
                 let start_res = self
                     .backend
-                    .start_workflow(&owner, &task_queue, pkg.workflow_type(), &id, &encoded)
+                    .start_workflow(&owner, &task_queue, workflow.workflow_type(), &id, &encoded)
                     .await;
                 match start_res {
                     Ok(run_id) => {
@@ -97,7 +101,7 @@ impl<B: Backend> Engine<B> {
                         Ok(Response::Started {
                             owner,
                             worker: w.name().to_owned(),
-                            workflow_type: pkg.workflow_type().to_owned(),
+                            workflow_type: workflow.workflow_type().to_owned(),
                             workflow_id: id,
                             run_id,
                         })
@@ -142,7 +146,7 @@ impl<B: Backend> Engine<B> {
                     visible.push(WorkflowSummary {
                         owner: owner.clone(),
                         worker: verified.worker.name().to_owned(),
-                        workflow_type: verified.package.workflow_type().to_owned(),
+                        workflow_type: verified.workflow.workflow_type().to_owned(),
                         workflow_id: exec.workflow_id,
                         run_id: exec.run_id,
                         status: exec.status.label().to_owned(),
@@ -361,7 +365,7 @@ impl<B: Backend> Engine<B> {
         Ok(to_detail(
             owner,
             verified.worker.name(),
-            verified.package.workflow_type(),
+            verified.workflow.workflow_type(),
             exec,
         ))
     }
@@ -412,7 +416,7 @@ impl<B: Backend> Engine<B> {
         Ok(to_detail(
             owner,
             verified.worker.name(),
-            verified.package.workflow_type(),
+            verified.workflow.workflow_type(),
             exec,
         ))
     }
@@ -1001,6 +1005,7 @@ workers:
                 Request::Run {
                     owner: "alice".into(),
                     worker: "greet".into(),
+                    workflow: None,
                     id: "g1".into(),
                     args: vec!["Alice".into(), "5".into()],
                 },
@@ -1014,6 +1019,7 @@ workers:
                 Request::Run {
                     owner: "alice".into(),
                     worker: "count".into(),
+                    workflow: None,
                     id: "c1".into(),
                     args: vec!["Alice".into()],
                 },
@@ -1034,6 +1040,7 @@ workers:
                 Request::Run {
                     owner: "alice".into(),
                     worker: "count".into(),
+                    workflow: None,
                     id: "c1".into(),
                     args: vec!["Alice".into()],
                 },
@@ -1114,6 +1121,7 @@ workers:
                 Request::Run {
                     owner: "alice".into(),
                     worker: "greet".into(),
+                    workflow: None,
                     id: "p1".into(),
                     args: vec!["Parent".into()],
                 },
@@ -1167,6 +1175,7 @@ workers:
                     Request::Run {
                         owner: "alice".into(),
                         worker: "greet".into(),
+                        workflow: None,
                         id: "blocked".into(),
                         args: vec!["X".into()],
                     },
@@ -1263,6 +1272,7 @@ workers:
                 Request::Run {
                     owner: "alice".into(),
                     worker: "greet".into(),
+                    workflow: None,
                     id: "a1".into(),
                     args: vec!["Alice".into()],
                 },
@@ -1274,6 +1284,7 @@ workers:
                 Request::Run {
                     owner: "alice".into(),
                     worker: "greet".into(),
+                    workflow: None,
                     id: "a2".into(),
                     args: vec!["Ada".into()],
                 },
@@ -1363,6 +1374,7 @@ workers:
                 Request::Run {
                     owner: "alice".into(),
                     worker: "greet".into(),
+                    workflow: None,
                     id: "v1".into(),
                     args: vec!["Alice".into()],
                 },

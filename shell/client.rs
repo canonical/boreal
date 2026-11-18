@@ -128,12 +128,22 @@ fn mock_dispatch(
         Request::Run {
             owner,
             worker,
+            workflow,
             id,
             args: _,
         } => {
-            let wf_type: String = catalog
+            let wf_type = match catalog
                 .worker_and_package(owner, worker)
-                .map_or_else(|_| "MockWorkflow".into(), |(_, p)| p.workflow_type().into());
+                .and_then(|(_, pkg)| pkg.select(workflow.as_deref()))
+            {
+                Ok(workflow) => workflow.workflow_type().to_owned(),
+                Err(e) => {
+                    return Response::Error {
+                        code: wire::ErrorCode::InvalidArgument,
+                        message: e.detail(),
+                    };
+                }
+            };
             running.lock().unwrap().insert(
                 (owner.clone(), id.clone()),
                 (worker.clone(), wf_type.clone()),
@@ -449,6 +459,7 @@ mod tests {
         mock.send(&Request::Run {
             owner: "alice".into(),
             worker: "greet".into(),
+            workflow: None,
             id: "job-2".into(),
             args: vec!["Ada".into()],
         })

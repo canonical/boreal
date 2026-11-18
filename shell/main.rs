@@ -266,6 +266,7 @@ fn execute_action(action: Action, mode: &Mode) -> Result<bool, String> {
         }
         Action::Run {
             worker,
+            workflow,
             id,
             args,
             owner,
@@ -273,6 +274,7 @@ fn execute_action(action: Action, mode: &Mode) -> Result<bool, String> {
             let resp = mode.send(&Request::Run {
                 owner,
                 worker,
+                workflow,
                 id,
                 args,
             })?;

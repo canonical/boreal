@@ -18,6 +18,7 @@ pub enum Action {
     Workers,
     Run {
         worker: String,
+        workflow: Option<String>,
         id: String,
         args: Vec<String>,
         owner: String,
@@ -95,7 +96,8 @@ impl Context {
                     .catalog
                     .packages()
                     .get(worker.package())
-                    .map_or("", |p| p.description());
+                    .and_then(catalog::Package::only_workflow)
+                    .map_or("", |workflow| workflow.description());
                 worker_choices
                     .entry(wname.clone())
                     .or_insert_with(|| desc.to_owned());
@@ -126,6 +128,12 @@ impl Context {
                 Arg::new("args")
                     .num_args(0..)
                     .help("Typed workflow arguments"),
+            )
+            .arg(
+                Arg::new("workflow")
+                    .long("workflow")
+                    .value_name("ALIAS")
+                    .help("Exported workflow alias"),
             )
             .arg(owner_arg(&writable, &self.caller));
 
@@ -216,6 +224,7 @@ impl Context {
             Some(("workers", _)) => Action::Workers,
             Some(("run", sub)) => {
                 let worker = sub.get_one::<String>("worker").unwrap().clone();
+                let workflow = sub.get_one::<String>("workflow").cloned();
                 let id = sub.get_one::<String>("id").unwrap().clone();
                 let owner = sub.get_one::<String>("owner").unwrap().clone();
                 let args: Vec<String> = sub
@@ -242,13 +251,17 @@ impl Context {
                         ),
                     )));
                 }
-                if let Err(e) = pkg.validate_and_encode(&args) {
+                if let Err(e) = pkg
+                    .select(workflow.as_deref())
+                    .and_then(|workflow| workflow.validate_and_encode(&args))
+                {
                     return Err(Error::Clap(
                         cmd.error(ErrorKind::ValueValidation, e.detail()),
                     ));
                 }
                 Action::Run {
                     worker,
+                    workflow,
                     id,
                     args,
                     owner,
@@ -420,6 +433,17 @@ mod tests {
                 "run count run-2 Élan",
                 Action::Run {
                     worker: "count".into(),
+                    workflow: None,
+                    id: "run-2".into(),
+                    args: vec!["Élan".into()],
+                    owner: "alice".into(),
+                },
+            ),
+            (
+                "run count run-2 Élan --workflow count",
+                Action::Run {
+                    worker: "count".into(),
+                    workflow: Some("count".into()),
                     id: "run-2".into(),
                     args: vec!["Élan".into()],
                     owner: "alice".into(),
@@ -429,6 +453,7 @@ mod tests {
                 "run greet run-1 'Alice Smith' 5 --owner bob",
                 Action::Run {
                     worker: "greet".into(),
+                    workflow: None,
                     id: "run-1".into(),
                     args: vec!["Alice Smith".into(), "5".into()],
                     owner: "bob".into(),
