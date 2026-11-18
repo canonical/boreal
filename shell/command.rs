@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use boreal_common::catalog::{self, Catalog};
 use boreal_common::secret;
+use boreal_common::wire::RunInput;
 use clap::builder::{PossibleValue, PossibleValuesParser};
 use clap::error::ErrorKind;
 use clap::{Arg, ArgAction, Command};
@@ -20,7 +21,7 @@ pub enum Action {
         worker: String,
         workflow: Option<String>,
         id: String,
-        args: Vec<String>,
+        input: RunInput,
         owner: String,
     },
     List {
@@ -123,11 +124,28 @@ impl Context {
         let run_cmd = Command::new("run")
             .about("Run a workflow")
             .arg(worker_arg)
-            .arg(Arg::new("id").required(true).help("Workflow ID"))
+            .arg(
+                Arg::new("legacy-id")
+                    .value_name("ID")
+                    .help("Workflow ID (positional shorthand)"),
+            )
+            .arg(
+                Arg::new("id")
+                    .long("id")
+                    .value_name("ID")
+                    .help("Workflow ID; generated when omitted"),
+            )
             .arg(
                 Arg::new("args")
                     .num_args(0..)
                     .help("Typed workflow arguments"),
+            )
+            .arg(
+                Arg::new("input-json")
+                    .long("input-json")
+                    .value_name("JSON")
+                    .conflicts_with("args")
+                    .help("JSON input, or - to read stdin in a non-interactive command"),
             )
             .arg(
                 Arg::new("workflow")
@@ -210,6 +228,10 @@ impl Context {
 
     pub fn parse(&self, line: &str) -> Result<Option<Action>, Error> {
         let words = shlex::split(line).ok_or(Error::Quote)?;
+        self.parse_words(&words)
+    }
+
+    pub fn parse_words(&self, words: &[String]) -> Result<Option<Action>, Error> {
         if words.is_empty() {
             return Ok(None);
         }
@@ -225,11 +247,28 @@ impl Context {
             Some(("run", sub)) => {
                 let worker = sub.get_one::<String>("worker").unwrap().clone();
                 let workflow = sub.get_one::<String>("workflow").cloned();
-                let id = sub.get_one::<String>("id").unwrap().clone();
+                let flag_id = sub.get_one::<String>("id");
+                let positional = sub.get_one::<String>("legacy-id");
+                let id = flag_id.or(positional).cloned().unwrap_or_else(new_id);
                 let owner = sub.get_one::<String>("owner").unwrap().clone();
-                let args: Vec<String> = sub
+                let mut args: Vec<String> = sub
                     .get_many::<String>("args")
                     .map_or_else(Vec::new, |vals| vals.cloned().collect());
+                if flag_id.is_some()
+                    && let Some(first) = positional
+                {
+                    args.insert(0, first.clone());
+                }
+                let input = match sub.get_one::<String>("input-json") {
+                    Some(_) if !args.is_empty() => {
+                        return Err(Error::Clap(cmd.error(
+                            ErrorKind::ArgumentConflict,
+                            "--input-json cannot be combined with positional workflow inputs",
+                        )));
+                    }
+                    Some(raw) => RunInput::Json(raw.clone()),
+                    None => RunInput::Positional(args),
+                };
 
                 if let Err(e) = catalog::validate_workflow_id(&id) {
                     return Err(Error::Clap(
@@ -253,7 +292,11 @@ impl Context {
                 }
                 if let Err(e) = pkg
                     .select(workflow.as_deref())
-                    .and_then(|workflow| workflow.validate_and_encode(&args))
+                    .and_then(|workflow| match &input {
+                        RunInput::Positional(args) => workflow.validate_and_encode(args),
+                        RunInput::Json(raw) if raw == "-" => Ok(String::new()),
+                        RunInput::Json(raw) => workflow.validate_json(raw),
+                    })
                 {
                     return Err(Error::Clap(
                         cmd.error(ErrorKind::ValueValidation, e.detail()),
@@ -263,7 +306,7 @@ impl Context {
                     worker,
                     workflow,
                     id,
-                    args,
+                    input,
                     owner,
                 }
             }
@@ -332,6 +375,10 @@ impl Context {
         };
         Ok(Some(action))
     }
+}
+
+pub fn new_id() -> String {
+    uuid::Uuid::new_v4().to_string()
 }
 
 fn owner_arg(allowed: &[&str], caller: &str) -> Arg {
@@ -435,7 +482,7 @@ mod tests {
                     worker: "count".into(),
                     workflow: None,
                     id: "run-2".into(),
-                    args: vec!["Élan".into()],
+                    input: RunInput::Positional(vec!["Élan".into()]),
                     owner: "alice".into(),
                 },
             ),
@@ -445,7 +492,7 @@ mod tests {
                     worker: "count".into(),
                     workflow: Some("count".into()),
                     id: "run-2".into(),
-                    args: vec!["Élan".into()],
+                    input: RunInput::Positional(vec!["Élan".into()]),
                     owner: "alice".into(),
                 },
             ),
@@ -455,7 +502,7 @@ mod tests {
                     worker: "greet".into(),
                     workflow: None,
                     id: "run-1".into(),
-                    args: vec!["Alice Smith".into(), "5".into()],
+                    input: RunInput::Positional(vec!["Alice Smith".into(), "5".into()]),
                     owner: "bob".into(),
                 },
             ),
@@ -505,7 +552,7 @@ mod tests {
         let ctx = Context::mock();
         let parsed = ctx.parse("run greet run-1 '$(not-executed)' 5");
         assert!(
-            matches!(parsed, Ok(Some(Action::Run { args, .. })) if args == vec!["$(not-executed)", "5"])
+            matches!(parsed, Ok(Some(Action::Run { input: RunInput::Positional(args), .. })) if args == vec!["$(not-executed)", "5"])
         );
     }
 }

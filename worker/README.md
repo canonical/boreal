@@ -109,9 +109,10 @@ available aliases and their arguments. For a worker with one export, omit
 `--workflow`. Handwritten single-workflow schemas and `WorkerSchema::new`
 still work without the macro.
 
-Use `Validate` where inputs need runtime validation. Range, length, and pattern
-checks belong in the workflow; the shell only coerces positional tokens to
-JSON types.
+The generated catalog keeps each workflow's full Schemars schema. Flat inputs
+still accept positional arguments; nested inputs can use `--input-json`.
+The broker validates against the selected workflow's schema. Keep business
+rules and checks not expressed by that schema in the workflow itself.
 
 ## Checks
 

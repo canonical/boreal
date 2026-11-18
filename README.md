@@ -31,7 +31,7 @@ deployment.
   Temporal schedules through the same gate.
 - **Kernel-authenticated runtime policy**: `boreal-broker` authenticates callers
   on `/run/boreal/broker.sock` (`0660 boreal-broker:boreal`) via `SO_PEERCRED`,
-  validates positional arguments against `/etc/boreal/schemas.yaml` schema
+  validates workflow input against `/etc/boreal/schemas.yaml` schema
   directories, enforces `/etc/boreal/users/<user>/perms.yaml` across `run`,
   `cancel`, `status`, `result`, `view`, `list`, and `permissions`, and verifies
   the registered `workflow` and pinned `run_id` on existing executions.
@@ -41,8 +41,8 @@ deployment.
   from `temporal/Cargo.toml`, with line-2 red `󰞴` drain badge and modal `❯`/`❮`
   indicators), drives commands, live `view` TUI inspection, and
   permission-filtered completions from `/etc/boreal/`, requires `[y/N]`
-  confirmation before `cancel`, rejects unsupported non-interactive SSH
-  commands, and stores secrets under `~/.config/boreal/secrets` (`0700`/`0600`)
+  confirmation before `cancel`, allows non-interactive `run`, `list`, `status`,
+  and `result`, and stores secrets under `~/.config/boreal/secrets` (`0700`/`0600`)
   via hidden TTY prompt or `ssh <user>@<host> "secrets set <name>" < file`.
 - **Restricted administration & gated updates**: `boreal.admin` assigns `admin`
   to `boreal-admin`, delegating via sanitized `sudo` only to `boreal-admin-ctl`

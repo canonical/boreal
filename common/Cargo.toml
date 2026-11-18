@@ -11,3 +11,7 @@ publish = false
 
 [lib]
 path = "lib.rs"
+
+[dependencies]
+jsonschema = { version = "0.61", default-features = false, features = ["arbitrary-precision"] }
+serde_json = { version = "1", features = ["preserve_order", "arbitrary_precision"] }

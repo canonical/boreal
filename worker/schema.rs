@@ -324,11 +324,15 @@ fn write_input(out: &mut String, name: &str, input: &Input, pad: &str) -> Result
             "worker '{name}' requires a non-empty workflow name without whitespace"
         ));
     }
-    let args = project_args(name, (input.schema)())?;
+    let schema = (input.schema)();
     let _ = writeln!(out, "{pad}workflow: {}", quote(input.workflow));
     if !input.description.is_empty() {
         let _ = writeln!(out, "{pad}description: {}", quote(input.description));
     }
+    let _ = writeln!(out, "{pad}input_schema: |-\n{pad}  {}", schema.as_value());
+    let Ok(args) = project_args(name, schema) else {
+        return Ok(());
+    };
     if args.is_empty() {
         let _ = writeln!(out, "{pad}args: []");
         return Ok(());
@@ -538,9 +542,11 @@ mod tests {
     }
 
     #[test]
-    fn test_render_schema_rejects_nested_objects() {
-        let err =
-            render_schema(&[WorkerSchema::new::<Nested>("bad", "BadWorkflow", "")]).unwrap_err();
-        assert!(err.contains("scalar"), "{err}");
+    fn test_render_schema_retains_nested_objects_without_positional_args() {
+        let yaml =
+            render_schema(&[WorkerSchema::new::<Nested>("nested", "NestedWorkflow", "")]).unwrap();
+        assert!(yaml.contains("input_schema: |-"), "{yaml}");
+        assert!(yaml.contains("#/\u{24}defs/DemoInput"), "{yaml}");
+        assert!(!yaml.contains("  args:"), "{yaml}");
     }
 }

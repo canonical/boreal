@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use boreal_common::catalog::{self, Catalog};
 use boreal_common::wire::{
-    ErrorCode, PromptSummary, Request, Response, ResultOutcome, UpdaterRequest, UpdaterResponse,
-    WorkflowCounts, WorkflowDetail, WorkflowSummary, WorkflowView,
+    ErrorCode, PromptSummary, Request, Response, ResultOutcome, RunInput, UpdaterRequest,
+    UpdaterResponse, WorkflowCounts, WorkflowDetail, WorkflowSummary, WorkflowView,
 };
 
 use crate::ledger::{self, Coordinator, Gate, TrackedKey};
@@ -65,7 +65,7 @@ impl<B: Backend> Engine<B> {
                 worker,
                 workflow,
                 id,
-                args,
+                input,
             } => {
                 catalog::validate_workflow_id(&id).map_err(map_catalog_err)?;
                 let (w, pkg) = self
@@ -81,9 +81,11 @@ impl<B: Backend> Engine<B> {
                     ));
                 }
                 let workflow = pkg.select(workflow.as_deref()).map_err(map_catalog_err)?;
-                let encoded = workflow
-                    .validate_and_encode(&args)
-                    .map_err(map_catalog_err)?;
+                let encoded = match input {
+                    RunInput::Positional(args) => workflow.validate_and_encode(&args),
+                    RunInput::Json(raw) => workflow.validate_json(&raw),
+                }
+                .map_err(map_catalog_err)?;
                 let task_queue = format!("{owner}-{}", w.name());
                 let seq = self
                     .coordinator
@@ -1007,7 +1009,7 @@ workers:
                     worker: "greet".into(),
                     workflow: None,
                     id: "g1".into(),
-                    args: vec!["Alice".into(), "5".into()],
+                    input: RunInput::Json(r#"{"name":"Alice","wait_seconds":5}"#.into()),
                 },
             )
             .await;
@@ -1021,7 +1023,7 @@ workers:
                     worker: "count".into(),
                     workflow: None,
                     id: "c1".into(),
-                    args: vec!["Alice".into()],
+                    input: RunInput::Positional(vec!["Alice".into()]),
                 },
             )
             .await;
@@ -1042,7 +1044,7 @@ workers:
                     worker: "count".into(),
                     workflow: None,
                     id: "c1".into(),
-                    args: vec!["Alice".into()],
+                    input: RunInput::Positional(vec!["Alice".into()]),
                 },
             )
             .await;
@@ -1123,7 +1125,7 @@ workers:
                     worker: "greet".into(),
                     workflow: None,
                     id: "p1".into(),
-                    args: vec!["Parent".into()],
+                    input: RunInput::Positional(vec!["Parent".into()]),
                 },
             )
             .await;
@@ -1177,7 +1179,7 @@ workers:
                         worker: "greet".into(),
                         workflow: None,
                         id: "blocked".into(),
-                        args: vec!["X".into()],
+                        input: RunInput::Positional(vec!["X".into()]),
                     },
                 )
                 .await,
@@ -1274,7 +1276,7 @@ workers:
                     worker: "greet".into(),
                     workflow: None,
                     id: "a1".into(),
-                    args: vec!["Alice".into()],
+                    input: RunInput::Positional(vec!["Alice".into()]),
                 },
             )
             .await;
@@ -1286,7 +1288,7 @@ workers:
                     worker: "greet".into(),
                     workflow: None,
                     id: "a2".into(),
-                    args: vec!["Ada".into()],
+                    input: RunInput::Positional(vec!["Ada".into()]),
                 },
             )
             .await;
@@ -1376,7 +1378,7 @@ workers:
                     worker: "greet".into(),
                     workflow: None,
                     id: "v1".into(),
-                    args: vec!["Alice".into()],
+                    input: RunInput::Positional(vec!["Alice".into()]),
                 },
             )
             .await;

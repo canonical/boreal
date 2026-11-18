@@ -4,6 +4,7 @@ use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
+use crate::input::{self, Schema, json};
 use crate::os;
 use crate::wire::{PermissionReport, WorkerEntry, WorkerPermissionLine};
 use crate::yaml::{self, Value};
@@ -63,6 +64,15 @@ pub enum Scalar {
 }
 
 impl Scalar {
+    fn value(&self) -> input::Value {
+        match self {
+            Self::Str(s) => json!(s),
+            Self::Int(n) => json!(n),
+            Self::Float(n) => json!(n),
+            Self::Bool(b) => json!(b),
+        }
+    }
+
     fn write_json(&self, out: &mut String) {
         match self {
             Self::Str(s) => write_json_str(out, s),
@@ -266,6 +276,9 @@ pub struct Workflow {
     workflow_type: String,
     description: String,
     args: Vec<Arg>,
+    positional: bool,
+    legacy: bool,
+    input: Schema,
 }
 
 impl Workflow {
@@ -281,11 +294,22 @@ impl Workflow {
         &self.args
     }
 
+    pub fn accepts_positionals(&self) -> bool {
+        self.positional
+    }
+
+    pub fn input_schema(&self) -> &Schema {
+        &self.input
+    }
+
     pub fn required_count(&self) -> usize {
         self.args.iter().filter(|a| a.is_required()).count()
     }
 
     pub fn signature(&self) -> String {
+        if !self.positional {
+            return "--input-json <JSON>".into();
+        }
         if self.args.is_empty() {
             return "(no args)".into();
         }
@@ -305,6 +329,11 @@ impl Workflow {
     }
 
     pub fn validate_and_encode(&self, raw_args: &[String]) -> Result<String, Error> {
+        if !self.positional {
+            return Err(Error::InvalidArgument(
+                "structured workflow input needs --input-json".into(),
+            ));
+        }
         let required = self.required_count();
         let total = self.args.len();
         if raw_args.len() < required || raw_args.len() > total {
@@ -335,7 +364,28 @@ impl Workflow {
             val.write_json(&mut out);
         }
         out.push('}');
-        Ok(out)
+        if self.legacy {
+            Ok(out)
+        } else {
+            self.validate_json(&out)
+        }
+    }
+
+    pub fn validate_json(&self, raw: &str) -> Result<String, Error> {
+        let mut value = input::parse(raw).map_err(Error::InvalidArgument)?;
+        if self.legacy
+            && let Some(obj) = value.as_object_mut()
+        {
+            for arg in &self.args {
+                if let Some(default) = &arg.default {
+                    obj.entry(&arg.name).or_insert_with(|| default.value());
+                }
+            }
+        }
+        self.input
+            .validate(&value)
+            .map_err(Error::InvalidArgument)?;
+        Ok(value.to_string())
     }
 }
 
@@ -1089,7 +1139,7 @@ fn parse_packages(doc: &Value) -> Result<BTreeMap<String, Package>, Error> {
             .as_map()
             .ok_or_else(|| Error::InvalidCatalog(format!("package '{name}' must be a mapping")))?;
         let workflows = if let Some(exports) = pkg_map.get("workflows") {
-            if ["workflow", "description", "args"]
+            if ["workflow", "description", "args", "input_schema"]
                 .iter()
                 .any(|key| pkg_map.contains_key(*key))
             {
@@ -1190,11 +1240,54 @@ fn parse_workflow(name: &str, map: &BTreeMap<String, Value>) -> Result<Workflow,
         }
         args.push(arg);
     }
+    let full = match map.get("input_schema") {
+        None => None,
+        Some(Value::Str(raw)) => Some(
+            input::parse(raw)
+                .map_err(|e| Error::InvalidCatalog(format!("workflow '{name}': {e}")))?,
+        ),
+        _ => {
+            return Err(Error::InvalidCatalog(format!(
+                "workflow '{name}' input_schema must be a JSON string"
+            )));
+        }
+    };
+    let legacy = full.is_none();
+    let schema = Schema::new(full.unwrap_or_else(|| legacy_schema(&args)))
+        .map_err(|e| Error::InvalidCatalog(format!("workflow '{name}' input schema: {e}")))?;
     Ok(Workflow {
         workflow_type,
         description,
         args,
+        positional: legacy || map.contains_key("args"),
+        legacy,
+        input: schema,
     })
+}
+
+fn legacy_schema(args: &[Arg]) -> input::Value {
+    let properties: input::Map<String, input::Value> = args.iter().map(|arg| {
+        let mut schema = match &arg.kind {
+            ArgKind::String => json!({"type":"string"}),
+            ArgKind::Bool => json!({"type":"boolean"}),
+            ArgKind::Int => json!({"type":"integer", "format":"int64", "minimum": i64::MIN, "maximum": i64::MAX}),
+            ArgKind::Float => json!({"type":"number", "format":"double"}),
+            ArgKind::Enum { choices } => json!({"type":"string", "enum":choices}),
+        };
+        if !arg.description.is_empty() {
+            schema["description"] = json!(arg.description);
+        }
+        if let Some(default) = &arg.default {
+            schema["default"] = default.value();
+        }
+        (arg.name.clone(), schema)
+    }).collect();
+    let required: Vec<_> = args
+        .iter()
+        .filter(|arg| arg.is_required())
+        .map(Arg::name)
+        .collect();
+    json!({"type":"object", "properties":properties, "required":required, "additionalProperties":false})
 }
 
 fn parse_arg(pkg: &str, val: &Value) -> Result<Arg, Error> {
@@ -1612,6 +1705,40 @@ workers:
             catalog
                 .verify_execution("alice", "alice-tools", "Internal", "run-id")
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn test_catalog_validates_structured_payloads_separately_from_positionals() {
+        let doc = yaml::parse(r##"
+demo:
+  workflow: Demo
+  input_schema: |-
+    {"type":"object","properties":{"nested":{"$ref":"#/$defs/Nested"}},"required":["nested"],"$defs":{"Nested":{"type":"object","required":["left"],"properties":{"left":{"oneOf":[{"type":"object","required":["Integer"],"properties":{"Integer":{"type":"integer"}}},{"type":"object","required":["Float"],"properties":{"Float":{"type":"number"}}}]}}}}}
+legacy:
+  workflow: Legacy
+  args:
+    - name: seconds
+      type: int
+      default: 20
+"##).unwrap();
+        let packages = parse_packages(&doc).unwrap();
+        let workflow = packages["demo"].select(None).unwrap();
+        let good = r#"{"nested":{"left":{"Integer":18446744073709551615}}}"#;
+        assert_eq!(workflow.validate_json(good).unwrap(), good);
+        assert!(
+            workflow
+                .validate_json(r#"{"nested":{"left":{"Integer":"bad"}}}"#)
+                .is_err()
+        );
+        assert!(workflow.validate_and_encode(&[]).is_err());
+        assert_eq!(
+            packages["legacy"]
+                .select(None)
+                .unwrap()
+                .validate_json("{}")
+                .unwrap(),
+            r#"{"seconds":20}"#
         );
     }
 

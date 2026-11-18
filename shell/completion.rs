@@ -26,6 +26,7 @@ impl Completer {
         }
         let mut owner = self.ctx.caller().to_owned();
         let mut workflow = None;
+        let mut named_id = false;
         let mut completing_workflow = false;
         let mut positionals = Vec::new();
         let mut idx = 1usize;
@@ -58,6 +59,22 @@ impl Completer {
                 idx += 1;
                 continue;
             }
+            if tok == "--input-json" || tok.starts_with("--input-json=") {
+                return Vec::new();
+            }
+            if tok == "--id" {
+                if previous.get(idx + 1).is_none() {
+                    return Vec::new();
+                }
+                named_id = true;
+                idx += 2;
+                continue;
+            }
+            if tok.starts_with("--id=") {
+                named_id = true;
+                idx += 1;
+                continue;
+            }
             if tok.starts_with('-') {
                 idx += 1;
                 continue;
@@ -65,7 +82,7 @@ impl Completer {
             positionals.push(tok.as_str());
             idx += 1;
         }
-        // positionals[0] = worker, positionals[1] = workflow_id, positionals[2..] = schema args
+        // The workflow ID occupies a positional slot only without --id.
         let Some(worker) = positionals.first().copied() else {
             return Vec::new();
         };
@@ -93,7 +110,7 @@ impl Completer {
         }
         let Some(spec) = positionals
             .len()
-            .checked_sub(2)
+            .checked_sub(if named_id { 1 } else { 2 })
             .and_then(|index| pkg.select(workflow).ok()?.args().get(index))
         else {
             return Vec::new();

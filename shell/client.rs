@@ -130,12 +130,18 @@ fn mock_dispatch(
             worker,
             workflow,
             id,
-            args: _,
+            input,
         } => {
             let wf_type = match catalog
                 .worker_and_package(owner, worker)
                 .and_then(|(_, pkg)| pkg.select(workflow.as_deref()))
-            {
+                .and_then(|workflow| {
+                    match input {
+                        wire::RunInput::Positional(args) => workflow.validate_and_encode(args),
+                        wire::RunInput::Json(raw) => workflow.validate_json(raw),
+                    }?;
+                    Ok(workflow)
+                }) {
                 Ok(workflow) => workflow.workflow_type().to_owned(),
                 Err(e) => {
                     return Response::Error {
@@ -461,7 +467,7 @@ mod tests {
             worker: "greet".into(),
             workflow: None,
             id: "job-2".into(),
-            args: vec!["Ada".into()],
+            input: wire::RunInput::Positional(vec!["Ada".into()]),
         })
         .unwrap();
         assert_eq!(

@@ -40,6 +40,12 @@ impl ErrorCode {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RunInput {
+    Positional(Vec<String>),
+    Json(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Request {
     Workers,
     Run {
@@ -47,7 +53,7 @@ pub enum Request {
         worker: String,
         workflow: Option<String>,
         id: String,
-        args: Vec<String>,
+        input: RunInput,
     },
     List {
         owner: String,
@@ -473,18 +479,30 @@ impl Request {
                 worker,
                 workflow,
                 id,
-                args,
+                input,
             } => {
-                enc.u8(if workflow.is_some() { 11 } else { 2 });
+                enc.u8(match (input, workflow) {
+                    (RunInput::Json(_), _) => 12,
+                    (_, Some(_)) => 11,
+                    _ => 2,
+                });
                 enc.str(owner);
                 enc.str(worker);
                 enc.str(id);
-                if let Some(alias) = workflow {
-                    enc.str(alias);
-                }
-                enc.u32(args.len() as u32);
-                for arg in args {
-                    enc.str(arg);
+                match input {
+                    RunInput::Positional(args) => {
+                        if let Some(alias) = workflow {
+                            enc.str(alias);
+                        }
+                        enc.u32(args.len() as u32);
+                        for arg in args {
+                            enc.str(arg);
+                        }
+                    }
+                    RunInput::Json(json) => {
+                        enc.opt_str(workflow.as_deref());
+                        enc.str(json);
+                    }
                 }
             }
             Self::List { owner } => {
@@ -530,25 +548,27 @@ impl Request {
         let mut dec = Decoder::new(bytes);
         let req = match dec.u8()? {
             1 => Self::Workers,
-            tag @ (2 | 11) => {
+            tag @ (2 | 11 | 12) => {
                 let owner = dec.str()?;
                 let worker = dec.str()?;
                 let id = dec.str()?;
-                let workflow = if tag == 11 { Some(dec.str()?) } else { None };
-                let count = dec.u32()? as usize;
-                if count > 256 {
-                    return Err(Error::Decode("too many workflow arguments"));
-                }
-                let mut args = Vec::with_capacity(count);
-                for _ in 0..count {
-                    args.push(dec.str()?);
-                }
+                let (workflow, input) = if tag == 12 {
+                    (dec.opt_str()?, RunInput::Json(dec.str()?))
+                } else {
+                    let workflow = if tag == 11 { Some(dec.str()?) } else { None };
+                    let count = dec.u32()? as usize;
+                    if count > 256 {
+                        return Err(Error::Decode("too many workflow arguments"));
+                    }
+                    let args = (0..count).map(|_| dec.str()).collect::<Result<_, _>>()?;
+                    (workflow, RunInput::Positional(args))
+                };
                 Self::Run {
                     owner,
                     worker,
                     workflow,
                     id,
-                    args,
+                    input,
                 }
             }
             3 => Self::List { owner: dec.str()? },
@@ -1116,14 +1136,14 @@ mod tests {
                 worker: "greet".into(),
                 workflow: None,
                 id: "run-1".into(),
-                args: vec!["Élan".into(), "5".into()],
+                input: RunInput::Positional(vec!["Élan".into(), "5".into()]),
             },
             Request::Run {
                 owner: "alice".into(),
                 worker: "tools".into(),
                 workflow: Some("count".into()),
                 id: "run-2".into(),
-                args: vec!["Élan".into()],
+                input: RunInput::Json(r#"{"name":"Élan"}"#.into()),
             },
             Request::Cancel {
                 owner: "alice".into(),

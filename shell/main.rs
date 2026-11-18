@@ -17,9 +17,10 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use boreal_common::catalog::{Catalog, DEFAULT_ETC_DIR};
+use boreal_common::input;
 use boreal_common::os;
 use boreal_common::secret::{self, MAX_SECRET_BYTES, Store};
-use boreal_common::wire::{BROKER_SOCKET, Request, Response};
+use boreal_common::wire::{BROKER_SOCKET, Request, Response, RunInput};
 use crossterm::cursor::SetCursorStyle;
 use nu_ansi_term::Color;
 use reedline::{
@@ -100,17 +101,60 @@ fn secret_store() -> Result<Store, String> {
     Store::for_current_user().map_err(|e| e.detail())
 }
 
-fn parse_ssh_secret_command(raw_cmd: &str) -> Result<String, String> {
+#[derive(Debug, PartialEq, Eq)]
+enum SshCommand {
+    SetSecret(String),
+    Workflow(Vec<String>),
+}
+
+fn parse_ssh_command(raw_cmd: &str) -> Result<SshCommand, String> {
     let words = shlex::split(raw_cmd).ok_or_else(|| "invalid quoting in SSH command".to_owned())?;
     match words.as_slice() {
         [cmd, sub, name] if cmd == "secrets" && sub == "set" => {
             secret::validate_name(name).map_err(|e| e.detail())?;
-            Ok(name.clone())
+            Ok(SshCommand::SetSecret(name.clone()))
+        }
+        [cmd, ..] if matches!(cmd.as_str(), "run" | "list" | "status" | "result") => {
+            Ok(SshCommand::Workflow(words))
         }
         _ => Err(
-            "unsupported SSH command or subsystem; connect interactively or pipe stdin to 'secrets set <name>'"
+            "unsupported SSH command; use run, list, status, result, or 'secrets set <name>'"
                 .into(),
         ),
+    }
+}
+
+fn run_ssh_command(raw_cmd: &str) -> Result<bool, Box<dyn Error>> {
+    match parse_ssh_command(raw_cmd)? {
+        SshCommand::SetSecret(name) => {
+            run_stdin_secret_set(&name)?;
+            Ok(true)
+        }
+        SshCommand::Workflow(words) => {
+            let (ctx, mode) = load_runtime()?;
+            match ctx.parse_words(&words) {
+                Ok(Some(action)) => execute_action(action, &mode, false).map_err(Into::into),
+                Ok(None) => Ok(false),
+                Err(command::Error::Clap(err)) => {
+                    // clap may echo an offending token, including an inline payload.
+                    if err.use_stderr() {
+                        if err.kind() == clap::error::ErrorKind::ValueValidation {
+                            err.print()?;
+                        } else {
+                            eprintln!(
+                                "boreal-shell: invalid {} command; use '{} --help'",
+                                words[0], words[0]
+                            );
+                        }
+                        Ok(false)
+                    } else {
+                        err.print()?;
+                        Ok(true)
+                    }
+                }
+                Err(command::Error::Quote) => Err("invalid quoting in SSH command".into()),
+            }
+        }
     }
 }
 
@@ -252,7 +296,7 @@ fn handle_secret_action(action: SecretAction) -> Result<(), String> {
     }
 }
 
-fn execute_action(action: Action, mode: &Mode) -> Result<bool, String> {
+fn execute_action(action: Action, mode: &Mode, interactive: bool) -> Result<bool, String> {
     match action {
         Action::Exit => Ok(true),
         Action::Secrets(sec) => handle_secret_action(sec).map(|()| true),
@@ -268,15 +312,30 @@ fn execute_action(action: Action, mode: &Mode) -> Result<bool, String> {
             worker,
             workflow,
             id,
-            args,
+            input,
             owner,
         } => {
+            let input = match input {
+                RunInput::Json(raw) if raw == "-" => {
+                    if interactive || io::stdin().is_terminal() {
+                        return Err("--input-json - reads piped stdin; use non-interactive SSH without a PTY".into());
+                    }
+                    let mut raw = String::new();
+                    io::stdin()
+                        .take((input::MAX_BYTES + 1) as u64)
+                        .read_to_string(&mut raw)
+                        .map_err(|e| format!("read JSON from stdin: {e}"))?;
+                    input::parse(&raw)?;
+                    RunInput::Json(raw)
+                }
+                other => other,
+            };
             let resp = mode.send(&Request::Run {
                 owner,
                 worker,
                 workflow,
                 id,
-                args,
+                input,
             })?;
             Ok(client::print_response(resp, mode.is_mock()))
         }
@@ -473,7 +532,7 @@ fn run_interactive() -> Result<(), Box<dyn Error>> {
         match editor.read_line(&prompt)? {
             Signal::Success(line) => match ctx.parse(&line) {
                 Ok(Some(Action::Exit)) => break,
-                Ok(Some(action)) => match execute_action(action, &mode) {
+                Ok(Some(action)) => match execute_action(action, &mode, true) {
                     Ok(ok) => last_ok = ok,
                     Err(err) => {
                         eprintln!("error: {err}");
@@ -498,37 +557,33 @@ fn run_interactive() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn run() -> Result<(), Box<dyn Error>> {
+fn run() -> Result<bool, Box<dyn Error>> {
     if let Some(orig_os) = env::var_os("SSH_ORIGINAL_COMMAND") {
         let orig = orig_os
             .into_string()
             .map_err(|_| "SSH command must be valid UTF-8")?;
-        let name = parse_ssh_secret_command(&orig)?;
-        run_stdin_secret_set(&name)?;
-        return Ok(());
+        return run_ssh_command(&orig);
     }
 
     let args: Vec<_> = env::args_os().skip(1).collect();
     match args.as_slice() {
-        [] => run_interactive(),
+        [] => run_interactive().map(|()| true),
         [flag, cmd] if flag == "-c" => {
             let cmd_str = cmd
                 .to_str()
                 .ok_or("SSH command argument must be valid UTF-8")?;
-            let name = parse_ssh_secret_command(cmd_str)?;
-            run_stdin_secret_set(&name)?;
-            Ok(())
+            run_ssh_command(cmd_str)
         }
         _ => Err(
-            "unsupported command-line invocation; connect interactively over SSH or pipe stdin to 'secrets set <name>'"
-                .into(),
+            "unsupported command-line invocation; use an interactive session or -c COMMAND".into(),
         ),
     }
 }
 
 fn main() -> ExitCode {
     match run() {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(true) => ExitCode::SUCCESS,
+        Ok(false) => ExitCode::FAILURE,
         Err(err) => {
             eprintln!("boreal-shell: {err}");
             ExitCode::FAILURE
@@ -541,11 +596,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_ssh_command_filter_only_permits_stdin_secret_set() {
+    fn test_ssh_command_filter_only_permits_allowlisted_commands() {
         assert_eq!(
-            parse_ssh_secret_command("secrets set api_token").unwrap(),
-            "api_token"
+            parse_ssh_command("secrets set api_token").unwrap(),
+            SshCommand::SetSecret("api_token".into())
         );
+        assert!(matches!(
+            parse_ssh_command("run demo --id demo-0 --input-json -"),
+            Ok(SshCommand::Workflow(_))
+        ));
         for rejected in [
             "",
             "/bin/sh",
@@ -557,7 +616,7 @@ mod tests {
             "secrets set api_token inline_secret",
             "secrets set ../bad",
         ] {
-            assert!(parse_ssh_secret_command(rejected).is_err(), "{rejected}");
+            assert!(parse_ssh_command(rejected).is_err(), "{rejected}");
         }
     }
 }
