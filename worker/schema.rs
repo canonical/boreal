@@ -2,11 +2,27 @@ use std::fmt::Write as _;
 
 use schemars::{JsonSchema, Schema};
 use serde_json::Value;
+use temporalio_common::WorkflowDefinition;
+use temporalio_workflow::workflows::WorkflowImplementation;
 
 use crate::valid_name;
 
 pub struct WorkerSchema {
     name: &'static str,
+    exports: Exports,
+}
+
+enum Exports {
+    Legacy(Input),
+    Named(Vec<WorkflowSchema>),
+}
+
+pub struct WorkflowSchema {
+    alias: &'static str,
+    input: Input,
+}
+
+struct Input {
     workflow: &'static str,
     description: &'static str,
     schema: fn() -> Schema,
@@ -20,9 +36,35 @@ impl WorkerSchema {
     ) -> Self {
         Self {
             name,
-            workflow,
-            description,
-            schema: || schemars::schema_for!(T),
+            exports: Exports::Legacy(Input {
+                workflow,
+                description,
+                schema: || schemars::schema_for!(T),
+            }),
+        }
+    }
+
+    pub fn from_exports(name: &'static str, exports: Vec<WorkflowSchema>) -> Self {
+        Self {
+            name,
+            exports: Exports::Named(exports),
+        }
+    }
+}
+
+impl WorkflowSchema {
+    pub fn of<W>(alias: &'static str, description: &'static str) -> Self
+    where
+        W: WorkflowImplementation,
+        <W::Run as WorkflowDefinition>::Input: JsonSchema,
+    {
+        Self {
+            alias,
+            input: Input {
+                workflow: W::name(),
+                description,
+                schema: || schemars::schema_for!(<W::Run as WorkflowDefinition>::Input),
+            },
         }
     }
 }
@@ -45,19 +87,42 @@ pub fn render_schema(workers: &[WorkerSchema]) -> Result<String, String> {
         if !seen.insert(worker.name) {
             return Err(format!("duplicate schema key '{}'", worker.name));
         }
-        if worker.workflow.trim().is_empty()
-            || worker
-                .workflow
-                .chars()
-                .any(|c| c.is_control() || c.is_whitespace())
-        {
-            return Err(format!(
-                "worker '{}' requires a non-empty workflow name",
-                worker.name
-            ));
+        let _ = writeln!(out, "{}:", worker.name);
+        match &worker.exports {
+            Exports::Legacy(input) => write_input(&mut out, worker.name, input, "  ")?,
+            Exports::Named(exports) => {
+                if exports.is_empty() {
+                    return Err(format!(
+                        "worker '{}' requires at least one export",
+                        worker.name
+                    ));
+                }
+                let _ = writeln!(out, "  workflows:");
+                let mut aliases = std::collections::BTreeSet::new();
+                let mut types = std::collections::BTreeSet::new();
+                for export in exports {
+                    if !valid_arg_name(export.alias) || !aliases.insert(export.alias) {
+                        return Err(format!(
+                            "invalid or duplicate export alias '{}' on '{}'",
+                            export.alias, worker.name
+                        ));
+                    }
+                    if !types.insert(export.input.workflow) {
+                        return Err(format!(
+                            "duplicate Temporal workflow '{}' on '{}'",
+                            export.input.workflow, worker.name
+                        ));
+                    }
+                    let _ = writeln!(out, "    {}:", export.alias);
+                    write_input(
+                        &mut out,
+                        &format!("{}/{}", worker.name, export.alias),
+                        &export.input,
+                        "      ",
+                    )?;
+                }
+            }
         }
-        let args = project_args(worker.name, (worker.schema)())?;
-        write_worker(&mut out, worker, &args);
     }
     if out.is_empty() {
         out.push_str("{}\n");
@@ -248,35 +313,46 @@ fn reject_additional(worker: &str, value: Option<&Value>) -> Result<(), String> 
     }
 }
 
-fn write_worker(out: &mut String, worker: &WorkerSchema, args: &[Arg]) {
-    let _ = writeln!(out, "{}:", worker.name);
-    let _ = writeln!(out, "  workflow: {}", worker.workflow);
-    if !worker.description.is_empty() {
-        let _ = writeln!(out, "  description: {}", quote(&worker.description));
+fn write_input(out: &mut String, name: &str, input: &Input, pad: &str) -> Result<(), String> {
+    if input.workflow.is_empty()
+        || input
+            .workflow
+            .chars()
+            .any(|c| c.is_control() || c.is_whitespace())
+    {
+        return Err(format!(
+            "worker '{name}' requires a non-empty workflow name without whitespace"
+        ));
+    }
+    let args = project_args(name, (input.schema)())?;
+    let _ = writeln!(out, "{pad}workflow: {}", quote(input.workflow));
+    if !input.description.is_empty() {
+        let _ = writeln!(out, "{pad}description: {}", quote(input.description));
     }
     if args.is_empty() {
-        let _ = writeln!(out, "  args: []");
-        return;
+        let _ = writeln!(out, "{pad}args: []");
+        return Ok(());
     }
-    let _ = writeln!(out, "  args:");
+    let _ = writeln!(out, "{pad}args:");
     for arg in args {
-        let _ = writeln!(out, "    - name: {}", arg.name);
-        let _ = writeln!(out, "      type: {}", arg.type_name);
+        let _ = writeln!(out, "{pad}  - name: {}", arg.name);
+        let _ = writeln!(out, "{pad}    type: {}", arg.type_name);
         if !arg.description.is_empty() {
-            let _ = writeln!(out, "      description: {}", quote(&arg.description));
+            let _ = writeln!(out, "{pad}    description: {}", quote(&arg.description));
         }
         if arg.type_name == "enum" {
-            let _ = writeln!(out, "      choices:");
-            for choice in &arg.choices {
-                let _ = writeln!(out, "        - {}", quote(choice));
+            let _ = writeln!(out, "{pad}    choices:");
+            for choice in arg.choices {
+                let _ = writeln!(out, "{pad}      - {}", quote(&choice));
             }
         }
         if !arg.required
             && let Some(default) = &arg.default
         {
-            let _ = writeln!(out, "      default: {}", yaml_scalar(default));
+            let _ = writeln!(out, "{pad}    default: {}", yaml_scalar(default));
         }
     }
+    Ok(())
 }
 
 fn yaml_scalar(value: &Value) -> String {
@@ -322,6 +398,8 @@ mod tests {
     use super::*;
     use schemars::JsonSchema;
     use serde::{Deserialize, Serialize};
+    use temporalio_macros::{workflow, workflow_methods};
+    use temporalio_sdk::{WorkflowContext, WorkflowResult};
     use validator::Validate;
 
     fn default_wait() -> u64 {
@@ -360,6 +438,73 @@ mod tests {
         inner: DemoInput,
     }
 
+    #[workflow]
+    #[derive(Default)]
+    struct Greeting;
+
+    #[workflow_methods]
+    impl Greeting {
+        #[run]
+        async fn run(_: &mut WorkflowContext<Self>, _input: DemoInput) -> WorkflowResult<()> {
+            Ok(())
+        }
+    }
+
+    #[workflow]
+    #[derive(Default)]
+    struct Counting;
+
+    #[workflow_methods]
+    impl Counting {
+        #[run(name = "Count.V1")]
+        async fn run(_: &mut WorkflowContext<Self>, _input: TrainInput) -> WorkflowResult<()> {
+            Ok(())
+        }
+    }
+
+    #[workflow]
+    #[derive(Default)]
+    struct Child;
+
+    #[workflow_methods]
+    impl Child {
+        #[run]
+        async fn run(_: &mut WorkflowContext<Self>) -> WorkflowResult<()> {
+            Ok(())
+        }
+    }
+
+    crate::declare_worker! {
+        package = "example",
+        workflows = {
+            export greet: Greeting => "Say hello",
+            internal self::Child,
+            export count: Counting => "Count objects",
+        },
+        configure = |opts| opts.graceful_shutdown_period(crate::DEFAULT_SHUTDOWN_GRACE),
+    }
+
+    #[test]
+    fn test_declare_worker_registers_all_and_emits_only_exports() {
+        let mut options = worker_options("alice-tools".into()).unwrap();
+        assert_eq!(options.task_queue, "alice-tools");
+        assert!(options.register_workflow::<Greeting>().is_err());
+        assert!(options.register_workflow::<Counting>().is_err());
+        assert!(options.register_workflow::<Child>().is_err());
+
+        let yaml = render_schema(&[schema()]).unwrap();
+        assert!(
+            yaml.contains("example:\n  workflows:\n    greet:\n      workflow: \"Greeting\""),
+            "{yaml}"
+        );
+        assert!(
+            yaml.contains("    count:\n      workflow: \"Count.V1\""),
+            "{yaml}"
+        );
+        assert!(yaml.contains("- name: dataset"), "{yaml}");
+        assert!(!yaml.contains("Child"), "{yaml}");
+    }
+
     #[test]
     fn test_render_schema_projects_flat_args_and_ignores_validator_bounds() {
         let yaml = render_schema(&[
@@ -368,7 +513,7 @@ mod tests {
         ])
         .unwrap();
         assert!(
-            yaml.contains("greet:\n  workflow: DemoWorkflow\n"),
+            yaml.contains("greet:\n  workflow: \"DemoWorkflow\"\n"),
             "{yaml}"
         );
         assert!(
@@ -383,7 +528,7 @@ mod tests {
         assert!(yaml.contains("default: 20"), "{yaml}");
         assert!(!yaml.contains("min:"), "{yaml}");
         assert!(
-            yaml.contains("count:\n  workflow: CountWorkflow\n"),
+            yaml.contains("count:\n  workflow: \"CountWorkflow\"\n"),
             "{yaml}"
         );
         assert!(yaml.contains("type: enum"), "{yaml}");

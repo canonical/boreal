@@ -81,12 +81,37 @@ validator = { version = "0.20", features = ["derive"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
-Enable the `schema` feature and add a `schema` bin that calls
-`boreal_worker::emit_schema`. `buildRustWorker` runs that bin and keeps
-`schema.yaml`, not the binary. Input structs derive `JsonSchema` and `Validate`.
-Call `input.validate()?` at the start of the workflow run. Range, length, and
-pattern checks live there; the shell only coerces positional tokens to JSON
-types. The YAML key is `workflow`, not `workflowType`.
+With the `schema` feature, declare ordinary native workflow registrations once
+in the worker library:
+
+```rust,ignore
+boreal_worker::declare_worker! {
+    package = "example",
+    workflows = {
+        export greet: ExampleWorkflow => "Run the starter greeting",
+        export count: CountWorkflow => "Count Unicode scalar values",
+        internal ChildGreetingWorkflow,
+    },
+    configure = |opts| opts.register_activities(ExampleActivities),
+}
+```
+
+The worker binary uses the generated `worker_options(queue)`. The schema binary
+calls `boreal_worker::emit_schema(&[example_worker::schema()])`;
+`buildRustWorker` keeps the resulting `schema.yaml`, not the binary.
+All three workflows register on the same queue. Only the two `export` entries
+are Boreal launch targets, and only their input types need `JsonSchema`.
+The `package` key matches the binary output, not the deployed worker name.
+
+If the `example` package is deployed as `tools`, use
+`run tools job-42 hello --workflow count`. The `workers` command lists the
+available aliases and their arguments. For a worker with one export, omit
+`--workflow`. Handwritten single-workflow schemas and `WorkerSchema::new`
+still work without the macro.
+
+Use `Validate` where inputs need runtime validation. Range, length, and pattern
+checks belong in the workflow; the shell only coerces positional tokens to
+JSON types.
 
 ## Checks
 

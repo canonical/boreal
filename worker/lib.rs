@@ -18,11 +18,52 @@ pub use temporalio_workflow;
 #[cfg(feature = "schema")]
 mod schema;
 #[cfg(feature = "schema")]
-pub use schema::{WorkerSchema, emit_schema, render_schema};
+pub use schema::{WorkerSchema, WorkflowSchema, emit_schema, render_schema};
 #[cfg(feature = "schema")]
 pub use schemars;
 #[cfg(feature = "schema")]
 pub use validator;
+
+/// Defines `worker_options(queue)` and `schema()` from one workflow list.
+/// Only `export` entries are included in Boreal's launch catalog.
+#[cfg(feature = "schema")]
+#[macro_export]
+macro_rules! declare_worker {
+    (
+        package = $package:literal,
+        workflows = {
+            $( $kind:ident $name:path $( : $workflow:ty => $description:literal )? ),+ $(,)?
+        },
+        configure = |$builder:ident| $configure:expr $(,)?
+    ) => {
+        pub fn worker_options(
+            queue: ::std::string::String,
+        ) -> $crate::Result<$crate::temporalio_sdk::WorkerOptions> {
+            let mut options = {
+                let $builder = $crate::temporalio_sdk::WorkerOptions::new(queue);
+                ($configure).build()
+            };
+            $( $crate::declare_worker!(@register options, $kind $name $(: $workflow => $description)?); )+
+            Ok(options)
+        }
+
+        pub fn schema() -> $crate::WorkerSchema {
+            $crate::WorkerSchema::from_exports($package, [
+                $( $crate::declare_worker!(@export $kind $name $(: $workflow => $description)?), )+
+            ].into_iter().flatten().collect())
+        }
+    };
+    (@register $options:ident, export $alias:path : $workflow:ty => $description:literal) => {
+        $options.register_workflow::<$workflow>()?
+    };
+    (@register $options:ident, internal $workflow:path) => {
+        $options.register_workflow::<$workflow>()?
+    };
+    (@export export $alias:path : $workflow:ty => $description:literal) => {
+        Some($crate::WorkflowSchema::of::<$workflow>(stringify!($alias), $description))
+    };
+    (@export internal $workflow:path) => { None };
+}
 
 use temporalio_client::{
     Client, ClientOptions, Connection, envconfig::LoadClientConfigProfileOptions,

@@ -1,14 +1,14 @@
 use std::time::Duration;
 
 use schemars::JsonSchema;
-use validator::Validate;
 use serde::{Deserialize, Serialize};
 use temporalio_macros::{activities, workflow, workflow_methods};
 use temporalio_sdk::{
-    ActivityExecutionError, ActivityOptions, ApplicationFailure, WorkerOptions, WorkflowContext,
+    ActivityExecutionError, ActivityOptions, ApplicationFailure, WorkflowContext,
     WorkflowContextView, WorkflowResult, WorkflowTermination,
     activities::{ActivityContext, ActivityError},
 };
+use validator::Validate;
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Validate)]
 pub struct ExampleInput {
@@ -52,9 +52,10 @@ impl ExampleWorkflow {
     pub async fn run(ctx: &mut WorkflowContext<Self>) -> WorkflowResult<String> {
         let input = ctx.state(|state| state.input.clone());
         input.validate().map_err(|err| {
-            WorkflowTermination::failed_application(ApplicationFailure::new(
-                std::io::Error::new(std::io::ErrorKind::InvalidInput, err.to_string()),
-            ))
+            WorkflowTermination::failed_application(ApplicationFailure::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                err.to_string(),
+            )))
         })?;
         ctx.execute_activity(
             ExampleActivities::echo,
@@ -69,12 +70,14 @@ impl ExampleWorkflow {
     }
 }
 
-pub fn worker_options(queue: String) -> boreal_worker::Result<WorkerOptions> {
-    Ok(WorkerOptions::new(queue)
+boreal_worker::declare_worker! {
+    package = "example",
+    workflows = {
+        export greet: ExampleWorkflow => "Run the starter example workflow",
+    },
+    configure = |opts| opts
         .graceful_shutdown_period(boreal_worker::DEFAULT_SHUTDOWN_GRACE)
-        .register_activities(ExampleActivities)
-        .register_workflow::<ExampleWorkflow>()?
-        .build())
+        .register_activities(ExampleActivities),
 }
 
 #[cfg(test)]
