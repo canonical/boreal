@@ -435,12 +435,11 @@ in
               environment = {
                 TEMPORAL_ADDRESS = cfg.temporalAddress;
                 TEMPORAL_NAMESPACE = entry.user;
-                LAB_TASK_QUEUE = entry.unitKey;
               };
               serviceConfig = {
                 User = entry.user;
                 NetworkNamespacePath = "/run/netns/boreal-worker-${entry.unitKey}";
-                ExecStart = binOf entry.cfg.package;
+                ExecStart = "${binOf entry.cfg.package} ${entry.worker}";
                 Restart = "on-failure";
                 RestartSec = lib.mkDefault 2;
                 TimeoutStopSec = "infinity";
@@ -481,14 +480,13 @@ in
                     environment = {
                       TEMPORAL_ADDRESS = cfg.temporalAddress;
                       TEMPORAL_NAMESPACE = entry.user;
-                      LAB_TASK_QUEUE = entry.unitKey;
                     };
                     serviceConfig = {
                       Type = "oneshot";
                       RemainAfterExit = true;
                       User = entry.user;
                       NetworkNamespacePath = "/run/netns/boreal-worker-${entry.unitKey}";
-                      ExecStart = binOf pkg;
+                      ExecStart = "${binOf pkg} ${entry.worker}";
                       Restart = "on-failure";
                       RestartSec = lib.mkDefault 2;
                       TimeoutStartSec = 60;

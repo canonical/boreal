@@ -3,6 +3,8 @@ use std::fmt::Write as _;
 use schemars::{JsonSchema, Schema};
 use serde_json::Value;
 
+use crate::valid_name;
+
 pub struct WorkerSchema {
     name: &'static str,
     workflow: &'static str,
@@ -34,7 +36,7 @@ pub fn render_schema(workers: &[WorkerSchema]) -> Result<String, String> {
     let mut seen = std::collections::BTreeSet::new();
     let mut out = String::new();
     for worker in workers {
-        if !valid_bin_name(worker.name) {
+        if !valid_name(worker.name) {
             return Err(format!(
                 "schema key '{}' must match ^[a-z][a-z0-9_-]*$",
                 worker.name
@@ -304,15 +306,6 @@ fn quote(text: &str) -> String {
     }
     out.push('"');
     out
-}
-
-fn valid_bin_name(name: &str) -> bool {
-    let bytes = name.as_bytes();
-    !bytes.is_empty()
-        && bytes[0].is_ascii_lowercase()
-        && bytes
-            .iter()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b'-'))
 }
 
 fn valid_arg_name(name: &str) -> bool {

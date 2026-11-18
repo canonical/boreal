@@ -3,8 +3,10 @@
 `boreal-worker` provides the shared Unix Temporal worker lifecycle used by
 downstream Boreal Rust workers:
 
-- `task_queue(default_queue)` — resolves `LAB_TASK_QUEUE` when set, falling back
-  to `default_queue` and rejecting blank names.
+- `task_queue(worker)` — prefixes the deployed worker name with the configured
+  Temporal namespace. With `TEMPORAL_NAMESPACE=alice`, `task_queue("example")?`
+  returns `"alice-example"`. No Temporal connection, macro, or runtime wrapper
+  is required.
 - `connect()` — connects a Temporal `Client` from standard `TEMPORAL_ADDRESS`,
   `TEMPORAL_NAMESPACE`, and TLS environment settings.
 - `connect_namespace(namespace)` — same connection settings, bound to another
@@ -12,10 +14,10 @@ downstream Boreal Rust workers:
   `temporalio_client` `start_workflow`, `get_result`, and `cancel`. The worker
   gRPC gate checks `perms.yaml` using the listener owner, not the namespace
   argument. Do not call it from workflow code.
-- `run_worker(default_queue, build_options)` — installs `SIGTERM` and `SIGINT`
-  handlers before connecting, builds a `Worker` on the current Tokio runtime,
-  and continues driving `Worker::run` after shutdown so in-flight work can drain
-  within `DEFAULT_SHUTDOWN_GRACE` (30 seconds).
+- `run_worker(worker, build_options)` — derives the queue from the connected
+  client's namespace and the deployed worker name. It installs `SIGTERM` and
+  `SIGINT` handlers before connecting and continues driving `Worker::run` after
+  shutdown so in-flight work can drain.
 - `read_secret(name)` / `read_secret_bytes(name)` — loads a user-managed secret
   from `~/.config/boreal/secrets/<name>` after verifying `0700` directory and
   `0600` regular-file ownership. Never place returned secret values in Temporal
@@ -29,7 +31,11 @@ A schedule is a Temporal server record, not a long-running process. Downstream
 packages that want one compile a bin such as `greet-schedule` and pass
 `outputs = [ "out" "greet" "greet-schedule" "schema" ]` to
 `boreal.lib.buildRustWorker`. NixOS starts that binary once per user-worker as
-`boreal-schedule-<user>-<worker>.service` when `schedule.enable` is true.
+`boreal-schedule-<user>-<worker>.service` when `schedule.enable` is true. Both
+the worker and schedule binaries receive the deployed worker name as their
+first argument. This is the key in `boreal.users.<user>.workers`, not the binary
+name or the full queue. Migrate both entrypoints together when upgrading from
+`LAB_TASK_QUEUE`.
 
 The schedule bin uses `connect()` and `task_queue()`, upserts with
 `Client::create_schedule` / `ScheduleHandle::update`, and exits. Do not add a
@@ -39,8 +45,9 @@ While an update drain is closed, an unpaused create, unpause, trigger, or
 backfill fails and the oneshot retries.
 
 ```rust
+let worker = std::env::args().nth(1).ok_or("missing worker name")?;
+let queue = boreal_worker::task_queue(&worker)?;
 let client = boreal_worker::connect().await?;
-let queue = boreal_worker::task_queue("hello")?;
 client
     .create_schedule(
         "hourly-hello",

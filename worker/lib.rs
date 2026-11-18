@@ -1,5 +1,4 @@
 use std::{
-    env,
     error::Error,
     ffi::CStr,
     fs::{self, File, OpenOptions},
@@ -148,21 +147,28 @@ pub fn read_secret(name: &str) -> Result<String> {
     Ok(String::from_utf8(bytes)?)
 }
 
-fn resolve_queue(override_queue: Option<String>, default_queue: &str) -> Result<String> {
-    let queue = override_queue.unwrap_or_else(|| default_queue.to_owned());
-    if queue.trim().is_empty() {
-        return Err("task queue must not be empty".into());
-    }
-    Ok(queue)
+/// Prefixes the configured worker name with the Temporal client namespace.
+/// Uses the same configuration as [`connect`] without opening a connection.
+pub fn task_queue(worker: &str) -> Result<String> {
+    let (_, options) = ClientOptions::load_from_config(LoadClientConfigProfileOptions::default())?;
+    task_queue_for(&options.namespace, worker)
 }
 
-pub fn task_queue(default_queue: &str) -> Result<String> {
-    let override_queue = match env::var("LAB_TASK_QUEUE") {
-        Ok(value) => Some(value),
-        Err(env::VarError::NotPresent) => None,
-        Err(err) => return Err(err.into()),
-    };
-    resolve_queue(override_queue, default_queue)
+fn task_queue_for(user: &str, worker: &str) -> Result<String> {
+    if !valid_name(user) {
+        return Err("Boreal user name must match ^[a-z][a-z0-9_-]*$".into());
+    }
+    if !valid_name(worker) {
+        return Err("Boreal worker name must match ^[a-z][a-z0-9_-]*$".into());
+    }
+    Ok(format!("{user}-{worker}"))
+}
+
+fn valid_name(name: &str) -> bool {
+    name.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b'-'))
 }
 
 /// Connects using Temporal's standard TEMPORAL_ADDRESS, TEMPORAL_NAMESPACE, and TLS settings.
@@ -221,7 +227,7 @@ where
 }
 
 #[cfg(unix)]
-pub async fn run_worker<F>(default_queue: &str, build_options: F) -> Result<()>
+pub async fn run_worker<F>(worker_name: &str, build_options: F) -> Result<()>
 where
     F: FnOnce(String) -> Result<WorkerOptions>,
 {
@@ -238,13 +244,13 @@ where
     };
     tokio::pin!(stop);
 
-    let queue = task_queue(default_queue)?;
-    let options = build_options(queue)?;
     let runtime = Runtime::from_current_tokio(Default::default())?;
     let client = tokio::select! {
         result = connect() => result?,
         () = &mut stop => return Ok(()),
     };
+    let queue = task_queue_for(&client.options().namespace, worker_name)?;
+    let options = build_options(queue)?;
     let mut worker = Worker::new(&runtime, client, options)?;
     let shutdown = worker.shutdown_handle();
     run_until_shutdown(worker.run(), stop, shutdown).await?;
@@ -252,7 +258,7 @@ where
 }
 
 #[cfg(not(unix))]
-pub async fn run_worker<F>(_default_queue: &str, _build_options: F) -> Result<()>
+pub async fn run_worker<F>(_worker_name: &str, _build_options: F) -> Result<()>
 where
     F: FnOnce(String) -> Result<WorkerOptions>,
 {
@@ -266,7 +272,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{cell::Cell, future};
+    use std::{cell::Cell, env, future};
 
     #[test]
     fn test_connect_namespace_rejects_blank_or_unsafe_names() {
@@ -279,14 +285,16 @@ mod tests {
     }
 
     #[test]
-    fn test_task_queue_uses_default_or_validates_override() {
-        assert_eq!(resolve_queue(None, "lab").unwrap(), "lab");
+    fn test_task_queue_prefixes_deployed_worker_name() {
+        assert_eq!(task_queue_for("alice", "example").unwrap(), "alice-example");
         assert_eq!(
-            resolve_queue(Some("alice-greet".into()), "lab").unwrap(),
-            "alice-greet"
+            task_queue_for("bob", "nightly_tools").unwrap(),
+            "bob-nightly_tools"
         );
-        assert!(resolve_queue(Some("  ".into()), "lab").is_err());
-        assert!(resolve_queue(None, " ").is_err());
+        for invalid in ["", " ", "Alice", "1worker", "team/worker"] {
+            assert!(task_queue_for(invalid, "tools").is_err());
+            assert!(task_queue_for("alice", invalid).is_err());
+        }
     }
 
     #[tokio::test]

@@ -16,8 +16,11 @@ fn already_exists(err: &ScheduleError) -> bool {
 
 #[tokio::main]
 async fn main() -> boreal_worker::Result<()> {
+    let worker = std::env::args()
+        .nth(1)
+        .ok_or("usage: greet-schedule <worker-name>")?;
+    let queue = boreal_worker::task_queue(&worker)?;
     let client = boreal_worker::connect().await?;
-    let queue = boreal_worker::task_queue("greet")?;
     let spec = ScheduleSpec::from_interval(Duration::from_secs(30));
     let input = DemoInput {
         name: "Scheduler".into(),

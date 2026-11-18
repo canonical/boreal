@@ -89,8 +89,10 @@ For user `<user>` and worker `<worker>`, Boreal isolates PostgreSQL and
 `boreal-worker-<user>-<worker>.service` inside
 `/run/netns/boreal-worker-<user>-<worker>` with `TEMPORAL_ADDRESS`
 (`boreal.temporalAddress`, default `127.0.0.1:7233`),
-`TEMPORAL_NAMESPACE=<user>`, and `LAB_TASK_QUEUE=<user>-<worker>`. Do not mix
-differently registered worker packages on the same queue.
+and `TEMPORAL_NAMESPACE=<user>`. Both worker and schedule executables receive
+`<worker>` as their first argument. Use `boreal_worker::task_queue(worker)`
+to derive `<user>-<worker>` from the Temporal namespace and deployed worker
+name. Do not mix differently registered worker packages on the same queue.
 
 Build the worker crate with `boreal.lib.buildRustWorker` and list every bin as
 an output, plus `schema`:

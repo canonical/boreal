@@ -402,7 +402,7 @@ let
         enable = true;
         package = updaterStub;
       };
-      users.alice.workers.hello = {
+      users.alice.workers.daily = {
         package = helloBin.hello;
         schedule = {
           enable = true;
@@ -411,6 +411,7 @@ let
       };
     };
   };
+  scheduleService = schedulerHost.systemd.services.boreal-schedule-alice-daily;
 in
 assert configured.boreal.users.alice.editMode == "emacs";
 assert configured.boreal.users.bob.editMode == "helix";
@@ -477,32 +478,27 @@ assert
   == "127.0.0.1:7234";
 assert
   configured.systemd.services.boreal-worker-alice-train.environment.TEMPORAL_NAMESPACE == "alice";
-assert
-  configured.systemd.services.boreal-worker-alice-train.environment.LAB_TASK_QUEUE == "alice-train";
+assert !(configured.systemd.services.boreal-worker-alice-train.environment ? LAB_TASK_QUEUE);
 assert
   configured.systemd.services.boreal-worker-alice-train.serviceConfig.ExecStart
-  == "${trainBin.train}/bin/train";
+  == "${trainBin.train}/bin/train train";
 assert
   configured.systemd.services.boreal-worker-alice-eval.serviceConfig.ExecStart
-  == "${evalBin.eval}/bin/eval";
+  == "${evalBin.eval}/bin/eval eval";
 assert !configured.systemd.services ? boreal-schedule-alice-train;
-assert schedulerHost.systemd.services.boreal-schedule-alice-hello.serviceConfig.Type == "oneshot";
-assert schedulerHost.systemd.services.boreal-schedule-alice-hello.serviceConfig.RemainAfterExit;
-assert schedulerHost.systemd.services.boreal-schedule-alice-hello.serviceConfig.User == "alice";
+assert scheduleService.serviceConfig.Type == "oneshot";
+assert scheduleService.serviceConfig.RemainAfterExit;
+assert scheduleService.serviceConfig.User == "alice";
+assert scheduleService.serviceConfig.NetworkNamespacePath == "/run/netns/boreal-worker-alice-daily";
 assert
-  schedulerHost.systemd.services.boreal-schedule-alice-hello.serviceConfig.NetworkNamespacePath
-  == "/run/netns/boreal-worker-alice-hello";
+  schedulerHost.systemd.services.boreal-worker-alice-daily.serviceConfig.ExecStart
+  == "${helloBin.hello}/bin/hello daily";
 assert
-  schedulerHost.systemd.services.boreal-schedule-alice-hello.serviceConfig.ExecStart
-  == "${helloBin.hello-schedule}/bin/hello-schedule";
-assert
-  schedulerHost.systemd.services.boreal-schedule-alice-hello.environment.TEMPORAL_NAMESPACE
-  == "alice";
-assert
-  schedulerHost.systemd.services.boreal-schedule-alice-hello.environment.LAB_TASK_QUEUE
-  == "alice-hello";
-assert !(schedulerHost.systemd.services.boreal-schedule-alice-hello.serviceConfig ? PrivateNetwork);
-assert lib.hasInfix "boreal-schedule-alice-hello.service" (
+  scheduleService.serviceConfig.ExecStart == "${helloBin.hello-schedule}/bin/hello-schedule daily";
+assert scheduleService.environment.TEMPORAL_NAMESPACE == "alice";
+assert !(scheduleService.environment ? LAB_TASK_QUEUE);
+assert !(scheduleService.serviceConfig ? PrivateNetwork);
+assert lib.hasInfix "boreal-schedule-alice-daily.service" (
   builtins.readFile schedulerHost.environment.etc."boreal/updater.yaml".source
 );
 assert configured.systemd.services.boreal-updater.serviceConfig.User == "root";
