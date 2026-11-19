@@ -22,7 +22,15 @@
         "aarch64-linux"
       ];
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
+      # Public test SSH key shared by disposable demo accounts.
       publicKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINuoseDzo0mUwBthHFnKfNPK1EdJTrpv7boeC1ybMsty";
+      demo = {
+        centralIp = "192.0.2.1";
+        peripheralIp = "192.0.2.2";
+        port = 7443;
+        clientDirectory = "/run/boreal-demo-client";
+      };
+      specialArgs = { inherit self demo publicKey; };
       mkTemporalCrate =
         pkgs: pname: bins:
         boreal.lib.buildRustWorker pkgs {
@@ -78,30 +86,36 @@
         }
       );
 
-      nixosConfigurations.boreal-vm = boreal.lib.mkVm {
-        system = "x86_64-linux";
-        specialArgs = { inherit self; };
-        modules = [
-          ./lab.nix
-          (
-            { pkgs, ... }:
-            {
-              nix.settings.substituters = [
-                "https://mirrors.bfsu.edu.cn/nix-channels/store"
-                "https://mirror.sjtu.edu.cn/nix-channels/store"
-              ];
-              boreal.updater.enable = true;
-              boreal.vm.adminKeys = [ publicKey ];
-            }
-          )
-        ];
+      nixosConfigurations = {
+        boreal-vm = boreal.lib.mkVm {
+          system = "x86_64-linux";
+          inherit specialArgs;
+          modules = [
+            ./lab.nix
+            ./demo-central.nix
+          ];
+        };
+        compute-01 = boreal.lib.mkHost {
+          system = "x86_64-linux";
+          inherit specialArgs;
+          modules = [
+            ./lab.nix
+            ./demo-peripheral.nix
+          ];
+        };
       };
 
       checks = forAllSystems (pkgs: {
         lab = boreal.lib.mkLabCheck {
+          inherit pkgs specialArgs;
+          modules = [
+            ./lab.nix
+            { boreal.remote.central = self.nixosConfigurations.boreal-vm.config.boreal.remote.central; }
+          ];
+        };
+        fleet = boreal.lib.mkFleetCheck {
           inherit pkgs;
-          specialArgs = { inherit self; };
-          modules = [ ./lab.nix ];
+          hosts = { inherit (self.nixosConfigurations) boreal-vm compute-01; };
         };
       });
 
