@@ -9,6 +9,7 @@ let
   borealCfg = config.boreal;
   cfg = borealCfg.admin;
   yamlFormat = pkgs.formats.yaml { };
+  mkShellRc = import ./shell-rc.nix { inherit lib pkgs; };
 
   workerUnits = lib.concatLists (
     lib.mapAttrsToList (
@@ -56,6 +57,16 @@ in
       default = false;
       description = "Allow boreal-admin to power off the system (intended for disposable VMs).";
     };
+
+    editMode = lib.mkOption {
+      type = lib.types.enum [
+        "emacs"
+        "vi"
+        "helix"
+      ];
+      default = "emacs";
+      description = "Interactive line-editing mode written to the admin account's ~/.borealrc.";
+    };
   };
 
   config = lib.mkIf (borealCfg.enable && cfg.enable) {
@@ -75,6 +86,10 @@ in
     systemd.tmpfiles.rules = [
       "d /etc/boreal-admin 0750 root boreal-admin -"
     ];
+
+    systemd.services.boreal-user-rc-admin =
+      mkShellRc "admin" config.users.users.admin.home
+        cfg.editMode;
 
     environment.etc."boreal-admin/policy.yaml" = {
       source = yamlFormat.generate "boreal-admin-policy.yaml" adminPolicy;

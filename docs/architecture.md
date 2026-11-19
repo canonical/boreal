@@ -13,7 +13,7 @@ Nix generates protected, group-readable catalogs under `/etc/boreal/` (`0750`,
 `root:boreal`) outside writable home directories and without secrets in the Nix
 store:
 
-- `/etc/boreal/version` (`0440`, `root:boreal`): downstream lab version
+- `/etc/boreal/version` (`0440`, `root:boreal`): legacy downstream lab version
   (`boreal.version`, defaulting to `temporal/Cargo.toml`
   `workspace.package.version`).
 - `/etc/boreal/schemas.yaml` (`0440`, `root:boreal`): store directories that
@@ -24,6 +24,12 @@ store:
   and `write` (`run`, `cancel`) policies (`true` grants all Boreal users,
   `false` grants none beyond the owner, and a list grants named Boreal users;
   owners always control their own workers).
+
+`/etc/boreal-deployment` (`0444`, `root:root`) holds only the label for the
+running generation. Both shells read it without granting the admin account
+access to the Boreal catalog or broker. Deployment tooling checks exact Git
+tags before building and passes the captured tags into pure Nix evaluation
+along with the pinned downstream revision.
 
 ## Host and network-namespace isolation
 
@@ -78,13 +84,13 @@ OpenSSH disables root login, SFTP, TCP/Unix/agent/X11 forwarding, tunnels,
 and login shell `boreal-shell`. Interactive sessions read `~/.borealrc` (`0600`
 regular file, `O_NOFOLLOW`, provisioned from `boreal.users.<name>.editMode` as
 `emacs`, `vi`, or `helix` with `emacs` fallback), render a two-line
-Starship-style prompt (`<user> on 󰇅 <host> [ <paused>  <running>] is ❄️ v<version>`,
+Starship-style prompt (`<user> on 󰇅 <host> [ <paused>  <running>] is ❄️ <deployment>`,
 with a line-2 red `󰞴` drain badge and modal `❯`/`❮` indicators), and expose
 dynamic `clap` / `reedline` commands (`workers`, `run`, `list`, `status`,
 `result`, `view`, `cancel`, `permissions`, `secrets`, `help`, `exit`), an
 alternate-screen `view` TUI for live step/event inspection, and
-permission-filtered completions; non-interactive SSH accepts only
-`secrets set <name>`.
+permission-filtered completions. Non-interactive SSH accepts `run`, `list`,
+`status`, `result`, and `secrets set <name>` without prompting.
 
 Secrets live in `~/.config/boreal/secrets/<name>` (`0700` directory, `0600`
 regular files, `O_NOFOLLOW`) and are written via non-echo TTY prompt or stdin
@@ -97,6 +103,9 @@ values.
 
 `boreal.admin` provisions `admin` with login shell `boreal-admin` and a narrow
 `NOPASSWD` `sudo` rule permitting only `/nix/store/.../bin/boreal-admin-ctl`.
+The admin shell shares the terminal UI and supports `boreal.admin.editMode`,
+but it uses its own command policy, does not query workflow status, and keeps
+history only for the current session.
 `boreal-admin-ctl` clears its environment, sets `umask 077` and `chdir /`, and
 permits only status/start/stop/restart on `temporal.service` and configured
 `boreal-worker-*` units, zero-argument `updater` subcommands (`update`,

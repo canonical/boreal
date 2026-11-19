@@ -3,7 +3,6 @@ use std::env;
 use std::io::{self, Write};
 use std::sync::Arc;
 
-use boreal_common::catalog;
 use boreal_common::os;
 use boreal_common::wire::PromptSummary;
 use crossterm::{queue, style, terminal};
@@ -79,55 +78,34 @@ pub fn write_title_exit<W: Write>(writer: &mut W) -> io::Result<()> {
 pub struct Prompt {
     window_title: String,
     prefix: String,
-    version_suffix: String,
+    deployment_suffix: String,
     rendered_left: String,
     last_ok: bool,
     helix_state: Option<Arc<helix::State>>,
 }
 
 impl Prompt {
-    pub fn new<S: AsRef<str>, V: AsRef<str>>(
-        caller: S,
+    pub fn new(
+        caller: &str,
         host: Host,
-        version: V,
+        deployment: &str,
         helix_state: Option<Arc<helix::State>>,
     ) -> Self {
-        let clean_caller: String = caller
-            .as_ref()
-            .chars()
-            .filter(|c| !c.is_control())
-            .collect();
+        let clean_caller: String = caller.chars().filter(|c| !c.is_control()).collect();
         let host_label = match &host {
             Host::Live(name) => os::sanitize_hostname(name),
             Host::Mock => String::from("mock"),
         };
-        let raw_ver: String = version
-            .as_ref()
-            .trim()
-            .chars()
-            .filter(|c| !c.is_control() && !c.is_whitespace())
-            .collect();
-        let ver_body = raw_ver
-            .strip_prefix('v')
-            .filter(|s| !s.is_empty())
-            .unwrap_or(if raw_ver.is_empty() {
-                catalog::default_lab_version()
-            } else {
-                &raw_ver
-            });
         let window_title = format!("Boreal {clean_caller}@{host_label}");
         let user_seg = Color::Cyan.paint(&clean_caller);
         let host_seg = Color::Purple.paint(format!("{HOST_ICON} {host_label}"));
         let prefix = format!("{user_seg} on {host_seg}");
-        let version_suffix = format!(
-            " is {SNOWFLAKE} {}",
-            Color::Cyan.paint(format!("v{ver_body}"))
-        );
-        let rendered_left = format!("{prefix}{version_suffix}\n");
+        let deployment_suffix = format!(" is {SNOWFLAKE} {}", Color::Cyan.paint(deployment));
+        let rendered_left = format!("{prefix}{deployment_suffix}\n");
         Self {
             window_title,
             prefix,
-            version_suffix,
+            deployment_suffix,
             rendered_left,
             last_ok: true,
             helix_state,
@@ -167,7 +145,7 @@ impl Prompt {
             line.push_str(&Color::DarkGray.paint("]").to_string());
         }
 
-        line.push_str(&self.version_suffix);
+        line.push_str(&self.deployment_suffix);
         line.push('\n');
         if summary.is_some_and(|s| s.draining) {
             line.push_str(DRAIN_BADGE);
@@ -286,19 +264,14 @@ mod tests {
 
     #[test]
     fn test_status_line_segments_and_drain_badge() {
-        let mut live = Prompt::new(
-            "alice",
-            Host::Live("demo-lab\n".into()),
-            catalog::default_lab_version(),
-            None,
-        );
+        let mut live = Prompt::new("alice", Host::Live("demo-lab\n".into()), "d9c4975", None);
         assert_eq!(
             strip_ansi(&live.render_prompt_left()),
-            "alice on 󰇅 demo-lab is ❄️ v0.1.0\n"
+            "alice on 󰇅 demo-lab is ❄️ d9c4975\n"
         );
 
         let cases = [
-            (None, "alice on 󰇅 demo-lab is ❄️ v0.1.0\n"),
+            (None, "alice on 󰇅 demo-lab is ❄️ d9c4975\n"),
             (
                 Some(PromptSummary {
                     workflows: Some(WorkflowCounts {
@@ -307,7 +280,7 @@ mod tests {
                     }),
                     draining: false,
                 }),
-                "alice on 󰇅 demo-lab is ❄️ v0.1.0\n",
+                "alice on 󰇅 demo-lab is ❄️ d9c4975\n",
             ),
             (
                 Some(PromptSummary {
@@ -317,7 +290,7 @@ mod tests {
                     }),
                     draining: false,
                 }),
-                "alice on 󰇅 demo-lab [ 1] is ❄️ v0.1.0\n",
+                "alice on 󰇅 demo-lab [ 1] is ❄️ d9c4975\n",
             ),
             (
                 Some(PromptSummary {
@@ -327,7 +300,7 @@ mod tests {
                     }),
                     draining: false,
                 }),
-                "alice on 󰇅 demo-lab [ 2] is ❄️ v0.1.0\n",
+                "alice on 󰇅 demo-lab [ 2] is ❄️ d9c4975\n",
             ),
             (
                 Some(PromptSummary {
@@ -337,7 +310,7 @@ mod tests {
                     }),
                     draining: false,
                 }),
-                "alice on 󰇅 demo-lab [ 1  2] is ❄️ v0.1.0\n",
+                "alice on 󰇅 demo-lab [ 1  2] is ❄️ d9c4975\n",
             ),
             (
                 Some(PromptSummary {
@@ -347,14 +320,14 @@ mod tests {
                     }),
                     draining: true,
                 }),
-                "alice on 󰇅 demo-lab [ 1  2] is ❄️ v0.1.0\n󰞴 ",
+                "alice on 󰇅 demo-lab [ 1  2] is ❄️ d9c4975\n󰞴 ",
             ),
             (
                 Some(PromptSummary {
                     workflows: None,
                     draining: true,
                 }),
-                "alice on 󰇅 demo-lab is ❄️ v0.1.0\n󰞴 ",
+                "alice on 󰇅 demo-lab is ❄️ d9c4975\n󰞴 ",
             ),
         ];
         for (summary, expected) in cases {
@@ -372,13 +345,13 @@ mod tests {
             ERR_INSERT_INDICATOR
         );
 
-        let mock = Prompt::new("alice", Host::Mock, "v0.4.2", None);
+        let tagged = Prompt::new("admin", Host::Live("demo-lab".into()), "v0.4.2", None);
         assert_eq!(
-            strip_ansi(&mock.render_prompt_left()),
-            "alice on 󰇅 mock is ❄️ v0.4.2\n"
+            strip_ansi(&tagged.render_prompt_left()),
+            "admin on 󰇅 demo-lab is ❄️ v0.4.2\n"
         );
         assert_eq!(live.window_title(), "Boreal alice@demo-lab");
-        assert_eq!(mock.window_title(), "Boreal alice@mock");
+        assert_eq!(tagged.window_title(), "Boreal admin@demo-lab");
     }
 
     #[test]
@@ -400,7 +373,7 @@ mod tests {
         let hx_state = Arc::new(helix::State::new());
         let mut hx =
             helix::Helix::with_state(default_vi_insert_keybindings(), Arc::clone(&hx_state));
-        let prompt = Prompt::new("bob", Host::Mock, "0.1.0", Some(hx_state));
+        let prompt = Prompt::new("bob", Host::Mock, "unknown", Some(hx_state));
 
         assert_eq!(
             prompt.render_prompt_indicator(hx.edit_mode()),

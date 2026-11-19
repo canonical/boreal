@@ -52,10 +52,13 @@ updater status
 1. **Sync & prebuild (`update`)**: verifies `/etc/nixos` and `/etc/nixos/.git`
    ownership/permissions, resolves the checked-out branch's upstream `https://`
    remote and branch, fetches and hard-resets `/etc/nixos` to the upstream
-   commit (`-c core.hooksPath=/dev/null`), verifies `flake.lock` hygiene, builds
-   `git+file:///etc/nixos?rev=<rev>#nixosConfigurations.<host>.config.system.build.toplevel`
-   with `--no-update-lock-file --no-write-lock-file` to a distinct
-   `/var/lib/boreal-updater/attempt-*/result` GC root, and records `prebuilt`
+   commit (`-c core.hooksPath=/dev/null`), and verifies `flake.lock` hygiene.
+   It looks up tags on the HTTPS upstream, matches lightweight and annotated
+   version tags to the pinned commit, and builds that revision's
+   `nixosConfigurations.<host>.config.system.build.toplevel` with
+   `--no-update-lock-file --no-write-lock-file`. Exact version tags are passed
+   into pure evaluation for the new generation's SSH prompt. The build uses a
+   distinct `/var/lib/boreal-updater/attempt-*/result` GC root and records `prebuilt`
    (or `blocked` when `allowSwitch` is `false`).
 2. **Schedule switch (`schedule`)**: verifies `phase=prebuilt`, `allowSwitch`,
    the prebuilt GC root, and an open broker admission gate, persists

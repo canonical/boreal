@@ -9,12 +9,14 @@ let
         (fs.unions [
           ../common
           ../admin
+          ../shell
           ../templates/default/temporal/Cargo.toml
         ])
         (
           fs.unions [
             (fs.maybeMissing ../common/target)
             (fs.maybeMissing ../admin/target)
+            (fs.maybeMissing ../shell/target)
           ]
         );
   };

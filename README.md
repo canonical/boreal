@@ -36,10 +36,11 @@ deployment.
   `cancel`, `status`, `result`, `view`, `list`, and `permissions`, and verifies
   the registered `workflow` and pinned `run_id` on existing executions.
 - **Restricted SSH shell & user secrets**: OpenSSH disables SFTP, TCP/Unix/agent
-  forwarding, tunnels, and `~/.ssh/rc`. `boreal-shell` renders a two-line
-  Starship-style status prompt (`<user> on 󰇅 <host> [ <paused>  <running>] is ❄️ v<version>`
-  from `temporal/Cargo.toml`, with line-2 red `󰞴` drain badge and modal `❯`/`❮`
-  indicators), drives commands, live `view` TUI inspection, and
+  forwarding, tunnels, and `~/.ssh/rc`. Both shells share a two-line prompt
+  (`<user> on 󰇅 <host> is ❄️ <deployment>`) and modal `❯`/`❮` indicators.
+  The deployment label is the downstream Git hash or an exact version tag.
+  `boreal-shell` also shows workflow counts and a red `󰞴` drain badge, and
+  drives commands, live `view` TUI inspection, and
   permission-filtered completions from `/etc/boreal/`. The private
   `~/boreal.history` keeps up to 2,000 interactive command selectors, never
   workflow inputs or scripted invocations. The shell requires `[y/N]`
@@ -57,6 +58,27 @@ deployment.
   prebuilt closure, fails closed on uncertainty, and never runs automatic GC.
 
 See [architecture](docs/architecture.md) and [updater](updater/README.md).
+
+## Label a deployment with its Git version tag
+
+Git-backed downstream flakes that pass `specialArgs = { inherit self; };`
+(including `demo-lab` and the starter template) show their seven-character
+commit hash in both SSH prompts. For release builds, use the updater or build
+from a clean downstream checkout with `boreal-build`:
+
+```sh
+nix run github:canonical/boreal#boreal-build -- . lab-01
+# Use `vm` as the third argument to build a configured VM instead:
+nix run github:canonical/boreal#boreal-build -- . boreal-vm vm
+```
+
+`boreal-build` only builds and creates a `result` link; it does not activate the
+generation. The label uses a version tag such as `v1.2.3` on the exact built
+commit, including annotated tags. If several version tags match, it uses the
+first in lexical order. Plain flake builds use the hash because Nix does not
+expose Git tags to flake evaluation. A dirty source uses `<hash>-dirty` when
+Nix provides a dirty revision. Sources without revision metadata (including
+some builds using `--override-input`) show `unknown`.
 
 ## Run a workflow
 
@@ -160,8 +182,8 @@ separate private Git remotes.
   - `default` / `boreal` — `boreal.enable`, `boreal.users`, `boreal.admin`,
     and `boreal.updater`.
   - `vm` — disposable QEMU guest configuration (`boreal.vm.*`).
-- `packages.<system>`: `boreal-broker`, `boreal-shell`, `boreal-admin`, and
-  `boreal-updater`.
+- `packages.<system>`: `boreal-broker`, `boreal-shell`, `boreal-admin`,
+  `boreal-build`, and `boreal-updater`.
 
 See [host configuration](docs/host.md), [VM guide](docs/vm.md), and
 [worker runtime](worker/README.md) for downstream usage details.

@@ -2,21 +2,16 @@ mod policy;
 
 use std::env;
 use std::error::Error;
-use std::ffi::OsString;
-use std::io::{self, IsTerminal};
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::sync::Arc;
 
+use boreal_common::os;
+use boreal_shell::completion::Grammar;
+use boreal_shell::terminal::{self, Host, Invocation, Session, Submission};
 use clap::builder::{PossibleValue, PossibleValuesParser};
 use clap::error::ErrorKind;
 use clap::{Arg, Command as ClapCommand};
-use crossterm::cursor::SetCursorStyle;
-use nu_ansi_term::{Color, Style};
-use reedline::{
-    ColumnarMenu, Completer as ReedlineCompleter, CursorConfig, DefaultHinter, DefaultPrompt,
-    DefaultPromptSegment, Emacs, KeyCode, KeyModifiers, MenuBuilder, OutputMode, Reedline,
-    ReedlineEvent, ReedlineMenu, Signal, Span, StyledText, Suggestion, default_emacs_keybindings,
-};
 
 use crate::policy::AdminPolicy;
 
@@ -94,7 +89,6 @@ impl AdminGrammar {
         if words.is_empty() {
             return Ok(None);
         }
-        // Reject shell chaining/redirection tokens explicitly even if unquoted.
         let mut cmd = self.cli();
         let matches = cmd
             .try_get_matches_from_mut(
@@ -165,98 +159,18 @@ enum ParseErr {
     Clap(clap::Error),
 }
 
-struct Completer {
-    grammar: Arc<AdminGrammar>,
-}
-
-impl ReedlineCompleter for Completer {
-    fn complete(&mut self, line: &str, pos: usize) -> Vec<Suggestion> {
-        if pos > line.len() || !line.is_char_boundary(pos) {
-            return Vec::new();
-        }
-        let before = &line[..pos];
-        let start = before.rfind([' ', '\t']).map_or(0, |idx| idx + 1);
-        let prefix = &before[start..];
-        let Some(prev) = shlex::split(&before[..start]) else {
-            return Vec::new();
-        };
-        let mut cmd = self.grammar.cli();
-        let mut args = vec![OsString::from("boreal-admin")];
-        args.extend(prev.into_iter().map(OsString::from));
-        let index = args.len();
-        args.push(OsString::from(prefix));
-
-        let Ok(candidates) = clap_complete::engine::complete(&mut cmd, args, index, None) else {
-            return Vec::new();
-        };
-        candidates
-            .into_iter()
-            .filter_map(|c| {
-                let val = c.get_value().to_str()?.to_owned();
-                if !val.starts_with(prefix) {
-                    return None;
-                }
-                Some(Suggestion {
-                    value: val,
-                    description: c.get_help().map(ToString::to_string),
-                    span: Span::new(start, pos),
-                    append_whitespace: pos == line.len(),
-                    ..Suggestion::default()
-                })
-            })
-            .collect()
-    }
-}
-
-struct SimpleHighlighter {
-    commands: Vec<String>,
-}
-
-impl SimpleHighlighter {
-    fn new(grammar: &AdminGrammar) -> Self {
-        let mut cli = grammar.cli();
-        cli.build();
-        let commands = cli
-            .get_subcommands()
-            .map(|c| c.get_name().to_owned())
-            .collect();
-        Self { commands }
-    }
-}
-
-impl reedline::Highlighter for SimpleHighlighter {
-    fn highlight(&self, line: &str, _cursor: usize) -> StyledText {
-        let mut out = StyledText::new();
-        let trimmed = line.trim_start();
-        let lead = line.len() - trimmed.len();
-        if lead > 0 {
-            out.push((Style::new(), line[..lead].to_owned()));
-        }
-        let end = trimmed.find([' ', '\t']).unwrap_or(trimmed.len());
-        let first = &trimmed[..end];
-        if !first.is_empty() {
-            let style = if self.commands.iter().any(|c| c == first) {
-                Style::new().fg(Color::Green)
-            } else if self.commands.iter().any(|c| c.starts_with(first)) {
-                Style::new().underline()
-            } else {
-                Style::new().fg(Color::Red)
-            };
-            out.push((style, first.to_owned()));
-            if end < trimmed.len() {
-                out.push((Style::new(), trimmed[end..].to_owned()));
-            }
-        }
-        out
+impl Grammar for AdminGrammar {
+    fn cli(&self, _previous: &[String]) -> ClapCommand {
+        self.cli()
     }
 }
 
 fn load_policy() -> Result<AdminPolicy, String> {
-    if !std::path::Path::new(policy::DEFAULT_ADMIN_POLICY).exists()
-        && env::var_os("SSH_CONNECTION").is_none()
+    if !Path::new(policy::DEFAULT_ADMIN_POLICY).exists()
+        && !terminal::is_ssh_session()
         && let Ok(test_path) = env::var("BOREAL_TEST_ADMIN_POLICY")
     {
-        return AdminPolicy::load_from_path(std::path::Path::new(&test_path), None);
+        return AdminPolicy::load_from_path(Path::new(&test_path), None);
     }
     AdminPolicy::load_system()
 }
@@ -271,86 +185,52 @@ fn run_single_command(grammar: &AdminGrammar, raw: &str) -> Result<(), String> {
 }
 
 fn run_interactive(grammar: Arc<AdminGrammar>) -> Result<(), Box<dyn Error>> {
-    if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
-        return Err("boreal-admin requires an interactive terminal".into());
-    }
+    terminal::require_tty("boreal-admin")?;
     println!("Boreal restricted admin shell. Type help for permitted commands.");
 
-    let mut keys = default_emacs_keybindings();
-    keys.add_binding(
-        KeyModifiers::NONE,
-        KeyCode::Tab,
-        ReedlineEvent::UntilFound(vec![
-            ReedlineEvent::Menu("completion".into()),
-            ReedlineEvent::MenuNext,
-        ]),
-    );
-    let menu = ColumnarMenu::default()
-        .with_name("completion")
-        .with_output_mode(OutputMode::SuggestedSpan);
-
-    let mut editor = Reedline::create()
-        .with_completer(Box::new(Completer {
-            grammar: Arc::clone(&grammar),
-        }))
-        .with_highlighter(Box::new(SimpleHighlighter::new(&grammar)))
-        .with_hinter(Box::new(DefaultHinter::default()))
-        .with_menu(ReedlineMenu::EngineCompleter(Box::new(menu)))
-        .with_cursor_config(CursorConfig {
-            emacs: Some(SetCursorStyle::SteadyBar),
-            ..CursorConfig::default()
-        })
-        .with_edit_mode(Box::new(Emacs::new(keys)));
-
-    let prompt = DefaultPrompt::new(
-        DefaultPromptSegment::Basic("boreal-admin".into()),
-        DefaultPromptSegment::Empty,
-    );
-
-    loop {
-        match editor.read_line(&prompt)? {
-            Signal::Success(line) => match grammar.parse(&line) {
-                Ok(Some(AdminAction::Exit)) => break,
-                Ok(Some(action)) => {
-                    if let Err(err) = grammar.execute(&action) {
-                        eprintln!("error: {err}");
-                    }
-                }
-                Ok(None) => {}
-                Err(ParseErr::Quote) => eprintln!("error: unfinished quote or escape"),
-                Err(ParseErr::Clap(err)) => err.print()?,
-            },
-            Signal::CtrlC => continue,
-            Signal::CtrlD | Signal::ExternalBreak(_) => break,
-            _ => continue,
-        }
+    let uid = os::current_euid();
+    let identity = os::user_by_uid(uid).map_err(|err| err.detail());
+    let home = if !Path::new(policy::DEFAULT_ADMIN_POLICY).exists()
+        && !terminal::is_ssh_session()
+        && let Some(test_home) = env::var_os("BOREAL_TEST_HOME")
+    {
+        Ok(PathBuf::from(test_home))
+    } else {
+        identity.as_ref().map(|user| user.home().to_owned())
+    };
+    Session {
+        program: "boreal-admin",
+        caller: identity.as_ref().map_or("admin", |user| user.name()),
+        host: Host::live_system(),
+        home: home.as_deref().map_err(|err| err.as_str()),
+        history: None,
     }
-    Ok(())
+    .run(
+        Arc::clone(&grammar),
+        || None,
+        |line| match grammar.parse(line) {
+            Ok(Some(AdminAction::Exit)) => Ok(Submission::Exit),
+            Ok(Some(action)) => grammar
+                .execute(&action)
+                .map(|()| Submission::Continue(true))
+                .map_err(terminal::Error::Command),
+            Ok(None) => Ok(Submission::Continue(true)),
+            Err(ParseErr::Quote) => Err(terminal::Error::Quote),
+            Err(ParseErr::Clap(err)) => Err(terminal::Error::Clap(err)),
+        },
+    )
 }
 
 fn run() -> Result<(), Box<dyn Error>> {
     let grammar = Arc::new(AdminGrammar {
         policy: load_policy()?,
     });
-    if let Some(orig_os) = env::var_os("SSH_ORIGINAL_COMMAND") {
-        let orig = orig_os
-            .into_string()
-            .map_err(|_| "SSH command must be UTF-8")?;
-        run_single_command(&grammar, &orig)?;
-        return Ok(());
-    }
-    let args: Vec<_> = env::args_os().skip(1).collect();
-    match args.as_slice() {
-        [] => run_interactive(grammar),
-        [flag, cmd] if flag == "-c" => {
-            let s = cmd.to_str().ok_or("SSH command must be UTF-8")?;
-            run_single_command(&grammar, s)?;
+    match Invocation::from_env()? {
+        Invocation::Interactive => run_interactive(grammar),
+        Invocation::Command(command) => {
+            run_single_command(&grammar, &command)?;
             Ok(())
         }
-        _ => Err(
-            "unsupported invocation; use interactive boreal-admin or a permitted admin subcommand"
-                .into(),
-        ),
     }
 }
 
@@ -415,22 +295,29 @@ allowPoweroff: false
             Some(AdminAction::UpdaterRecover)
         );
 
-        let mut completer = Completer {
-            grammar: Arc::new(sample_grammar()),
+        let complete = |line: &str| {
+            boreal_shell::completion::candidates(&g, line, line.len())
+                .into_iter()
+                .map(|s| s.display_value().to_owned())
+                .collect::<Vec<_>>()
         };
-        let suggestions: Vec<_> = completer
-            .complete("updater ", 8)
-            .into_iter()
-            .map(|s| s.value)
-            .collect();
+        let suggestions = complete("updater ");
         for expected in ["update", "schedule", "status", "recover"] {
             assert!(suggestions.iter().any(|s| s == expected), "{suggestions:?}");
         }
+        let mut units = complete("service restart temp");
+        units.sort_unstable();
+        assert_eq!(units, ["temporal", "temporal.service"]);
+        assert!(complete("pow").is_empty());
+        assert!(complete("ru").is_empty());
+        assert!(complete("sec").is_empty());
 
         for rejected in [
             "/bin/sh",
             "cat /home/alice/.config/boreal/secrets/tok",
             "sftp-server",
+            "run greet",
+            "secrets list",
             "service restart sshd",
             "service status postgresql",
             "services; id",

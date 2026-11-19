@@ -259,6 +259,7 @@ let
       specialArgs = {
         self = {
           outPath = mockDownstreamRoot;
+          sourceInfo.rev = "d9c49750000000000000000000000000000000000";
         };
       };
       modules = [
@@ -309,6 +310,7 @@ let
     }).config;
 
   versionEtc = configured.environment.etc."boreal/version";
+  deploymentEtc = selfManifestHost.environment.etc."boreal-deployment";
   schemasEtc = configured.environment.etc."boreal/schemas.yaml";
   alicePermsEtc = configured.environment.etc."boreal/users/alice/perms.yaml";
   bobPermsEtc = configured.environment.etc."boreal/users/bob/perms.yaml";
@@ -446,6 +448,11 @@ assert selfManifestHost.boreal.version == "1.2.3";
 assert selfManifestHost.environment.etc."boreal/version".text == "1.2.3\n";
 assert versionEtc.user == "root" && versionEtc.group == "boreal" && versionEtc.mode == "0440";
 assert versionEtc.text == "0.1.0\n";
+assert import ./deployment-label.nix;
+assert deploymentEtc.text == "d9c4975\n";
+assert
+  deploymentEtc.user == "root" && deploymentEtc.group == "root" && deploymentEtc.mode == "0444";
+assert configured.systemd.services.boreal-user-rc-admin.serviceConfig.User == "admin";
 assert schemasEtc.user == "root" && schemasEtc.group == "boreal" && schemasEtc.mode == "0440";
 assert
   alicePermsEtc.user == "root" && alicePermsEtc.group == "boreal" && alicePermsEtc.mode == "0440";

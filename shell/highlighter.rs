@@ -4,18 +4,17 @@ use std::{iter::Peekable, str::CharIndices};
 use nu_ansi_term::{Color, Style};
 use reedline::{Completer as _, StyledText};
 
-use crate::command::Context;
-use crate::completion::Completer;
+use crate::completion::{Completer, Grammar};
 
 /// Highlights the shell's command words and option-like arguments.
-pub struct Highlighter {
-    ctx: Arc<Context>,
+pub struct Highlighter<G> {
+    grammar: Arc<G>,
     commands: Vec<String>,
 }
 
-impl Highlighter {
-    pub fn new(ctx: Arc<Context>) -> Self {
-        let mut cli = ctx.cli(None);
+impl<G: Grammar> Highlighter<G> {
+    pub fn new(grammar: Arc<G>) -> Self {
+        let mut cli = grammar.cli(&[]);
         cli.build();
         let commands = cli
             .get_subcommands()
@@ -24,11 +23,11 @@ impl Highlighter {
             })
             .map(str::to_owned)
             .collect();
-        Self { ctx, commands }
+        Self { grammar, commands }
     }
 }
 
-impl reedline::Highlighter for Highlighter {
+impl<G: Grammar + Send + Sync> reedline::Highlighter for Highlighter<G> {
     fn highlight(&self, line: &str, cursor: usize) -> StyledText {
         let mut text = StyledText::new();
         let mut words = Words::new(line);
@@ -46,7 +45,7 @@ impl reedline::Highlighter for Highlighter {
                     .iter()
                     .any(|name| name.starts_with(&command.value))
                     || (command.start..=command.end).contains(&cursor)
-                        && Completer::new(Arc::clone(&self.ctx))
+                        && Completer::new(Arc::clone(&self.grammar))
                             .complete(line, cursor)
                             .iter()
                             .any(|candidate| {
@@ -210,8 +209,20 @@ mod tests {
     use super::*;
     use reedline::Highlighter as _;
 
-    fn mock_highlighter() -> Highlighter {
-        Highlighter::new(Arc::new(Context::mock()))
+    struct MockGrammar;
+
+    impl Grammar for MockGrammar {
+        fn cli(&self, _previous: &[String]) -> clap::Command {
+            ["workers", "secrets", "list", "run", "status"]
+                .into_iter()
+                .fold(clap::Command::new("boreal"), |cli, name| {
+                    cli.subcommand(clap::Command::new(name))
+                })
+        }
+    }
+
+    fn mock_highlighter() -> Highlighter<MockGrammar> {
+        Highlighter::new(Arc::new(MockGrammar))
     }
 
     #[test]
@@ -346,8 +357,7 @@ mod tests {
 
     #[test]
     fn test_parser_preservation() {
-        let ctx = Arc::new(Context::mock());
-        let highlighter = Highlighter::new(Arc::clone(&ctx));
+        let highlighter = mock_highlighter();
         for line in [
             "run greet run-1 'Alice Smith' 5 --owner bob",
             "list --owner=alice # comment\n",
@@ -359,7 +369,6 @@ mod tests {
             let raw = highlighter.highlight(line, 0).raw_string();
             assert_eq!(raw, line);
             assert_eq!(shlex::split(&raw), shlex::split(line));
-            assert_eq!(ctx.parse(&raw).is_ok(), ctx.parse(line).is_ok());
         }
     }
 

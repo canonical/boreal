@@ -102,7 +102,7 @@ def main():
                 b"\x1b[22;0t\x1b]0;Boreal alice@mock\x07",
                 "\x1b[36malice\x1b[0m on \x1b[35m󰇅 mock\x1b[0m".encode(),
                 "\x1b[90m[\x1b[0m\x1b[92m 1\x1b[0m\x1b[90m]\x1b[0m".encode(),
-                " is \u2744\ufe0f \x1b[36mv0.1.0\x1b[0m".encode(),
+                " is \u2744\ufe0f \x1b[36munknown\x1b[0m".encode(),
                 ok_arrow,
                 b"\x1b[6 q",
             )
@@ -224,7 +224,7 @@ def main():
             os.write(master, b"y\r")
             zero_out = wait_for(
                 b"[mock] cancellation requested for DemoWorkflow 'test'",
-                "\x1b[35m󰇅 mock\x1b[0m is \u2744\ufe0f \x1b[36mv0.1.0\x1b[0m".encode(),
+                "\x1b[35m󰇅 mock\x1b[0m is \u2744\ufe0f \x1b[36munknown\x1b[0m".encode(),
                 ok_arrow,
             )
             assert "".encode() not in zero_out.split(b"cancellation requested")[-1]
@@ -438,14 +438,14 @@ def main():
                 "BOREAL_TEST_BROKER_SOCKET": str(sock_path),
             }
 
-            # 1) Offline broker socket degrades silently to alice on 󰇅 demo-lab is ❄️ v0.2.0.
+            # 1) No broker status or deployed revision; the legacy version is not shown.
             orig_env = env
             env = live_env
             def verify_offline_broker(_, expect):
                 out = expect(
                     b"Boreal lab shell (alice)",
                     b"\x1b[22;0t\x1b]0;Boreal alice@demo-lab\x07",
-                    "\x1b[36malice\x1b[0m on \x1b[35m󰇅 demo-lab\x1b[0m is \u2744\ufe0f \x1b[36mv0.2.0\x1b[0m".encode(),
+                    "\x1b[36malice\x1b[0m on \x1b[35m󰇅 demo-lab\x1b[0m is \u2744\ufe0f \x1b[36munknown\x1b[0m".encode(),
                     ok_arrow,
                 )
                 assert "".encode() not in out
@@ -487,7 +487,7 @@ def main():
                     expect(
                         "\x1b[36malice\x1b[0m on \x1b[35m󰇅 demo-lab\x1b[0m".encode(),
                         "\x1b[90m[\x1b[0m\x1b[94m 1\x1b[0m \x1b[92m 2\x1b[0m\x1b[90m]\x1b[0m".encode(),
-                        " is \u2744\ufe0f \x1b[36mv0.2.0\x1b[0m".encode(),
+                        " is \u2744\ufe0f \x1b[36munknown\x1b[0m".encode(),
                         b"\r\n" + drain_badge + b"\x1b[39m" + ok_arrow,
                     )
 

@@ -525,6 +525,27 @@ def test_ssh_shell_permissions_secrets_and_recovery() -> None:
 
 def test_restricted_admin_and_bypass_resistance() -> None:
     print("[vm-suite] 3/4 verifying restricted admin interface & bypass resistance...")
+    release = "is ❄️ v1.2.3".encode()
+    alice = SshPtySession("alice")
+    try:
+        alice.wait_for("alice on 󰇅 lab-vm".encode(), release)
+    finally:
+        alice.close()
+
+    admin = SshPtySession("admin")
+    try:
+        admin.wait_for("admin on 󰇅 lab-vm".encode(), release)
+        admin.send(b"updater \t")
+        admin.wait_for(b"schedule", b"recover", wait_prompt=False)
+        admin.send(b"\x03")
+        admin.wait_for(release)
+        admin.send(b"help\r")
+        commands = admin.wait_for(b"updater", b"services", release)
+        assert b"secrets" not in commands and b"workers" not in commands, commands
+    finally:
+        admin.close()
+    assert not pathlib.Path("/home/admin/boreal.history").exists()
+
     svcs = subprocess.run(ssh_cmd("admin", "services"), capture_output=True, text=True, check=True)
     assert "temporal.service  active=active" in svcs.stdout
     assert "nineteen-byte-token" not in svcs.stdout

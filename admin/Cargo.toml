@@ -19,9 +19,6 @@ path = "ctl.rs"
 
 [dependencies]
 boreal-common = { path = "../common" }
+boreal-shell = { path = "../shell", default-features = false }
 clap = { version = "4.5", features = ["derive", "string"] }
-clap_complete = { version = "4.5", features = ["unstable-dynamic"] }
-crossterm = "0.29"
-nu-ansi-term = "0.50"
-reedline = "0.49"
 shlex = "1.3"

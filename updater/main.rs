@@ -219,14 +219,19 @@ impl Target {
         Ok(())
     }
 
-    fn installable(&self, project_dir: &Path) -> Result<String, String> {
+    fn flake_ref(&self, project_dir: &Path) -> Result<String, String> {
         let dir_str = project_dir
             .to_str()
             .ok_or("projectDir is not valid UTF-8")?;
         validate_project_dir(dir_str)?;
+        Ok(format!("git+file://{dir_str}?rev={}", self.rev))
+    }
+
+    fn installable(&self, project_dir: &Path) -> Result<String, String> {
         Ok(format!(
-            "git+file://{dir_str}?rev={}#nixosConfigurations.{}.config.system.build.toplevel",
-            self.rev, self.host
+            "{}#nixosConfigurations.{}.config.system.build.toplevel",
+            self.flake_ref(project_dir)?,
+            self.host
         ))
     }
 }
@@ -574,7 +579,7 @@ impl LiveEnv<'_> {
         cmd
     }
 
-    fn nix_build_command(installable: &str, result_link: &Path) -> Command {
+    fn nix_build_command(result_link: &Path) -> Command {
         let mut command = Command::new("nix");
         command
             .args([
@@ -585,9 +590,31 @@ impl LiveEnv<'_> {
                 "--no-write-lock-file",
                 "--out-link",
             ])
-            .arg(result_link)
-            .arg(installable);
+            .arg(result_link);
         command
+    }
+
+    fn add_release_build_args(build: &mut Command, flake_ref: &str, target: &Target, tags: &str) {
+        build.args([
+            "--option",
+            "pure-eval",
+            "true",
+            "--expr",
+            include_str!("build-release.nix"),
+            "--argstr",
+            "ref",
+            flake_ref,
+            "--argstr",
+            "rev",
+            &target.rev,
+            "--argstr",
+            "host",
+            &target.host,
+            "--argstr",
+            "tags",
+            tags,
+            "system",
+        ]);
     }
 
     fn verify_project_dir(&self, project_dir: &Path) -> Result<(), String> {
@@ -661,6 +688,29 @@ impl LiveEnv<'_> {
             repo_url,
         })
     }
+}
+
+fn tags_at_revision(refs: &str, rev: &str) -> Vec<String> {
+    let mut tags: Vec<_> = refs
+        .lines()
+        .filter_map(|line| {
+            let (sha, reference) = line.split_once('\t')?;
+            if sha != rev {
+                return None;
+            }
+            let tag = reference.strip_prefix("refs/tags/")?;
+            let tag = tag.strip_suffix("^{}").unwrap_or(tag);
+            (tag.len() <= 128
+                && !tag.is_empty()
+                && tag
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'+')))
+            .then(|| tag.to_owned())
+        })
+        .collect();
+    tags.sort_unstable();
+    tags.dedup();
+    tags
 }
 
 pub fn validate_lockfile_hygiene(lock_text: &str) -> Result<(), String> {
@@ -755,9 +805,25 @@ impl Environment for LiveEnv<'_> {
             .create(&nix_home)
             .map_err(|e| format!("create nix cache dir: {e}"))?;
 
-        let installable = target.installable(&policy.project_dir)?;
         let result_link = attempt.join("result");
-        let status = Self::nix_build_command(&installable, &result_link)
+        let refs = Self::git_stdout(
+            &policy.project_dir,
+            &["ls-remote", "--tags", "--", &target.repo],
+            "read upstream deployment tags",
+        )?;
+        let tags = tags_at_revision(&refs, &target.rev);
+        let mut build = Self::nix_build_command(&result_link);
+        if tags.is_empty() {
+            build.arg(target.installable(&policy.project_dir)?);
+        } else {
+            Self::add_release_build_args(
+                &mut build,
+                &target.flake_ref(&policy.project_dir)?,
+                target,
+                &tags.join("\n"),
+            );
+        }
+        let status = build
             .env("HOME", &nix_home)
             .env("XDG_CACHE_HOME", &nix_home)
             .status()
@@ -1624,6 +1690,19 @@ workerUnits:
     }
 
     #[test]
+    fn test_deployment_tags_match_only_the_pinned_commit_including_peeled_refs() {
+        let head = VALID_REV;
+        let other = "fedcba9876543210fedcba9876543210fedcba98";
+        let remote_refs = format!(
+            "{head}\trefs/tags/v2.0.0\n{other}\trefs/tags/v1.0.0\n{head}\trefs/tags/v1.0.0^{{}}\n\
+             {head}\trefs/tags/v1.0.0\n{head}\trefs/tags/misc/v1.2.3\n{head}\trefs/heads/main\n\
+             {other}\trefs/tags/v3.0.0\n{other}\trefs/tags/v4.0.0^{{}}\n"
+        );
+        assert_eq!(tags_at_revision(&remote_refs, head), ["v1.0.0", "v2.0.0"]);
+        assert!(tags_at_revision("", head).is_empty());
+    }
+
+    #[test]
     fn test_validates_policy_git_commands_upstream_inspection_and_lockfile_hygiene() {
         let default_pol = Policy::from_yaml("host: lab-1\nallowSwitch: true\n").unwrap();
         assert_eq!(default_pol.project_dir, PathBuf::from("/etc/nixos"));
@@ -1664,10 +1743,7 @@ workerUnits:
         assert!(r_args.contains(&"--hard"));
         assert!(r_args.contains(&VALID_REV));
 
-        let build = LiveEnv::nix_build_command(
-            &target.installable(&default_pol.project_dir).unwrap(),
-            Path::new("/tmp/result"),
-        );
+        let build = LiveEnv::nix_build_command(Path::new("/tmp/result"));
         let b_args: Vec<_> = build.get_args().map(|a| a.to_str().unwrap()).collect();
         assert!(b_args.contains(&"--no-update-lock-file"));
         assert!(b_args.contains(&"--no-write-lock-file"));

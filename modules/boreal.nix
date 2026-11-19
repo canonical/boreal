@@ -56,11 +56,11 @@ let
     }) userCfg.workers;
   };
 
-  mkUserRc =
-    user: userCfg:
-    yamlFormat.generate (lib.strings.sanitizeDerivationName "boreal-rc-${user}.yaml") {
-      edit_mode = userCfg.editMode;
-    };
+  mkShellRc = import ./shell-rc.nix { inherit lib pkgs; };
+  deploymentLabel = import ../lib/deployment-label.nix {
+    source = if self == null then { } else self.sourceInfo or self;
+    release = cfg.deploymentRelease;
+  };
 
   templateManifest = builtins.fromTOML (builtins.readFile ../templates/default/temporal/Cargo.toml);
   selfTemporalVersion =
@@ -156,7 +156,21 @@ in
       type = types.str;
       default = defaultLabVersion;
       defaultText = lib.literalExpression "temporal/Cargo.toml workspace.package.version";
-      description = "Downstream lab version surfaced in boreal-shell (defaults to temporal/Cargo.toml).";
+      description = "Downstream lab version for legacy consumers; SSH prompts display the deployed Git revision instead.";
+    };
+
+    deploymentRelease = mkOption {
+      internal = true;
+      default = null;
+      type = types.nullOr (
+        types.submodule {
+          options = {
+            rev = mkOption { type = types.str; };
+            tags = mkOption { type = types.listOf types.str; };
+          };
+        }
+      );
+      description = "Version tags captured by deployment tooling for the exact downstream revision.";
     };
 
     temporalAddress = mkOption {
@@ -354,6 +368,12 @@ in
       ++ map (user: "d /etc/boreal/users/${user} 0750 root boreal -") userNames;
 
       environment.etc = {
+        "boreal-deployment" = {
+          text = "${deploymentLabel}\n";
+          user = "root";
+          group = "root";
+          mode = "0444";
+        };
         "boreal/version" = {
           text = "${cfg.version}\n";
           user = "root";
@@ -384,37 +404,9 @@ in
       systemd.services =
         (lib.mapAttrs' (
           user: userCfg:
-          let
-            rcSource = mkUserRc user userCfg;
-            homeDir = config.users.users.${user}.home;
-          in
-          lib.nameValuePair "boreal-user-rc-${user}" {
-            description = "Provision ~/.borealrc for Boreal user ${user}";
-            wantedBy = [ "multi-user.target" ];
-            before = [ "sshd.service" ];
-            after = [ "local-fs.target" ];
-            restartTriggers = [ rcSource ];
-            serviceConfig = {
-              Type = "oneshot";
-              RemainAfterExit = true;
-              User = user;
-              UMask = "0077";
-              NoNewPrivileges = true;
-              PrivateTmp = true;
-              PrivateNetwork = true;
-              ProtectSystem = "strict";
-              ProtectProc = "invisible";
-              ReadWritePaths = [ homeDir ];
-              ExecStart = pkgs.writeShellScript "boreal-user-rc-${user}" ''
-                set -eu
-                home=${lib.escapeShellArg homeDir}
-                tmp="$home/.borealrc.tmp.$$"
-                ${pkgs.coreutils}/bin/rm -f -- "$tmp"
-                ${pkgs.coreutils}/bin/install -m 0600 ${rcSource} "$tmp"
-                ${pkgs.coreutils}/bin/mv -fT -- "$tmp" "$home/.borealrc"
-              '';
-            };
-          }
+          lib.nameValuePair "boreal-user-rc-${user}" (
+            mkShellRc user config.users.users.${user}.home userCfg.editMode
+          )
         ) cfg.users)
         // builtins.listToAttrs (
           map (entry: {

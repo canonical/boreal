@@ -1,14 +1,9 @@
 mod client;
 mod command;
-mod completion;
 mod form;
-mod helix;
-mod highlighter;
 mod history;
-mod menu;
-mod prompt;
-mod rc;
 mod tui;
+mod workflow_completion;
 
 use std::env;
 use std::error::Error;
@@ -23,19 +18,10 @@ use boreal_common::input;
 use boreal_common::os;
 use boreal_common::secret::{self, MAX_SECRET_BYTES, Store};
 use boreal_common::wire::{BROKER_SOCKET, Request, Response, RunInput};
-use crossterm::cursor::SetCursorStyle;
-use nu_ansi_term::Color;
-use reedline::{
-    CursorConfig, DefaultHinter, EditMode, Emacs, KeyCode, KeyModifiers, Keybindings, Reedline,
-    ReedlineEvent, ReedlineMenu, Signal, Vi, default_emacs_keybindings,
-    default_vi_insert_keybindings, default_vi_normal_keybindings,
-};
+use boreal_shell::terminal::{self, Host, Invocation, Session, Submission, is_ssh_session};
 
 use crate::client::Mode;
 use crate::command::{Action, Context, Launch, Missing, SecretAction, Target};
-use crate::helix::Helix;
-use crate::prompt::Prompt;
-use crate::rc::Config;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -84,13 +70,6 @@ impl Drop for EchoGuard {
     fn drop(&mut self) {
         let _ = unsafe { tcsetattr(self.fd, TCSANOW, &raw const self.original) };
     }
-}
-
-fn is_ssh_session() -> bool {
-    env::var_os("SSH_CONNECTION").is_some()
-        || env::var_os("SSH_CLIENT").is_some()
-        || env::var_os("SSH_TTY").is_some()
-        || env::var_os("SSH_ORIGINAL_COMMAND").is_some()
 }
 
 fn secret_store() -> Result<Store, String> {
@@ -531,40 +510,8 @@ fn complete_action(action: Action, ctx: &Context, mode: &Mode) -> Result<Option<
     }
 }
 
-fn load_rc_config() -> Config {
-    let uid = os::current_euid();
-    let home = if !Path::new(DEFAULT_ETC_DIR).exists()
-        && !is_ssh_session()
-        && let Ok(test_home) = env::var("BOREAL_TEST_HOME")
-    {
-        PathBuf::from(test_home)
-    } else {
-        match os::user_by_uid(uid) {
-            Ok(user) => PathBuf::from(user.home()),
-            Err(err) => {
-                eprintln!(
-                    "boreal-shell: warning: {}; falling back to emacs mode",
-                    err.detail()
-                );
-                return Config::default();
-            }
-        }
-    };
-    match rc::load_from_home(&home, uid) {
-        Ok(cfg) => cfg,
-        Err(err) => {
-            eprintln!(
-                "boreal-shell: warning: invalid ~/.borealrc ({}); falling back to emacs mode",
-                err.detail()
-            );
-            Config::default()
-        }
-    }
-}
-
-fn load_history() -> Box<dyn reedline::History> {
-    let uid = os::current_euid();
-    let home = if !Path::new(DEFAULT_ETC_DIR).exists()
+fn interactive_home(uid: u32) -> Result<PathBuf, String> {
+    if !Path::new(DEFAULT_ETC_DIR).exists()
         && !is_ssh_session()
         && let Ok(test_home) = env::var("BOREAL_TEST_HOME")
     {
@@ -572,9 +519,15 @@ fn load_history() -> Box<dyn reedline::History> {
     } else {
         os::user_by_uid(uid)
             .map(|user| user.home().to_owned())
-            .map_err(|e| e.detail())
-    };
-    match home.and_then(|home| history::open(&home, uid).map_err(|e| e.to_string())) {
+            .map_err(|err| err.detail())
+    }
+}
+
+fn load_history(home: Result<&Path, &str>, uid: u32) -> Box<dyn reedline::History> {
+    match home
+        .map_err(str::to_owned)
+        .and_then(|home| history::open(home, uid).map_err(|err| err.to_string()))
+    {
         Ok(history) => history,
         Err(e) => {
             eprintln!(
@@ -585,71 +538,22 @@ fn load_history() -> Box<dyn reedline::History> {
     }
 }
 
-fn bind_completion_keys(keys: &mut Keybindings) {
-    keys.add_binding(
-        KeyModifiers::NONE,
-        KeyCode::Tab,
-        ReedlineEvent::UntilFound(vec![
-            ReedlineEvent::Menu("completion".into()),
-            ReedlineEvent::MenuNext,
-        ]),
-    );
-    keys.add_binding(
-        KeyModifiers::SHIFT,
-        KeyCode::BackTab,
-        ReedlineEvent::MenuPrevious,
-    );
-    keys.add_binding(
-        KeyModifiers::NONE,
-        KeyCode::BackTab,
-        ReedlineEvent::MenuPrevious,
-    );
-}
-
-fn build_edit_mode(mode: rc::Mode) -> (Box<dyn EditMode>, Option<Arc<helix::State>>) {
-    match mode {
-        rc::Mode::Emacs => {
-            let mut keys = default_emacs_keybindings();
-            bind_completion_keys(&mut keys);
-            (Box::new(Emacs::new(keys)), None)
-        }
-        rc::Mode::Vi => {
-            let mut insert_keys = default_vi_insert_keybindings();
-            bind_completion_keys(&mut insert_keys);
-            let normal_keys = default_vi_normal_keybindings();
-            (Box::new(Vi::new(insert_keys, normal_keys)), None)
-        }
-        rc::Mode::Helix => {
-            let mut insert_keys = default_vi_insert_keybindings();
-            bind_completion_keys(&mut insert_keys);
-            let state = Arc::new(helix::State::new());
-            (
-                Box::new(Helix::with_state(insert_keys, Arc::clone(&state))),
-                Some(state),
-            )
-        }
-    }
-}
-
-fn resolve_prompt_host(is_mock: bool) -> prompt::Host {
+fn resolve_prompt_host(is_mock: bool) -> Host {
     if is_mock {
-        prompt::Host::Mock
+        Host::Mock
     } else if !Path::new(DEFAULT_ETC_DIR).exists()
         && !is_ssh_session()
         && let Ok(test_host) = env::var("BOREAL_TEST_HOSTNAME")
     {
-        prompt::Host::Live(os::sanitize_hostname(test_host))
+        Host::Live(os::sanitize_hostname(test_host))
     } else {
-        prompt::Host::live_system()
+        Host::live_system()
     }
 }
 
 fn run_interactive() -> Result<(), Box<dyn Error>> {
-    if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
-        return Err("boreal-shell requires an interactive terminal".into());
-    }
+    terminal::require_tty("boreal-shell")?;
     let (ctx, mode) = load_runtime()?;
-    let rc_cfg = load_rc_config();
 
     if mode.is_mock() {
         println!("Boreal shell preview: standalone mock-only mode (/etc/boreal not present).");
@@ -661,96 +565,38 @@ fn run_interactive() -> Result<(), Box<dyn Error>> {
         );
     }
 
-    let (edit_mode, helix_state) = build_edit_mode(rc_cfg.edit_mode());
-    let mut editor = Reedline::create()
-        .with_history(load_history())
-        .with_completer(Box::new(completion::Completer::new(Arc::clone(&ctx))))
-        .with_quick_completions(true)
-        .with_highlighter(Box::new(highlighter::Highlighter::new(Arc::clone(&ctx))))
-        .with_hinter(Box::new(
-            DefaultHinter::default().with_style(Color::DarkGray.normal()),
-        ))
-        .with_menu(ReedlineMenu::EngineCompleter(Box::new(menu::Menu::new())))
-        .with_cursor_config(CursorConfig {
-            emacs: Some(SetCursorStyle::SteadyBar),
-            vi_insert: Some(SetCursorStyle::SteadyBar),
-            vi_normal: Some(SetCursorStyle::SteadyBlock),
-        })
-        .with_edit_mode(edit_mode);
-
-    let mut prompt = Prompt::new(
-        ctx.caller(),
-        resolve_prompt_host(mode.is_mock()),
-        ctx.catalog().version(),
-        helix_state,
-    );
-    let _title_guard = prompt::TitleGuard::enter(prompt.window_title());
-    let mut last_ok = true;
-    let mut warned_history = false;
-
-    loop {
-        println!();
-        prompt.refresh(mode.prompt_summary(), last_ok);
-        match editor.read_line(&prompt)? {
-            Signal::Success(line) => {
-                if let Err(e) = editor.sync_history()
-                    && !warned_history
-                {
-                    eprintln!("boreal-shell: warning: could not sync ~/boreal.history ({e})");
-                    warned_history = true;
-                }
-                match ctx.parse_interactive(&line) {
-                    Ok(Some(Action::Exit)) => break,
-                    Ok(Some(action)) => {
-                        match complete_action(action, &ctx, &mode).and_then(|action| {
-                            action.map_or(Ok(true), |action| execute_action(action, &mode, true))
-                        }) {
-                            Ok(ok) => last_ok = ok,
-                            Err(err) => {
-                                eprintln!("error: {err}");
-                                last_ok = false;
-                            }
-                        }
-                    }
-                    Ok(None) => last_ok = true,
-                    Err(command::Error::Quote) => {
-                        eprintln!("error: unfinished quote or escape");
-                        last_ok = false;
-                    }
-                    Err(command::Error::Clap(error)) => {
-                        last_ok = !error.use_stderr();
-                        error.print()?;
-                    }
-                }
-            }
-            Signal::CtrlC => continue,
-            Signal::CtrlD | Signal::ExternalBreak(_) => break,
-            _ => continue,
-        }
+    let uid = os::current_euid();
+    let home = interactive_home(uid);
+    let home = home.as_deref().map_err(String::as_str);
+    Session {
+        program: "boreal-shell",
+        caller: ctx.caller(),
+        host: resolve_prompt_host(mode.is_mock()),
+        home,
+        history: Some(load_history(home, uid)),
     }
-    Ok(())
+    .run(
+        Arc::clone(&ctx),
+        || mode.prompt_summary(),
+        |line| match ctx.parse_interactive(line) {
+            Ok(Some(Action::Exit)) => Ok(Submission::Exit),
+            Ok(Some(action)) => complete_action(action, &ctx, &mode)
+                .and_then(|action| {
+                    action.map_or(Ok(true), |action| execute_action(action, &mode, true))
+                })
+                .map(Submission::Continue)
+                .map_err(terminal::Error::Command),
+            Ok(None) => Ok(Submission::Continue(true)),
+            Err(command::Error::Quote) => Err(terminal::Error::Quote),
+            Err(command::Error::Clap(err)) => Err(terminal::Error::Clap(err)),
+        },
+    )
 }
 
 fn run() -> Result<bool, Box<dyn Error>> {
-    if let Some(orig_os) = env::var_os("SSH_ORIGINAL_COMMAND") {
-        let orig = orig_os
-            .into_string()
-            .map_err(|_| "SSH command must be valid UTF-8")?;
-        return run_ssh_command(&orig);
-    }
-
-    let args: Vec<_> = env::args_os().skip(1).collect();
-    match args.as_slice() {
-        [] => run_interactive().map(|()| true),
-        [flag, cmd] if flag == "-c" => {
-            let cmd_str = cmd
-                .to_str()
-                .ok_or("SSH command argument must be valid UTF-8")?;
-            run_ssh_command(cmd_str)
-        }
-        _ => Err(
-            "unsupported command-line invocation; use an interactive session or -c COMMAND".into(),
-        ),
+    match Invocation::from_env()? {
+        Invocation::Interactive => run_interactive().map(|()| true),
+        Invocation::Command(command) => run_ssh_command(&command),
     }
 }
 
