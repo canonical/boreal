@@ -428,8 +428,8 @@ fn complete_launch(mut launch: Launch, ctx: &Context) -> Result<Option<Action>, 
         .map_err(|e| e.detail())?;
     launch.owner = Some(owner);
     launch.worker = Some(worker);
-    if let RunInput::Positional(args) = &launch.input {
-        let initial = workflow.positional_prefix(args).map_err(|e| e.detail())?;
+    if launch.input_json.is_none() {
+        let initial = input::Value::Object(Default::default());
         let default_id = launch
             .id
             .as_ref()
@@ -439,7 +439,7 @@ fn complete_launch(mut launch: Launch, ctx: &Context) -> Result<Option<Action>, 
             return Ok(None);
         };
         launch.id = Some(id);
-        launch.input = RunInput::Json(raw);
+        launch.input_json = Some(raw);
     }
     ctx.prepare_run(launch, false).map(Some)
 }

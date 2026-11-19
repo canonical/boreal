@@ -43,8 +43,10 @@ deployment.
   drives commands, live `view` TUI inspection, and
   permission-filtered completions from `/etc/boreal/`. The private
   `~/boreal.history` keeps up to 2,000 interactive command selectors, never
-  workflow inputs or scripted invocations. The shell requires `[y/N]`
-  confirmation before `cancel`, allows non-interactive `run`, `list`, `status`,
+  workflow inputs or scripted invocations. Arrow Up recalls a `run` line up to
+  16 KiB exactly in the same session; after reconnecting only selectors remain.
+  The shell requires `[y/N]` confirmation before `cancel`, allows
+  non-interactive `run`, `list`, `status`,
   and `result`, and stores secrets under `~/.config/boreal/secrets` (`0700`/`0600`)
   via hidden TTY prompt or `ssh <user>@<host> "secrets set <name>" < file`.
 - **Restricted administration & gated updates**: `boreal.admin` assigns `admin`
@@ -90,14 +92,16 @@ without rewriting the lockfile. Sources without revision metadata show
 ## Run a workflow
 
 In the interactive lab shell, `run greet` opens a form for missing input.
-Press Enter to accept a dimmed default, use Left/Right to choose an enum
-variant, and press Esc to edit a previous answer. Ctrl+C abandons the form;
-nothing starts until you confirm the summary. Field help comes from the Rust
-input type's doc comments. If the form cannot represent an input shape, use
-`--input-json` instead.
+Press Enter to accept a dimmed default. In choice lists, Up/Down moves the
+selection and Left/Right changes pages (up to five items per page), keeping
+the same row when possible. Press Esc to edit a previous answer. Ctrl+C
+abandons the form; nothing starts until you confirm the summary. Field help
+comes from the Rust input type's doc comments. If the form cannot represent an
+input shape, use `--input-json` instead.
 
-A complete invocation such as `run greet --id greet-1 Alice 5` starts directly.
-Use `--no-ask` to reject missing values rather than opening a form. For a worker
+`run greet --id greet-1 --input-json '{"name":"Alice","wait_seconds":5}'`
+starts directly. The worker is the only positional argument. Use `--no-ask`
+to reject missing values rather than opening a form. For a worker
 with multiple exports, select an alias with `--workflow` or choose it in the
 form. If `--id` is omitted, Boreal generates a workflow ID.
 
@@ -109,9 +113,9 @@ ssh -T alice@lab-infra.local \
 ```
 
 `--input-json -` reads JSON from stdin. Supplying an inline JSON argument also
-works if the remote command preserves its quoting. JSON and positional inputs
-cannot be combined. Success is printed on stdout; errors go to stderr with a
-nonzero exit status. Don't put secrets in workflow inputs.
+works if the remote command preserves its quoting. Success is printed on
+stdout; errors go to stderr with a nonzero exit status. Don't put secrets in
+workflow inputs.
 
 ## Framework development
 

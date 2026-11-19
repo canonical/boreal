@@ -23,7 +23,7 @@ struct Field {
     kind: Kind,
     answer: Option<Answer>,
     draft: Option<String>,
-    selection: usize,
+    selection: Selection,
     tagged_payload: bool,
 }
 
@@ -155,7 +155,7 @@ impl<'a> Form<'a> {
             kind,
             answer: None,
             draft: None,
-            selection: 0,
+            selection: Selection::default(),
             tagged_payload: false,
         });
         Ok(id)
@@ -526,7 +526,7 @@ impl<'a> Form<'a> {
             }
         }
         let id = self.add(path, help, Kind::Select(choices))?;
-        self.fields[id].selection = selection;
+        self.fields[id].selection.index = selection;
         Ok(id)
     }
 
@@ -576,7 +576,7 @@ impl<'a> Form<'a> {
                 if let Some((child, value)) = child {
                     self.seed(child, value)?;
                 }
-                self.fields[id].selection = index;
+                self.fields[id].selection.index = index;
                 self.fields[id].answer = Some(Answer::Choice(index));
             }
             Kind::Scalar { scalar, .. } => {
@@ -728,7 +728,7 @@ impl Field {
 
     fn accept(&mut self) -> Result<(), String> {
         self.answer = Some(match &self.kind {
-            Kind::Select(_) => Answer::Choice(self.selection),
+            Kind::Select(_) => Answer::Choice(self.selection.index),
             _ => Answer::Value(self.parse_draft(self.draft.as_deref())?),
         });
         Ok(())
@@ -960,49 +960,92 @@ fn text_line(label: &str, draft: Option<&str>, ghost: Option<&str>, width: usize
     line
 }
 
-fn choice_line(label: &str, choices: &[Choice], active: usize, width: usize) -> Line {
-    let prefix = clip(&clean(label), width.saturating_sub(2) / 2, false);
-    let mut space = width.saturating_sub(cells(&prefix) + 4);
-    let name = |c: &Choice| {
-        if c.label.is_empty() {
-            "\"\"".to_owned()
-        } else {
-            clean(&c.label)
+const PAGE_SIZE: usize = 5;
+
+#[derive(Default)]
+struct Selection {
+    index: usize,
+    preferred_row: Option<usize>,
+}
+
+impl Selection {
+    fn move_by(&mut self, key: KeyCode, len: usize, page_size: usize) {
+        match key {
+            KeyCode::Up | KeyCode::Down => {
+                self.index = if key == KeyCode::Up {
+                    self.index.saturating_sub(1)
+                } else {
+                    (self.index + 1).min(len - 1)
+                };
+                self.preferred_row = None;
+            }
+            KeyCode::Left | KeyCode::Right => {
+                let page = self.index / page_size;
+                let next = if key == KeyCode::Left && page > 0 {
+                    page - 1
+                } else if key == KeyCode::Right && (page + 1) * page_size < len {
+                    page + 1
+                } else {
+                    return;
+                };
+                let row = *self.preferred_row.get_or_insert(self.index % page_size);
+                self.index = (next * page_size + row.min(page_size - 1)).min(len - 1);
+            }
+            _ => {}
         }
-    };
-    let attributes = |c: &Choice| {
-        if c.ghost {
-            Attribute::Dim.into()
-        } else {
-            Attributes::default()
-        }
-    };
-    let selected = clip(&name(&choices[active]), space, false);
-    let mut before = Vec::new();
-    space = space.saturating_sub(cells(&selected));
-    for choice in choices[..active].iter().rev() {
-        let label = name(choice);
-        let needed = cells(&label) + 3;
-        if needed > space {
-            break;
-        }
-        before.push((attributes(choice), format!("{label} / ")));
-        space -= needed;
     }
-    let mut line = plain(format!("{prefix}: ["));
-    line.extend(before.into_iter().rev());
-    line.push((attributes(&choices[active]) | Attribute::Reverse, selected));
-    for choice in &choices[active + 1..] {
-        let label = name(choice);
-        let needed = cells(&label) + 3;
-        if needed > space {
-            break;
-        }
-        line.push((attributes(choice), format!(" / {label}")));
-        space -= needed;
+}
+
+fn page_size(height: usize) -> usize {
+    height
+        .saturating_sub(usize::from(height > 1) + usize::from(height > 2))
+        .clamp(1, PAGE_SIZE)
+}
+
+fn render_picker<'a>(
+    label: &str,
+    len: usize,
+    index: usize,
+    item: impl Fn(usize) -> (&'a str, bool),
+    help: Option<&str>,
+    back: &str,
+) -> Result<usize, String> {
+    let (width, height) = size();
+    let page_size = page_size(height);
+    let page = index / page_size;
+    let start = page * page_size;
+    let mut lines = Vec::with_capacity(page_size + 3);
+    if height > 1 {
+        lines.push(plain(format!(
+            "Page {}/{} · {label}",
+            page + 1,
+            len.div_ceil(page_size)
+        )));
     }
-    line.push((Attributes::default(), "]".into()));
-    line
+    lines.extend((start..(start + page_size).min(len)).map(|row| {
+        let (label, ghost) = item(row);
+        let mut attributes = Attributes::default();
+        if ghost {
+            attributes.set(Attribute::Dim);
+        }
+        if row == index {
+            attributes.set(Attribute::Reverse);
+        }
+        let prefix = if row == index { "› " } else { "  " };
+        let label = if label.is_empty() { "\"\"" } else { label };
+        vec![(attributes, format!("{prefix}{label}"))]
+    }));
+    if height > 2 {
+        if let Some(help) = help.filter(|_| lines.len() + 1 < height) {
+            lines.push(vec![(Attribute::Dim.into(), format!("  > {help}"))]);
+        }
+        lines.push(vec![(
+            Attribute::Dim.into(),
+            format!("↑/↓ move · ←/→ page · Enter accept · Esc {back}"),
+        )]);
+    }
+    draw(&lines, width)?;
+    Ok(page_size)
 }
 
 fn draw(lines: &[Line], width: usize) -> Result<(), String> {
@@ -1043,14 +1086,6 @@ fn quit(key: KeyEvent) -> bool {
         && matches!(key.code, KeyCode::Char('c' | 'C' | 'd' | 'D'))
 }
 
-fn rotate(key: KeyEvent, choice: &mut usize, len: usize) {
-    match key.code {
-        KeyCode::Left => *choice = if *choice == 0 { len - 1 } else { *choice - 1 },
-        KeyCode::Right => *choice = (*choice + 1) % len,
-        _ => {}
-    }
-}
-
 fn edit(key: KeyEvent, draft: &mut Option<String>, limit: usize) {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
@@ -1081,7 +1116,6 @@ fn paste(text: &str, draft: &mut Option<String>, limit: usize) -> Result<(), Str
 
 fn field_line(field: &Field, label: &str, width: usize) -> Line {
     match &field.kind {
-        Kind::Select(choices) => choice_line(label, choices, field.selection, width),
         Kind::Id(default) => text_line(label, field.draft.as_deref(), Some(default), width),
         Kind::Scalar {
             default, optional, ..
@@ -1092,7 +1126,7 @@ fn field_line(field: &Field, label: &str, width: usize) -> Line {
                 .or_else(|| optional.then(|| "(omit)".into()));
             text_line(label, field.draft.as_deref(), ghost.as_deref(), width)
         }
-        Kind::Object(_) => unreachable!(),
+        Kind::Object(_) | Kind::Select(_) => unreachable!(),
     }
 }
 
@@ -1118,11 +1152,7 @@ fn render_form(
         let field = &form.fields[id];
         let label = format!("  {}", field.label());
         if active_id == Some(id) {
-            let choice_help = match &field.kind {
-                Kind::Select(choices) => choices[field.selection].description.as_deref(),
-                _ => None,
-            };
-            if let Some(help) = choice_help.or(field.description.as_deref()) {
+            if let Some(help) = field.description.as_deref() {
                 body.push(vec![(Attribute::Dim.into(), format!("  > {help}"))]);
             }
             focus = body.len();
@@ -1136,8 +1166,6 @@ fn render_form(
     }
     let footer = if active_id.is_none() {
         "Enter to start · Esc to edit · Ctrl+C to cancel"
-    } else if active_id.is_some_and(|id| matches!(form.fields[id].kind, Kind::Select(_))) {
-        "←/→ choose · Enter accept · Esc back · Ctrl+C cancel"
     } else {
         "Enter accept · Esc back · Ctrl+C cancel"
     };
@@ -1220,7 +1248,26 @@ pub fn run(
         .unwrap_or(steps.len());
     let mut error = None;
     loop {
-        render_form(&form, &steps, active, error.as_deref())?;
+        let picker_size = if let Some(&id) = steps.get(active)
+            && let field = &form.fields[id]
+            && let Kind::Select(choices) = &field.kind
+        {
+            let index = field.selection.index;
+            Some(render_picker(
+                &field.label(),
+                choices.len(),
+                index,
+                |row| (choices[row].label.as_str(), choices[row].ghost),
+                choices[index]
+                    .description
+                    .as_deref()
+                    .or(field.description.as_deref()),
+                "back",
+            )?)
+        } else {
+            render_form(&form, &steps, active, error.as_deref())?;
+            None
+        };
         match event::read().map_err(|e| e.to_string())? {
             Event::Key(key) if key.kind != KeyEventKind::Release => {
                 if quit(key) {
@@ -1264,8 +1311,10 @@ pub fn run(
                     _ => {
                         if let Some(&id) = steps.get(active) {
                             let field = &mut form.fields[id];
-                            if let Kind::Select(choices) = &field.kind {
-                                rotate(key, &mut field.selection, choices.len());
+                            if let (Kind::Select(choices), Some(page_size)) =
+                                (&field.kind, picker_size)
+                            {
+                                field.selection.move_by(key.code, choices.len(), page_size);
                             } else {
                                 edit(key, &mut field.draft, if id == 0 { 255 } else { MAX_BYTES });
                             }
@@ -1296,22 +1345,17 @@ pub fn choose(label: &str, choices: &[String]) -> Result<Option<String>, String>
     if choices.is_empty() {
         return Err("no choices available".into());
     }
-    let options: Vec<_> = choices
-        .iter()
-        .map(|s| literal(s.clone(), None, false))
-        .collect();
     let _screen = Screen::enter()?;
-    let mut active = 0;
+    let mut selection = Selection::default();
     loop {
-        let (width, height) = size();
-        let mut lines = vec![choice_line(label, &options, active, width)];
-        if height > 1 {
-            lines.push(vec![(
-                Attribute::Dim.into(),
-                "←/→ choose · Enter accept · Esc cancel".into(),
-            )]);
-        }
-        draw(&lines, width)?;
+        let page_size = render_picker(
+            label,
+            choices.len(),
+            selection.index,
+            |row| (choices[row].as_str(), false),
+            None,
+            "cancel",
+        )?;
         if let Event::Key(key) = event::read().map_err(|e| e.to_string())?
             && key.kind != KeyEventKind::Release
         {
@@ -1319,9 +1363,9 @@ pub fn choose(label: &str, choices: &[String]) -> Result<Option<String>, String>
                 return Ok(None);
             }
             if key.code == KeyCode::Enter && key.kind == KeyEventKind::Press {
-                return Ok(Some(choices[active].clone()));
+                return Ok(Some(choices[selection.index].clone()));
             }
-            rotate(key, &mut active, choices.len());
+            selection.move_by(key.code, choices.len(), page_size);
         }
     }
 }
@@ -1361,6 +1405,39 @@ pub fn text(label: &str) -> Result<Option<String>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_picker_keeps_the_row_across_short_pages() {
+        use KeyCode::{Down, Left, Right, Up};
+
+        let mut selection = Selection::default();
+        for (key, expected) in [
+            (Left, 0),
+            (Up, 0),
+            (Down, 1),
+            (Down, 2),
+            (Down, 3),
+            (Right, 8),
+            (Right, 11),
+            (Right, 11),
+            (Left, 8),
+            (Left, 3),
+            (Down, 4),
+            (Down, 5),
+            (Up, 4),
+            (Right, 9),
+            (Right, 11),
+            (Down, 11),
+            (Left, 6),
+        ] {
+            selection.move_by(key, 12, PAGE_SIZE);
+            assert_eq!(selection.index, expected, "{key:?}");
+        }
+        assert_eq!(
+            (1..=8).map(page_size).collect::<Vec<_>>(),
+            [1, 1, 1, 2, 3, 4, 5, 5]
+        );
+    }
     use boreal_common::input::json;
 
     #[test]
@@ -1396,7 +1473,7 @@ mod tests {
         );
         let left = steps[2];
         assert!(form.fields[steps[1]].answer.is_some());
-        form.fields[left].selection = 1;
+        form.fields[left].selection.index = 1;
         form.fields[left].accept().unwrap();
         let payload = form.steps()[3];
         assert_eq!(form.fields[payload].title(), "nested.left.Float");

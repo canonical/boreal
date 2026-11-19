@@ -71,7 +71,7 @@ pub struct Launch {
     pub worker: Option<String>,
     pub workflow: Option<String>,
     pub id: Option<String>,
-    pub input: RunInput,
+    pub input_json: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -183,26 +183,15 @@ impl Context {
             .about("Run a workflow")
             .arg(worker_arg)
             .arg(
-                Arg::new("legacy-id")
-                    .value_name("ID")
-                    .help("Workflow ID (positional shorthand)"),
-            )
-            .arg(
                 Arg::new("id")
                     .long("id")
                     .value_name("ID")
                     .help("Workflow ID; generated when omitted"),
             )
             .arg(
-                Arg::new("args")
-                    .num_args(0..)
-                    .help("Typed workflow arguments"),
-            )
-            .arg(
                 Arg::new("input-json")
                     .long("input-json")
                     .value_name("JSON")
-                    .conflicts_with("args")
                     .help("JSON input, or - to read stdin in a non-interactive command"),
             )
             .arg(
@@ -318,44 +307,18 @@ impl Context {
 
         let action = match matches.subcommand() {
             Some(("workers", _)) => Action::Workers,
-            Some(("run", sub)) => {
-                let worker = sub.get_one::<String>("worker").cloned();
-                let workflow = sub.get_one::<String>("workflow").cloned();
-                let flag_id = sub.get_one::<String>("id");
-                let positional = sub.get_one::<String>("legacy-id");
-                let id = flag_id.or(positional).cloned();
-                let owner = sub.get_one::<String>("owner").cloned();
-                let mut args: Vec<String> = sub
-                    .get_many::<String>("args")
-                    .map_or_else(Vec::new, |vals| vals.cloned().collect());
-                if flag_id.is_some()
-                    && let Some(first) = positional
-                {
-                    args.insert(0, first.clone());
-                }
-                let input = match sub.get_one::<String>("input-json") {
-                    Some(_) if !args.is_empty() => {
-                        return Err(Error::Clap(cmd.error(
-                            ErrorKind::ArgumentConflict,
-                            "--input-json cannot be combined with positional workflow inputs",
-                        )));
-                    }
-                    Some(raw) => RunInput::Json(raw.clone()),
-                    None => RunInput::Positional(args),
-                };
-
-                self.prepare_run(
+            Some(("run", sub)) => self
+                .prepare_run(
                     Launch {
-                        owner,
-                        worker,
-                        workflow,
-                        id,
-                        input,
+                        owner: sub.get_one::<String>("owner").cloned(),
+                        worker: sub.get_one::<String>("worker").cloned(),
+                        workflow: sub.get_one::<String>("workflow").cloned(),
+                        id: sub.get_one::<String>("id").cloned(),
+                        input_json: sub.get_one::<String>("input-json").cloned(),
                     },
                     ask,
                 )
-                .map_err(|e| Error::Clap(cmd.error(ErrorKind::ValueValidation, e)))?
-            }
+                .map_err(|e| Error::Clap(cmd.error(ErrorKind::ValueValidation, e)))?,
             Some((name @ ("list" | "status" | "result" | "view" | "cancel"), sub)) => {
                 let kind = match name {
                     "list" => Target::List,
@@ -442,28 +405,24 @@ impl Context {
         let workflow = package
             .select(launch.workflow.as_deref())
             .map_err(|e| e.detail())?;
-        match &launch.input {
-            RunInput::Positional(args) => {
-                if ask
-                    && (!workflow.accepts_positionals() && args.is_empty()
-                        || args.len() < workflow.required_count()
-                        || launch.id.is_none() && args.is_empty() && !workflow.args().is_empty())
-                {
-                    return Ok(Action::Prompt(Missing::Run(launch)));
+        let input = match launch.input_json {
+            Some(raw) => {
+                if raw != "-" {
+                    workflow.validate_json(&raw).map_err(|e| e.detail())?;
                 }
-                workflow.validate_and_encode(args).map_err(|e| e.detail())?;
+                raw
             }
-            RunInput::Json(raw) if raw != "-" => {
-                workflow.validate_json(raw).map_err(|e| e.detail())?;
-            }
-            RunInput::Json(_) => {}
-        }
+            None if ask => return Ok(Action::Prompt(Missing::Run(launch))),
+            None => workflow
+                .validate_and_encode(&[])
+                .map_err(|_| "provide workflow input with --input-json")?,
+        };
         Ok(Action::Run {
             owner: owner.to_owned(),
             worker: worker.to_owned(),
             workflow: launch.workflow,
             id: launch.id.unwrap_or_else(new_id),
-            input: launch.input,
+            input: RunInput::Json(input),
         })
     }
 }
@@ -524,7 +483,7 @@ mod tests {
         }
         assert!(ctx.parse_interactive("run greet --no-ask").is_err());
         assert!(
-            matches!(ctx.parse_interactive("run greet --id job Alice 5"), Ok(Some(Action::Run { id, .. })) if id == "job")
+            matches!(ctx.parse_interactive(r#"run greet --id job --input-json '{"name":"Alice","wait_seconds":5}'"#), Ok(Some(Action::Run { id, .. })) if id == "job")
         );
         assert!(
             matches!(ctx.parse(r#"run greet --input-json '{"name":"Alice"}'"#), Ok(Some(Action::Run { id, input: RunInput::Json(_), .. })) if uuid::Uuid::parse_str(&id).is_ok())
@@ -595,32 +554,32 @@ mod tests {
             ),
             ("exit", Action::Exit),
             (
-                "run count run-2 Élan",
+                r#"run count --id run-2 --input-json '{"name":"Élan"}'"#,
                 Action::Run {
                     worker: "count".into(),
                     workflow: None,
                     id: "run-2".into(),
-                    input: RunInput::Positional(vec!["Élan".into()]),
+                    input: RunInput::Json(r#"{"name":"Élan"}"#.into()),
                     owner: "alice".into(),
                 },
             ),
             (
-                "run count run-2 Élan --workflow count",
+                r#"run count --id run-2 --workflow count --input-json '{"name":"Élan"}'"#,
                 Action::Run {
                     worker: "count".into(),
                     workflow: Some("count".into()),
                     id: "run-2".into(),
-                    input: RunInput::Positional(vec!["Élan".into()]),
+                    input: RunInput::Json(r#"{"name":"Élan"}"#.into()),
                     owner: "alice".into(),
                 },
             ),
             (
-                "run greet run-1 'Alice Smith' 5 --owner bob",
+                r#"run greet --id run-1 --owner bob --input-json '{"name":"Alice Smith","wait_seconds":5}'"#,
                 Action::Run {
                     worker: "greet".into(),
                     workflow: None,
                     id: "run-1".into(),
-                    input: RunInput::Positional(vec!["Alice Smith".into(), "5".into()]),
+                    input: RunInput::Json(r#"{"name":"Alice Smith","wait_seconds":5}"#.into()),
                     owner: "bob".into(),
                 },
             ),
@@ -635,7 +594,7 @@ mod tests {
 
         // Alice does NOT have write on bob/count in mock catalog!
         assert!(matches!(
-            ctx.parse("run count run-1 Alice --owner bob"),
+            ctx.parse(r#"run count --id run-1 --owner bob --input-json '{"name":"Alice"}'"#),
             Err(Error::Clap(_))
         ));
     }
@@ -647,8 +606,10 @@ mod tests {
             "unknown",
             "/bin/sh",
             "start greet run-1 Alice 5",
-            "run greet run-1 Alice nope",
-            "run other run-1 Alice",
+            "run greet run-1",
+            "run greet --id run-1 Alice 5",
+            r#"run greet --input-json '{"name":"Alice","wait_seconds":"nope"}'"#,
+            "run other --id run-1",
             "status run-1 --owner eve",
             "secrets set api_token leaked_value",
             "secrets set ../escape",
@@ -657,20 +618,24 @@ mod tests {
             assert!(matches!(ctx.parse(line), Err(Error::Clap(_))), "{line}");
         }
         assert!(matches!(
-            ctx.parse("run greet run-1 'unfinished"),
+            ctx.parse("run greet --input-json 'unfinished"),
             Err(Error::Quote)
         ));
         assert!(
             matches!(ctx.parse("help"), Err(Error::Clap(err)) if err.kind() == ErrorKind::DisplayHelp)
         );
+        assert!(matches!(ctx.parse("run --help"), Err(Error::Clap(err))
+            if err.to_string().lines().any(|line| line == "Usage: boreal run [OPTIONS] [worker]")));
     }
 
     #[test]
     fn test_shell_metacharacters_are_only_arguments() {
         let ctx = Context::mock();
-        let parsed = ctx.parse("run greet run-1 '$(not-executed)' 5");
+        let parsed = ctx.parse(
+            r#"run greet --id run-1 --input-json '{"name":"$(not-executed)","wait_seconds":5}'"#,
+        );
         assert!(
-            matches!(parsed, Ok(Some(Action::Run { input: RunInput::Positional(args), .. })) if args == vec!["$(not-executed)", "5"])
+            matches!(parsed, Ok(Some(Action::Run { input: RunInput::Json(raw), .. })) if raw.contains("$(not-executed)"))
         );
     }
 }

@@ -13,6 +13,7 @@ import pty
 import pwd
 import re
 import select
+import shlex
 import shutil
 import socket
 import ssl
@@ -36,6 +37,14 @@ SSH_OPTS = [
 
 def ssh_cmd(user: str, *remote_args: str) -> list[str]:
     return [*SSH_OPTS, "-i", f"/tmp/test-ssh/{user}", f"{user}@127.0.0.1", *remote_args]
+
+
+def run_line(worker: str, workflow_id: str, name: str, wait_seconds: int, *, owner: str | None = None) -> bytes:
+    payload = json.dumps({"name": name, "wait_seconds": wait_seconds}, ensure_ascii=False)
+    args = ["run", worker, "--id", workflow_id, "--input-json", payload]
+    if owner is not None:
+        args.extend(["--owner", owner])
+    return (shlex.join(args) + "\r").encode()
 
 
 def run_as_user(username: str, py_code: str, *args: str) -> subprocess.CompletedProcess[str]:
@@ -391,7 +400,7 @@ def test_ssh_shell_permissions_secrets_and_recovery() -> None:
         alice.wait_for(b"api_tok (19 bytes, mode 0600)", b"tty_tok (14 bytes, mode 0600)")
 
         # Activity reads ~/.config/boreal/secrets/api_tok without leaking content into Temporal!
-        alice.send(b"run greet sec-wf-1 'secret:api_tok' 1\r")
+        alice.send(run_line("greet", "sec-wf-1", "secret:api_tok", 1))
         alice.wait_for(b"started DemoWorkflow 'sec-wf-1' on alice/greet")
         for _ in range(30):
             time.sleep(0.4)
@@ -413,7 +422,7 @@ def test_ssh_shell_permissions_secrets_and_recovery() -> None:
         alice.wait_for("❯".encode())
 
         # CountWorkflow with UTF-8 multi-byte scalar
-        alice.send("run count count-1 'Élan' 1\r".encode())
+        alice.send(run_line("count", "count-1", "Élan", 1))
         alice.wait_for(b"started CountWorkflow 'count-1' on alice/count")
         for _ in range(30):
             time.sleep(0.4)
@@ -425,7 +434,7 @@ def test_ssh_shell_permissions_secrets_and_recovery() -> None:
             raise AssertionError("count-1 did not finish")
 
         # Workflow recovery across worker restart via restricted admin SSH command
-        alice.send(b"run greet rec-wf-1 'Ada' 5\r")
+        alice.send(run_line("greet", "rec-wf-1", "Ada", 5))
         alice.wait_for(b"started DemoWorkflow 'rec-wf-1' on alice/greet")
         time.sleep(1.0)
         subprocess.run(
@@ -442,7 +451,7 @@ def test_ssh_shell_permissions_secrets_and_recovery() -> None:
         else:
             raise AssertionError("rec-wf-1 did not recover after worker restart")
 
-        alice.send(b"run count slow-count-1 'Hold' 120\r")
+        alice.send(run_line("count", "slow-count-1", "Hold", 120))
         alice.wait_for(
             b"started CountWorkflow 'slow-count-1' on alice/count",
             "[ 1]".encode(),
@@ -457,10 +466,10 @@ def test_ssh_shell_permissions_secrets_and_recovery() -> None:
         bob.send(b"permissions alice\r")
         bob.wait_for(b"greet (package greet): read=allowed, write=allowed")
 
-        bob.send(b"run greet bob-del-1 'FromBob' 120 --owner alice\r")
+        bob.send(run_line("greet", "bob-del-1", "FromBob", 120, owner="alice"))
         bob.wait_for(b"started DemoWorkflow 'bob-del-1' on alice/greet")
 
-        bob.send(b"run count bob-denied-1 'No' 5 --owner alice\r")
+        bob.send(run_line("count", "bob-denied-1", "No", 5, owner="alice"))
         bob.wait_for(b"error:")
 
         bob.send(b"result count-1 --owner alice\r")
@@ -839,7 +848,7 @@ def test_safe_updates_drain_switch_and_recovery(temporal_cli: str) -> None:
         try:
             alice.wait_for(b"Boreal lab shell (alice)")
             # Parent workflow spawns a child workflow with a 15s timer + activity!
-            alice.send(b"run greet drain-parent-1 'child:Grace' 15\r")
+            alice.send(run_line("greet", "drain-parent-1", "child:Grace", 15))
             alice.wait_for(b"started DemoWorkflow 'drain-parent-1'")
 
             # `updater schedule` enqueues boreal-updater.service asynchronously and returns immediately.
@@ -855,7 +864,7 @@ def test_safe_updates_drain_switch_and_recovery(temporal_cli: str) -> None:
                 raise AssertionError(f"updater did not enter draining phase: {cur_st}")
 
             # Concurrent run must be rejected while gate is closed!
-            alice.send(b"run greet race-blocked-1 'Blocked' 1\r")
+            alice.send(run_line("greet", "race-blocked-1", "Blocked", 1))
             alice.wait_for(b"admissions are temporarily closed")
 
             # Admin service mutation must be blocked while updater holds lock!
@@ -939,7 +948,7 @@ def test_safe_updates_drain_switch_and_recovery(temporal_cli: str) -> None:
             alice_post.send(b"result drain-parent-1\r")
             alice_post.wait_for(b"Hello, Grace!")
 
-            alice_post.send(b"run greet post-switch-1 'Switched' 1\r")
+            alice_post.send(run_line("greet", "post-switch-1", "Switched", 1))
             alice_post.wait_for(b"started DemoWorkflow 'post-switch-1'")
             for _ in range(30):
                 time.sleep(0.4)

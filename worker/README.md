@@ -104,13 +104,14 @@ are Boreal launch targets, and only their input types need `JsonSchema`.
 The `package` key matches the binary output, not the deployed worker name.
 
 If the `example` package is deployed as `tools`, use
-`run tools job-42 hello --workflow count`. The `workers` command lists the
+`run tools --workflow count` to open the form (add `--id job-42` to set the
+workflow ID explicitly). The `workers` command lists the
 available aliases and their arguments. For a worker with one export, omit
 `--workflow`. Handwritten single-workflow schemas and `WorkerSchema::new`
 still work without the macro.
 
-The generated catalog keeps each workflow's full Schemars schema. Flat inputs
-still accept positional arguments; nested inputs can use `--input-json`.
+The generated catalog keeps each workflow's full Schemars schema. To skip the
+interactive form, pass the input with `--input-json`.
 The broker validates against the selected workflow's schema. Keep business
 rules and checks not expressed by that schema in the workflow itself.
 

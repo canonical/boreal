@@ -2,6 +2,7 @@
 """Exercise the Boreal shell's terminal interactions, confirmation prompts, and secret safety."""
 
 import fcntl
+import json
 import os
 import pathlib
 import pty
@@ -173,7 +174,8 @@ def main():
 
             # Even shell metacharacters passed as an argument have no side effects;
             # starting a workflow updates the prompt status bracket to '[ 2]'.
-            line = f"run greet test '$(touch {marker})' 5\r".encode()
+            payload = json.dumps({"name": f"$(touch {marker})", "wait_seconds": 5})
+            line = f"run greet --id test --input-json '{payload}'\r".encode()
             os.write(master, line)
             wait_for(
                 b"[mock] started DemoWorkflow 'test'",
@@ -246,6 +248,18 @@ def main():
             os.write(master, b"y\r")
             wait_for(b"Removed secret 'tty_item'.")
             assert not (secrets_dir / "tty_item").exists()
+
+            # Recall the editable, quoted line exactly, and submit it a second time.
+            raw_run = b"run greet --input-json '{ \"name\": \"Alice\", \"wait_seconds\": 5 }'"
+            os.write(master, raw_run + b"\r")
+            wait_for(b"[mock] started DemoWorkflow", ok_arrow)
+            os.write(master, b"\x1b[A")
+            wait_for(b"greet ", b"--input-json", b"'{ \"name\": \"Alice\", \"wait_seconds\": 5 }'")
+            os.write(master, b"\r")
+            wait_for(b"[mock] started DemoWorkflow", ok_arrow)
+            disk_history = (tmp_path / "boreal.history").read_bytes()
+            assert disk_history.splitlines()[-1] == b"run greet"
+            assert b"--input-json" not in disk_history
 
             os.write(master, b"exit\r")
             data = bytearray()
@@ -348,6 +362,30 @@ def main():
                     proc.terminate()
                     proc.wait(timeout=5)
                 os.close(rc_master)
+
+        def verify_reconnect_and_picker(fd, expect):
+            expect(ok_arrow)
+            os.write(fd, b"\x1b[A")
+            recalled = expect(b"greet", b"\x1b[6 q")
+            assert b"--input-json" not in recalled
+            os.write(fd, b"\x03")
+            expect(ok_arrow)
+            for i in range(1, 8):
+                os.write(fd, f"run greet --id pager-{i} --input-json '{{\"name\":\"A\"}}'\r".encode())
+                expect(f"[mock] started DemoWorkflow 'pager-{i}'".encode(), ok_arrow)
+
+            os.write(fd, b"status\r")
+            expect(b"Page 1/2", "› pager-1".encode(), b"pager-5")
+            os.write(fd, b"\x1b[B" * 3)
+            expect("› pager-4".encode())
+            os.write(fd, b"\x1b[C")
+            expect(b"Page 2/2", "› sample-1".encode())
+            os.write(fd, b"\x1b[D")
+            expect(b"Page 1/2", "› pager-4".encode())
+            os.write(fd, b"\r")
+            expect(b"pager-4", ok_arrow)
+
+        run_rc_pty_session("edit_mode: emacs\n", verify_reconnect_and_picker)
 
         # ~/.borealrc edit_mode: vi (bar cursor + ❯ in insert, block cursor + ❮ in normal).
         def verify_vi(fd, expect):

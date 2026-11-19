@@ -1,4 +1,3 @@
-use boreal_common::catalog::ArgKind;
 use boreal_shell::completion::Grammar;
 
 use crate::command::Context;
@@ -12,105 +11,46 @@ impl Grammar for Context {
         if previous.first().map(String::as_str) != Some("run") {
             return Vec::new();
         }
-        let mut owner = self.caller().to_owned();
-        let mut workflow = None;
-        let mut named_id = false;
-        let mut completing_workflow = false;
-        let mut positionals = Vec::new();
-        let mut idx = 1usize;
-        while idx < previous.len() {
-            let tok = &previous[idx];
-            if tok == "--owner" {
-                if let Some(val) = previous.get(idx + 1) {
-                    owner.clone_from(val);
-                    idx += 2;
-                    continue;
-                }
-                return Vec::new();
-            }
-            if let Some(val) = tok.strip_prefix("--owner=") {
-                owner = val.to_owned();
-                idx += 1;
-                continue;
-            }
-            if tok == "--workflow" {
-                let Some(val) = previous.get(idx + 1) else {
-                    completing_workflow = true;
-                    break;
-                };
-                workflow = Some(val.as_str());
-                idx += 2;
-                continue;
-            }
-            if let Some(val) = tok.strip_prefix("--workflow=") {
-                workflow = Some(val);
-                idx += 1;
-                continue;
-            }
-            if tok == "--input-json" || tok.starts_with("--input-json=") {
-                return Vec::new();
-            }
-            if tok == "--id" {
-                if previous.get(idx + 1).is_none() {
-                    return Vec::new();
-                }
-                named_id = true;
-                idx += 2;
-                continue;
-            }
-            if tok.starts_with("--id=") {
-                named_id = true;
-                idx += 1;
-                continue;
-            }
-            if tok.starts_with('-') {
-                idx += 1;
-                continue;
-            }
-            positionals.push(tok.as_str());
-            idx += 1;
-        }
-        // The workflow ID occupies a positional slot only without --id.
-        let Some(worker) = positionals.first().copied() else {
-            return Vec::new();
-        };
-        let Ok((w, pkg)) = self.catalog().worker_and_package(&owner, worker) else {
-            return Vec::new();
-        };
-        if !self.catalog().can_write(self.caller(), &owner, w.name()) {
-            return Vec::new();
-        }
-        if completing_workflow {
-            return pkg
-                .workflows()
-                .map(|(alias, workflow)| {
-                    (
-                        alias.to_owned(),
-                        (!workflow.description().is_empty())
-                            .then(|| workflow.description().to_owned()),
-                    )
-                })
-                .collect();
-        }
-        let Some(spec) = positionals
-            .len()
-            .checked_sub(if named_id { 1 } else { 2 })
-            .and_then(|index| pkg.select(workflow).ok()?.args().get(index))
+        let Some((_, prefix)) = previous
+            .split_last()
+            .filter(|(flag, _)| *flag == "--workflow")
         else {
             return Vec::new();
         };
-        let desc = if spec.description().is_empty() {
-            None
-        } else {
-            Some(spec.description().to_owned())
-        };
-        match spec.kind() {
-            ArgKind::Enum { choices } => {
-                choices.iter().map(|c| (c.clone(), desc.clone())).collect()
+        let mut args = prefix.iter().skip(1).map(String::as_str);
+        let mut worker = None;
+        let mut owner = self.caller();
+        while let Some(word) = args.next() {
+            let (name, value) = word
+                .split_once('=')
+                .map_or((word, None), |(n, v)| (n, Some(v)));
+            match name {
+                "--owner" => {
+                    let Some(value) = value.or_else(|| args.next()) else {
+                        return Vec::new();
+                    };
+                    owner = value;
+                }
+                "--input-json" | "--id" if value.or_else(|| args.next()).is_some() => {}
+                "--no-ask" => {}
+                _ if !word.starts_with('-') && worker.is_none() => worker = Some(word),
+                _ => return Vec::new(),
             }
-            ArgKind::Bool => vec![("true".into(), desc.clone()), ("false".into(), desc)],
-            _ => Vec::new(),
         }
+        let Some(worker) = worker else {
+            return Vec::new();
+        };
+        let Ok(pkg) = self.run_package(owner, worker) else {
+            return Vec::new();
+        };
+        pkg.workflows()
+            .map(|(alias, workflow)| {
+                (
+                    alias.to_owned(),
+                    (!workflow.description().is_empty()).then(|| workflow.description().to_owned()),
+                )
+            })
+            .collect()
     }
 }
 
@@ -190,9 +130,9 @@ mod tests {
             ),
             ("cancel run --owner a", "alice", "cancel run --owner alice "),
             (
-                "run greet id name --owner b",
+                "run greet --id job --owner b",
                 "bob",
-                "run greet id name --owner bob ",
+                "run greet --id job --owner bob ",
             ),
             ("permissions b", "bob", "permissions bob "),
             ("secrets ", "set", "secrets set "),
@@ -215,7 +155,7 @@ mod tests {
         assert!(bob_workers.iter().any(|s| s == "greet"));
         assert!(!bob_workers.iter().any(|s| s == "count"));
 
-        // Enum and bool argument completion from dynamic catalog!
+        // Workflow aliases still come from the selected, permitted worker.
         let workers_yaml = "\
 train-pkg:
   workflow: TrainWf
@@ -241,8 +181,18 @@ train-pkg:
             "alice",
         ));
         let mut custom_comp = Completer::new(custom_ctx);
-        assert!(candidate(&mut custom_comp, "run train job1 f", 16, "fast").is_some());
-        assert!(candidate(&mut custom_comp, "run train job1 fast t", 21, "true").is_some());
+        let alias = "run train --workflow train";
+        assert!(candidate(&mut custom_comp, alias, alias.len(), "train-pkg").is_some());
+        let no_positionals = "run train f";
+        assert!(
+            candidate(
+                &mut custom_comp,
+                no_positionals,
+                no_positionals.len(),
+                "fast"
+            )
+            .is_none()
+        );
         // Alice has no access to bob -> bob must NOT appear in `list --owner ` or `permissions `!
         assert!(candidate(&mut custom_comp, "list --owner ", 13, "bob").is_none());
         assert!(candidate(&mut custom_comp, "permissions ", 12, "bob").is_none());
@@ -274,10 +224,10 @@ train-pkg:
                 "list --owner 'alice' trailing",
             ),
             (
-                "run greet id 'Zoë' --o",
-                23,
+                "run greet --id 'Zoë' --o",
+                "run greet --id 'Zoë' --o".len(),
                 "--owner",
-                "run greet id 'Zoë' --owner ",
+                "run greet --id 'Zoë' --owner ",
             ),
         ];
         for (line, pos, display, expected) in cases {

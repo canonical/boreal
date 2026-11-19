@@ -14,6 +14,7 @@ const HISTORY_FILE: &str = "boreal.history";
 const CAPACITY: usize = 2000;
 const MAX_SELECTOR_BYTES: usize = 255;
 const MAX_ENTRY_BYTES: usize = 1100;
+const MAX_RECALL_BYTES: usize = 16 * 1024;
 const MAX_FILE_BYTES: usize = CAPACITY * (MAX_ENTRY_BYTES + 1);
 const FILE_MODE: u32 = 0o600;
 // Linux (both Boreal architectures); don't block opening an unexpected special file.
@@ -29,7 +30,12 @@ pub fn open(home: &Path, uid: u32) -> io::Result<Box<dyn History>> {
         return Err(unsafe_path());
     }
     let mut history = SelectorHistory::new(Some(Disk { home, uid }));
-    history.sync()?;
+    for entry in history.sync_disk()? {
+        history
+            .inner
+            .save(HistoryItem::from_command_line(entry))
+            .expect("in-memory history accepts canonical selectors");
+    }
     Ok(Box::new(history))
 }
 
@@ -82,19 +88,10 @@ fn canonical(line: &str) -> Option<String> {
 
     let run = cmd == "run";
     let required_id = matches!(cmd, "status" | "result" | "view" | "cancel");
-    // With --id, even the first positional word after the worker is payload.
-    // Detect that form before looking at any positional words, even if an
-    // earlier ambiguous option will stop us before we reach it.
-    let explicit_id = run
-        && args
-            .iter()
-            .take_while(|word| *word != "--")
-            .any(|word| word == "--id" || word.starts_with("--id="));
     let mut worker = None;
     let mut owner = None;
     let mut workflow = None;
     let mut id = None;
-    let mut allow_legacy_id = !explicit_id;
     let mut args = args.iter().map(String::as_str);
     while let Some(word) = args.next() {
         if word == "--" {
@@ -112,8 +109,7 @@ fn canonical(line: &str) -> Option<String> {
             "--id" if run && id.is_none() => {
                 id = Some(workflow_id(attached.or_else(|| args.next())?)?);
             }
-            "--input-json" if run && worker.is_some() => {
-                allow_legacy_id = false;
+            "--input-json" if run => {
                 // Continue only if the value is one complete JSON word (or the
                 // stdin marker). Otherwise later words could be pieces of it.
                 let Some(value) = attached.or_else(|| args.next()) else {
@@ -126,17 +122,10 @@ fn canonical(line: &str) -> Option<String> {
             "--owner" | "--workflow" | "--id" | "--input-json" => return None,
             _ if word.starts_with('-') => break,
             _ if run && worker.is_none() => worker = Some(name(word)?),
-            _ if (run && allow_legacy_id && id.is_none()) || (required_id && id.is_none()) => {
+            _ if required_id && id.is_none() => {
                 id = Some(workflow_id(word)?);
             }
-            _ if run => {
-                // Ignore all positional payloads. Treat a possibly unquoted,
-                // split JSON argument as ambiguous rather than scanning it
-                // for more options.
-                if word.starts_with(['{', '[']) && input::parse(word).is_err() {
-                    break;
-                }
-            }
+            _ if run => break,
             _ => return None,
         }
     }
@@ -307,16 +296,42 @@ impl SelectorHistory {
             disk,
         }
     }
+
+    fn sync_disk(&mut self) -> io::Result<VecDeque<String>> {
+        let Some(disk) = &self.disk else {
+            return Ok(VecDeque::new());
+        };
+        let mut file = disk.lock()?;
+        let (mut entries, mut dirty) = read_entries(&mut file)?;
+        // Merge only new local selectors, not the snapshot taken at startup.
+        for entry in &self.pending {
+            dirty |= push_entry(&mut entries, entry.clone());
+        }
+        if dirty {
+            write_entries(&mut file, &entries)?;
+        }
+        self.pending.clear();
+        Ok(entries)
+    }
 }
 
 impl History for SelectorHistory {
     fn save(&mut self, item: HistoryItem) -> reedline::Result<HistoryItem> {
-        let Some(command) = canonical(&item.command_line) else {
+        let Some(selector) = canonical(&item.command_line) else {
             return Ok(HistoryItem::from_command_line(""));
         };
-        let saved = self.inner.save(HistoryItem::from_command_line(command))?;
+        // The editor never writes to disk. Preserve the entered run line for
+        // recall, but cap the per-entry memory cost in a multi-user lab.
+        let recall = if (selector == "run" || selector.starts_with("run "))
+            && item.command_line.len() <= MAX_RECALL_BYTES
+        {
+            item.command_line
+        } else {
+            selector.clone()
+        };
+        let saved = self.inner.save(HistoryItem::from_command_line(recall))?;
         if self.disk.is_some() && saved.id.is_some() {
-            push_entry(&mut self.pending, saved.command_line.clone());
+            push_entry(&mut self.pending, selector);
         }
         Ok(saved)
     }
@@ -354,28 +369,9 @@ impl History for SelectorHistory {
     }
 
     fn sync(&mut self) -> io::Result<()> {
-        let Some(disk) = &self.disk else {
-            return Ok(());
-        };
-        let mut file = disk.lock()?;
-        let (mut entries, mut dirty) = read_entries(&mut file)?;
-        // Merge only new local entries, not the snapshot taken at startup.
-        for entry in &self.pending {
-            dirty |= push_entry(&mut entries, entry.clone());
+        if !self.pending.is_empty() {
+            self.sync_disk()?;
         }
-        if dirty {
-            write_entries(&mut file, &entries)?;
-        }
-        drop(file);
-
-        self.pending.clear();
-        let mut inner = FileBackedHistory::new(CAPACITY).expect("fixed history capacity");
-        for entry in entries {
-            inner
-                .save(HistoryItem::from_command_line(entry))
-                .expect("in-memory history accepts canonical selectors");
-        }
-        self.inner = inner;
         Ok(())
     }
 
@@ -403,11 +399,11 @@ mod tests {
             ("run", Some("run")),
             ("status", Some("status")),
             (
-                "run greet first private-value --workflow greeting --owner bob",
+                "run greet --id first --workflow greeting --owner bob",
                 Some("run greet --id first --workflow greeting --owner bob"),
             ),
             (
-                "run greet private-value --id=first -- --owner leaked",
+                "run greet --id=first -- --owner leaked",
                 Some("run greet --id first"),
             ),
             (
@@ -434,18 +430,19 @@ mod tests {
             ("secrets set api_key private-value", None),
             ("unknown private-value", None),
         ];
-        let mut history = memory();
         for (line, expected) in cases {
             assert_eq!(canonical(line).as_deref(), expected, "{line}");
-            let saved = history.save(HistoryItem::from_command_line(line)).unwrap();
-            assert_eq!(saved.command_line, expected.unwrap_or_default());
         }
-        assert!(
-            history
-                .search(SearchQuery::all_that_contain_rev("private-value".into()))
-                .unwrap()
-                .is_empty()
-        );
+        let mut history = memory();
+        let oversized = format!("run greet --input-json '{}'", " ".repeat(MAX_RECALL_BYTES));
+        for (line, recalled) in [
+            ("secrets set api_key private-value", ""),
+            ("secrets set api_key", "secrets set api_key"),
+            (oversized.as_str(), "run greet"),
+        ] {
+            let saved = history.save(HistoryItem::from_command_line(line)).unwrap();
+            assert_eq!(saved.command_line, recalled);
+        }
     }
 
     #[test]
@@ -472,10 +469,22 @@ mod tests {
         for i in 0..CAPACITY {
             first
                 .save(HistoryItem::from_command_line(format!(
-                    "run greet --id old-{i} private-value"
+                    r#"run greet --id old-{i} --input-json '{{"name":"private-value"}}'"#
                 )))
                 .unwrap();
         }
+        first.sync().unwrap();
+        let last = format!(
+            r#"run greet --id old-{} --input-json '{{"name":"private-value"}}'"#,
+            CAPACITY - 1
+        );
+        assert_eq!(
+            first
+                .search(SearchQuery::all_that_contain_rev("private-value".into()))
+                .unwrap()[0]
+                .command_line,
+            last
+        );
         second
             .save(HistoryItem::from_command_line("status new --owner bob"))
             .unwrap();
