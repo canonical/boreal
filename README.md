@@ -108,6 +108,10 @@ vm_ssh alice@127.0.0.1 'secrets set api_token' < "$HOME/private/my-token-file"
 
 ## Verify the peripheral replica
 
+The greeting includes the hostname of the worker that ran the activity:
+`Hello Replica from boreal-vm.` or `Hello Replica from compute-01.` A fresh
+workflow result is enough to identify the activity host without root access.
+
 From the VM's local root console, check service status and the veth:
 
 ```sh
@@ -135,7 +139,7 @@ systemctl stop boreal-worker-alice-greet.service
 ```
 
 From the SSH terminal, start a new workflow and check its result after it
-completes. This run should return `Hello, Replica!`:
+completes. This run should return `Hello Replica from compute-01.`:
 
 ```sh
 vm_ssh alice@127.0.0.1 'run greet --id replica-smoke Replica 1'

@@ -70,6 +70,10 @@ impl Workload {
 
 pub struct DemoActivities;
 
+fn greeting(name: &str, hostname: &str) -> String {
+    format!("Hello {name} from {}.", hostname.trim_end())
+}
+
 #[activities]
 impl DemoActivities {
     #[activity]
@@ -77,7 +81,8 @@ impl DemoActivities {
         _ctx: ActivityContext,
         name: String,
     ) -> std::result::Result<String, ActivityError> {
-        Ok(format!("Hello, {name}!"))
+        let hostname = std::fs::read_to_string("/proc/sys/kernel/hostname")?;
+        Ok(greeting(&name, &hostname))
     }
 }
 
@@ -269,6 +274,18 @@ mod tests {
                 .unwrap()
                 .wait_seconds,
             7200
+        );
+    }
+
+    #[test]
+    fn test_greeting_includes_activity_hostname() {
+        assert_eq!(
+            greeting("Replica", "boreal-vm\n"),
+            "Hello Replica from boreal-vm."
+        );
+        assert_eq!(
+            greeting("Replica", "compute-01\n"),
+            "Hello Replica from compute-01."
         );
     }
 
