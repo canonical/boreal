@@ -62,10 +62,9 @@ and [updater](updater/README.md).
 
 ## Label a deployment with its Git version tag
 
-Git-backed downstream flakes that pass `specialArgs = { inherit self; };`
-(including `demo-lab` and the starter template) show their seven-character
-commit hash in both SSH prompts. For release builds, use the updater or build
-from a clean downstream checkout with `boreal-build`:
+Both SSH shells show the deployed **downstream** revision, not the revision of
+the Boreal framework input. Use the updater for production updates or build
+from a downstream Git checkout with `boreal-build`:
 
 ```sh
 nix run github:canonical/boreal#boreal-build -- . lab-01
@@ -76,10 +75,17 @@ nix run github:canonical/boreal#boreal-build -- . boreal-vm vm
 `boreal-build` only builds and creates a `result` link; it does not activate the
 generation. The label uses a version tag such as `v1.2.3` on the exact built
 commit, including annotated tags. If several version tags match, it uses the
-first in lexical order. Plain flake builds use the hash because Nix does not
-expose Git tags to flake evaluation. A dirty source uses `<hash>-dirty` when
-Nix provides a dirty revision. Sources without revision metadata (including
-some builds using `--override-input`) show `unknown`.
+first in lexical order. Otherwise it shows the seven-character commit hash.
+A downstream checkout with staged or unstaged tracked changes shows `<hash>+`,
+even if its `HEAD` is tagged. Untracked files are not included in Git flake
+builds.
+
+Plain flake builds can use revision metadata when the downstream passes
+`specialArgs = { inherit self; };`, but do not see Git tags and may lose the
+revision when the effective lock changes. Use `boreal-build … --override-input
+boreal FLAKE` to keep the downstream label with a local framework override,
+without rewriting the lockfile. Sources without revision metadata show
+`unknown`.
 
 ## Run a workflow
 
@@ -157,7 +163,8 @@ git worktree add downstreams/demo-lab downstreams/demo-lab
 # Check or run the downstream VM against local unpushed commits on main
 # (--no-write-lock-file keeps local file:// paths out of flake.lock):
 nix flake check ./downstreams/demo-lab --override-input boreal . --no-write-lock-file
-nix run ./downstreams/demo-lab#boreal-vm --override-input boreal . --no-write-lock-file
+nix run .#boreal-build -- ./downstreams/demo-lab boreal-vm vm --override-input boreal .
+./result/bin/run-boreal-vm
 ```
 
 Note that Git remotes do not enforce per-branch read permissions: keep public

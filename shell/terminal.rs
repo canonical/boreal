@@ -257,7 +257,7 @@ mod tests {
 
     #[test]
     fn test_deployment_label_accepts_only_bounded_display_text() {
-        for label in ["d9c4975", "d9c4975-dirty", "v1.2.3-rc.1+build.2", "unknown"] {
+        for label in ["d9c4975", "d9c4975+", "v1.2.3-rc.1+build.2", "unknown"] {
             assert_eq!(parse_label(format!("{label}\n").as_bytes()), Some(label));
         }
         for value in ["", "\n", "v1.2.3\nnext", "v1.2.3 ", "v1.2.3\x1b"] {

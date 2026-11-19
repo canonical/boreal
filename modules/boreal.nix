@@ -176,10 +176,14 @@ in
           options = {
             rev = mkOption { type = types.str; };
             tags = mkOption { type = types.listOf types.str; };
+            dirty = mkOption {
+              type = types.bool;
+              default = false;
+            };
           };
         }
       );
-      description = "Version tags captured by deployment tooling for the exact downstream revision.";
+      description = "Downstream Git identity captured by deployment tooling.";
     };
 
     temporalAddress = mkOption {

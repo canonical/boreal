@@ -27,9 +27,9 @@ store:
 
 `/etc/boreal-deployment` (`0444`, `root:root`) holds only the label for the
 running generation. Both shells read it without granting the admin account
-access to the Boreal catalog or broker. Deployment tooling checks exact Git
-tags before building and passes the captured tags into pure Nix evaluation
-along with the pinned downstream revision.
+access to the Boreal catalog or broker. Deployment tooling captures the
+downstream revision, dirty state, and exact Git tags at build time. An override
+of the Boreal input does not affect that downstream identity.
 
 ## Host and network-namespace isolation
 
