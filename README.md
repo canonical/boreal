@@ -66,6 +66,17 @@ cargo test --manifest-path temporal/Cargo.toml --workspace --locked
 
 ## Run the disposable VM
 
+From the demo Git checkout, build with `boreal-build` so both SSH prompts show
+the demo's Git revision even with a local framework override. This uses the
+Git checkout, not the `path:` snapshot above, and leaves `flake.lock` alone.
+Expect the seven-character demo hash, an exact version tag on a clean tagged
+commit, or `<hash>+` if the demo has tracked changes. Changes in the Boreal
+checkout do not add `+` to the demo's label.
+
+```sh
+nix run "$boreal_input#boreal-build" -- . boreal-vm vm --override-input boreal "$boreal_input"
+```
+
 Choose a fresh disk path so no existing qcow2 is reused or overwritten. If
 another VM already uses SSH port `2222`, shut it down before launching. The
 `QEMU_KERNEL_PARAMS` line opens an unauthenticated root shell **only on this
@@ -77,7 +88,7 @@ disk_dir=$(mktemp -d "$HOME/boreal-replica-demo.XXXXXXXX")
 printf 'Fresh VM disk directory: %s\n' "$disk_dir"
 NIX_DISK_IMAGE="$disk_dir/boreal-vm.qcow2" \
   QEMU_KERNEL_PARAMS='systemd.debug_shell=ttyS0 systemd.mask=serial-getty@ttyS0.service' \
-  nix run "$demo_flake#boreal-vm" --override-input boreal "$boreal_input" --no-write-lock-file
+  ./result/bin/run-boreal-vm
 ```
 
 In another terminal, set `disk_dir` to the printed directory to keep the fresh
@@ -90,14 +101,19 @@ vm_ssh alice@127.0.0.1
 # Inside boreal-shell:
 workers
 permissions
-run greet alice-run-1 'Alice Smith' 5
+run greet --id alice-run-1 --input-json '{"name":"Alice Smith","wait_seconds":5}'
 status alice-run-1
 result alice-run-1
-run count alice-run-2 'Élan' 1
+run count --id alice-run-2 --input-json '{"name":"Élan","wait_seconds":1}'
 secrets set api_token
 secrets list
 exit
 ```
+
+To fill in a workflow interactively, run `run greet`. In choice lists, use
+Up/Down to move one item and Left/Right to page through five items at a time.
+Arrow Up recalls your exact JSON command in the same session; after reconnecting,
+workflow inputs are no longer in history.
 
 Or pipe a secret over stdin without putting secret contents in arguments or
 history:
@@ -142,7 +158,8 @@ From the SSH terminal, start a new workflow and check its result after it
 completes. This run should return `Hello Replica from compute-01.`:
 
 ```sh
-vm_ssh alice@127.0.0.1 'run greet --id replica-smoke Replica 1'
+printf '%s\n' '{"name":"Replica","wait_seconds":1}' |
+  vm_ssh alice@127.0.0.1 'run greet --id replica-smoke --input-json -'
 vm_ssh alice@127.0.0.1 'result replica-smoke'
 ```
 
