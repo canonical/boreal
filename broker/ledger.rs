@@ -34,6 +34,51 @@ struct Lease {
     granted_at: Instant,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RemoteTaskKind {
+    Workflow,
+    Activity,
+    Query,
+}
+
+impl RemoteTaskKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Workflow => "workflow",
+            Self::Activity => "activity",
+            Self::Query => "query",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct RemoteLease {
+    token_digest: String,
+    namespace: String,
+    task_queue: String,
+    kind: RemoteTaskKind,
+}
+
+impl RemoteLease {
+    fn new(token: &[u8], namespace: &str, task_queue: &str, kind: RemoteTaskKind) -> Self {
+        Self {
+            token_digest: digest_hex(token),
+            namespace: namespace.to_owned(),
+            task_queue: task_queue.to_owned(),
+            kind,
+        }
+    }
+}
+
+pub(crate) fn digest_hex(data: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut hex = String::with_capacity(64);
+    for byte in ring::digest::digest(&ring::digest::SHA256, data).as_ref() {
+        write!(&mut hex, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    hex
+}
+
 struct Inner {
     dir: PathBuf,
     gate: Gate,
@@ -42,11 +87,30 @@ struct Inner {
     pending_admissions: BTreeMap<u64, (String, String)>,
     tracked_runs: BTreeSet<TrackedKey>,
     leases: HashMap<Vec<u8>, Lease>,
+    remote_leases: BTreeSet<RemoteLease>,
+    remote_fenced: bool,
+    remote_pickups: usize,
 }
 
 pub struct Coordinator {
     inner: Mutex<Inner>,
     starts_drained: Notify,
+    remote_enabled: bool,
+}
+
+pub struct RemotePickup<'a>(&'a Coordinator);
+
+impl Drop for RemotePickup<'_> {
+    fn drop(&mut self) {
+        self.0.inner.lock().unwrap().remote_pickups -= 1;
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct RemoteDrain {
+    pub fenced: bool,
+    pub pickups: usize,
+    pub leases: usize,
 }
 
 #[derive(Debug)]
@@ -68,14 +132,14 @@ impl Error {
 }
 
 impl Coordinator {
-    pub fn open(dir: &Path) -> Result<Self, Error> {
+    pub fn open(dir: &Path, remote_enabled: bool) -> Result<Self, Error> {
         match DirBuilder::new().mode(0o700).create(dir) {
             Ok(()) => {}
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
             Err(e) => return Err(Error::Storage(format!("create {}: {e}", dir.display()))),
         }
         let gate = load_gate(dir)?;
-        let (pending, mut tracked) = load_ledger(dir)?;
+        let (pending, mut tracked, remote_leases) = load_ledger(dir)?;
         // Any pending admission left over from an interrupted broker process is
         // promoted to a tracked lookup so drain reconciles it against History.
         for (namespace, workflow_id) in pending.values() {
@@ -85,28 +149,60 @@ impl Coordinator {
                 run_id: None,
             });
         }
-        let mut inner = Inner {
+        let inner = Inner {
             dir: dir.to_path_buf(),
+            // A restarted broker cannot assume the updater hasn't already
+            // observed quiescence. Never allow pickup on a recovered closed gate.
+            remote_fenced: matches!(gate, Gate::Closed { .. }),
             gate,
             next_seq: 1,
             in_flight_starts: 0,
             pending_admissions: BTreeMap::new(),
             tracked_runs: tracked,
             leases: HashMap::new(),
+            remote_leases,
+            remote_pickups: 0,
         };
         if !pending.is_empty() {
             save_ledger(&inner)?;
-        } else {
-            let _ = &mut inner;
         }
         Ok(Self {
             inner: Mutex::new(inner),
             starts_drained: Notify::new(),
+            remote_enabled,
         })
     }
 
     pub fn gate_snapshot(&self) -> Gate {
         self.inner.lock().unwrap().gate.clone()
+    }
+
+    pub fn begin_remote_pickup(&self) -> Result<RemotePickup<'_>, Error> {
+        let mut guard = self.inner.lock().unwrap();
+        if !self.remote_enabled || guard.remote_fenced {
+            return Err(Error::AdmissionClosed);
+        }
+        guard.remote_pickups += 1;
+        Ok(RemotePickup(self))
+    }
+
+    pub fn remote_drain(&self, update_id: &str, fence: bool) -> Result<RemoteDrain, Error> {
+        let mut guard = self.inner.lock().unwrap();
+        if !matches!(&guard.gate, Gate::Closed { update_id: id, .. } if id == update_id)
+            || guard.in_flight_starts != 0
+        {
+            return Err(Error::Conflict(
+                "admission gate is not closed for this update".into(),
+            ));
+        }
+        if fence && self.remote_enabled {
+            guard.remote_fenced = true;
+        }
+        Ok(RemoteDrain {
+            fenced: guard.remote_fenced || !self.remote_enabled,
+            pickups: guard.remote_pickups,
+            leases: guard.remote_leases.len(),
+        })
     }
 
     pub fn begin_start(&self, namespace: &str, workflow_id: &str) -> Result<u64, Error> {
@@ -247,8 +343,10 @@ impl Coordinator {
                 update_id: existing,
                 ..
             } if existing == update_id => {
+                save_gate(&guard.dir, &Gate::Open)?;
                 guard.gate = Gate::Open;
-                save_gate(&guard.dir, &guard.gate)
+                guard.remote_fenced = false;
+                Ok(())
             }
             Gate::Closed {
                 update_id: existing,
@@ -334,6 +432,66 @@ impl Coordinator {
         );
     }
 
+    /// Persist before giving a remote worker the reply. Unlike local work,
+    /// remote execution is not stopped by shutting down the local units or
+    /// restarting the broker. A timer alone is not proof it stopped.
+    pub fn record_remote_lease(
+        &self,
+        token: &[u8],
+        kind: RemoteTaskKind,
+        task_queue: &str,
+        key: TrackedKey,
+    ) -> Result<(), Error> {
+        let lease = RemoteLease::new(token, &key.namespace, task_queue, kind);
+        let mut guard = self.inner.lock().unwrap();
+        if !guard.remote_leases.insert(lease.clone()) {
+            return Err(Error::Conflict(
+                "remote task has an outstanding lease".into(),
+            ));
+        }
+        let inserted = guard.tracked_runs.insert(key.clone());
+        if let Err(err) = save_ledger(&guard) {
+            guard.remote_leases.remove(&lease);
+            if inserted {
+                guard.tracked_runs.remove(&key);
+            }
+            return Err(err);
+        }
+        Ok(())
+    }
+
+    pub fn has_remote_lease(
+        &self,
+        token: &[u8],
+        namespace: &str,
+        task_queue: &str,
+        kind: RemoteTaskKind,
+    ) -> bool {
+        self.inner
+            .lock()
+            .unwrap()
+            .remote_leases
+            .contains(&RemoteLease::new(token, namespace, task_queue, kind))
+    }
+
+    pub fn finish_remote_lease(
+        &self,
+        token: &[u8],
+        namespace: &str,
+        task_queue: &str,
+        kind: RemoteTaskKind,
+    ) -> Result<(), Error> {
+        let lease = RemoteLease::new(token, namespace, task_queue, kind);
+        let mut guard = self.inner.lock().unwrap();
+        if guard.remote_leases.remove(&lease)
+            && let Err(err) = save_ledger(&guard)
+        {
+            guard.remote_leases.insert(lease);
+            return Err(err);
+        }
+        Ok(())
+    }
+
     /// True when this namespace still has a drain-tracked run or a live worker lease.
     ///
     /// A closed admission gate uses this so an in-flight caller can start a delegated
@@ -348,6 +506,10 @@ impl Coordinator {
             .leases
             .values()
             .any(|lease| lease.namespace == namespace)
+            || guard
+                .remote_leases
+                .iter()
+                .any(|lease| lease.namespace == namespace)
             || guard
                 .tracked_runs
                 .iter()
@@ -484,17 +646,32 @@ fn save_ledger(inner: &Inner) -> Result<(), Error> {
             key.namespace, key.workflow_id
         ));
     }
+    for lease in &inner.remote_leases {
+        sanitize_field(&lease.namespace)?;
+        sanitize_field(&lease.task_queue)?;
+        out.push_str(&format!(
+            "remote={}\t{}\t{}\t{}\n",
+            lease.token_digest,
+            lease.namespace,
+            lease.task_queue,
+            lease.kind.label()
+        ));
+    }
     atomic_write(&inner.dir, "ledger.state", &out)
 }
 
-type LoadedLedger = (BTreeMap<u64, (String, String)>, BTreeSet<TrackedKey>);
+type LoadedLedger = (
+    BTreeMap<u64, (String, String)>,
+    BTreeSet<TrackedKey>,
+    BTreeSet<RemoteLease>,
+);
 
 fn load_ledger(dir: &Path) -> Result<LoadedLedger, Error> {
     let path = dir.join("ledger.state");
     let text = match fs::read_to_string(&path) {
         Ok(s) => s,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            return Ok((BTreeMap::new(), BTreeSet::new()));
+            return Ok((BTreeMap::new(), BTreeSet::new(), BTreeSet::new()));
         }
         Err(e) => return Err(Error::Storage(format!("read {}: {e}", path.display()))),
     };
@@ -504,6 +681,7 @@ fn load_ledger(dir: &Path) -> Result<LoadedLedger, Error> {
     }
     let mut pending = BTreeMap::new();
     let mut runs = BTreeSet::new();
+    let mut remote_leases = BTreeSet::new();
     for line in lines {
         if let Some(rest) = line.strip_prefix("pending=") {
             let mut parts = rest.splitn(3, '\t');
@@ -538,17 +716,109 @@ fn load_ledger(dir: &Path) -> Result<LoadedLedger, Error> {
                     Some(rid.to_owned())
                 },
             });
+        } else if let Some(rest) = line.strip_prefix("remote=") {
+            let mut fields = rest.split('\t');
+            let invalid = || Error::Storage("invalid remote lease record in ledger.state".into());
+            let token_digest = fields
+                .next()
+                .filter(|s| {
+                    s.len() == 64
+                        && s.bytes()
+                            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                })
+                .ok_or_else(invalid)?;
+            let namespace = fields
+                .next()
+                .filter(|s| !s.is_empty())
+                .ok_or_else(invalid)?;
+            let task_queue = fields
+                .next()
+                .filter(|s| !s.is_empty())
+                .ok_or_else(invalid)?;
+            let kind = match fields.next() {
+                Some("workflow") => RemoteTaskKind::Workflow,
+                Some("activity") => RemoteTaskKind::Activity,
+                Some("query") => RemoteTaskKind::Query,
+                _ => return Err(invalid()),
+            };
+            if fields.next().is_some()
+                || !remote_leases.insert(RemoteLease {
+                    token_digest: token_digest.to_owned(),
+                    namespace: namespace.to_owned(),
+                    task_queue: task_queue.to_owned(),
+                    kind,
+                })
+            {
+                return Err(invalid());
+            }
         } else {
             return Err(Error::Storage("unexpected line in ledger.state".into()));
         }
     }
-    Ok((pending, runs))
+    Ok((pending, runs, remote_leases))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    #[tokio::test]
+    async fn recovered_closed_gate_and_remote_leases_fail_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let token = b"sample task token";
+        let kind = RemoteTaskKind::Workflow;
+        let coord = Coordinator::open(dir.path(), true).unwrap();
+        coord
+            .record_remote_lease(
+                token,
+                kind,
+                "alice-greet",
+                TrackedKey {
+                    namespace: "alice".into(),
+                    workflow_id: "test".into(),
+                    run_id: Some("run".into()),
+                },
+            )
+            .unwrap();
+        coord.close_gate("update", "rev").await.unwrap();
+        assert!(coord.begin_remote_pickup().is_ok());
+        drop(coord);
+
+        // Also preserve leases if a replacement deployment removes ingress.
+        let no_ingress = Coordinator::open(dir.path(), false).unwrap();
+        assert_eq!(
+            no_ingress.remote_drain("update", false).unwrap(),
+            RemoteDrain {
+                fenced: true,
+                pickups: 0,
+                leases: 1,
+            }
+        );
+        drop(no_ingress);
+        let coord = Coordinator::open(dir.path(), true).unwrap();
+        assert!(coord.begin_remote_pickup().is_err());
+        assert!(coord.has_remote_lease(token, "alice", "alice-greet", kind));
+        assert!(!coord.has_remote_lease(token, "alice", "alice-wrong", kind));
+        assert!(!coord.has_remote_lease(token, "alice", "alice-greet", RemoteTaskKind::Query));
+        assert!(
+            !fs::read_to_string(dir.path().join("ledger.state"))
+                .unwrap()
+                .contains("sample task token")
+        );
+        coord
+            .finish_remote_lease(token, "alice", "alice-greet", kind)
+            .unwrap();
+        assert_eq!(coord.remote_drain("update", false).unwrap().leases, 0);
+        assert!(coord.reopen_gate("wrong-update").is_err());
+        assert!(coord.begin_remote_pickup().is_err());
+        coord.reopen_gate("update").unwrap();
+        assert!(coord.begin_remote_pickup().is_ok());
+        drop(coord);
+        let coord = Coordinator::open(dir.path(), true).unwrap();
+        assert!(coord.begin_remote_pickup().is_ok());
+        assert!(!coord.has_remote_lease(token, "alice", "alice-greet", kind));
+    }
 
     #[tokio::test]
     async fn test_durable_gate_waits_for_inflight_starts_and_survives_restart() {
@@ -560,7 +830,7 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        let coord = Arc::new(Coordinator::open(&dir).unwrap());
+        let coord = Arc::new(Coordinator::open(&dir, false).unwrap());
         let seq = coord.begin_start("alice", "wf-1").unwrap();
 
         let closer = {
@@ -581,7 +851,7 @@ mod tests {
             .unwrap();
 
         drop(coord);
-        let recovered = Coordinator::open(&dir).unwrap();
+        let recovered = Coordinator::open(&dir, false).unwrap();
         assert_eq!(
             recovered.gate_snapshot(),
             Gate::Closed {

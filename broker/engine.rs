@@ -16,6 +16,7 @@ pub struct Engine<B: Backend> {
     catalog: Catalog,
     coordinator: Arc<Coordinator>,
     backend: Arc<B>,
+    updater_operations: tokio::sync::Mutex<()>,
 }
 
 impl<B: Backend> Engine<B> {
@@ -24,6 +25,7 @@ impl<B: Backend> Engine<B> {
             catalog,
             coordinator,
             backend,
+            updater_operations: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -424,6 +426,13 @@ impl<B: Backend> Engine<B> {
     }
 
     pub async fn handle_updater_request(&self, req: UpdaterRequest) -> UpdaterResponse {
+        // Keep the durable gate's owner/phase and the schedule operations
+        // stable across each check, even for concurrent root IPC callers.
+        let _operation = if matches!(req, UpdaterRequest::GateStatus) {
+            None
+        } else {
+            Some(self.updater_operations.lock().await)
+        };
         match req {
             UpdaterRequest::GateStatus => match self.coordinator.gate_snapshot() {
                 Gate::Open => UpdaterResponse::GateStatus {
@@ -485,8 +494,12 @@ impl<B: Backend> Engine<B> {
     }
 
     async fn check_drain(&self, update_id: &str) -> UpdaterResponse {
-        if let Err(err) = self.coordinator.require_closed_for(update_id) {
-            return UpdaterResponse::Error(err.detail());
+        let remote_before = match self.coordinator.remote_drain(update_id, false) {
+            Ok(state) => state,
+            Err(err) => return UpdaterResponse::Error(err.detail()),
+        };
+        if remote_before.fenced && remote_before.pickups > 0 {
+            return remote_pickup_busy(remote_before);
         }
 
         let sched_runs = match self.backend.verify_all_schedules_paused().await {
@@ -638,7 +651,15 @@ impl<B: Backend> Engine<B> {
             return UpdaterResponse::Error(err.detail());
         }
 
-        let active_leases = self.coordinator.active_lease_count() as u32;
+        let remote = match self.coordinator.remote_drain(update_id, false) {
+            Ok(state) => state,
+            Err(err) => return UpdaterResponse::Error(err.detail()),
+        };
+        let active_leases = self
+            .coordinator
+            .active_lease_count()
+            .saturating_add(remote.leases)
+            .min(u32::MAX as usize) as u32;
         if active_workflows > 0 || active_leases > 0 {
             return UpdaterResponse::DrainBusy {
                 active_workflows,
@@ -652,7 +673,30 @@ impl<B: Backend> Engine<B> {
             };
         }
 
+        // A pre-fence scan is only a signal to stop admitting pickups. The
+        // post-fence scan must start after every admitted pickup AND any work
+        // it delivered have settled; a check racing the last completion can
+        // otherwise miss effects committed after the History DB query.
+        if !remote_before.fenced || remote_before.leases > 0 {
+            let remote = match self.coordinator.remote_drain(update_id, true) {
+                Ok(state) => state,
+                Err(err) => return UpdaterResponse::Error(err.detail()),
+            };
+            return remote_pickup_busy(remote);
+        }
+
         UpdaterResponse::DrainQuiescent
+    }
+}
+
+fn remote_pickup_busy(state: ledger::RemoteDrain) -> UpdaterResponse {
+    UpdaterResponse::DrainBusy {
+        active_workflows: 0,
+        active_leases: state.leases.min(u32::MAX as usize) as u32,
+        detail: format!(
+            "remote pickup fenced: {} request(s) and {} remote lease(s) remaining; drain will recheck",
+            state.pickups, state.leases,
+        ),
     }
 }
 
@@ -925,6 +969,103 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn remote_drain_fences_only_at_candidate_quiescence_and_rechecks_after_pickup() {
+        let dir = tempfile::tempdir().unwrap();
+        let coord = Arc::new(Coordinator::open(dir.path(), true).unwrap());
+        let db_run = ActiveDbExecution {
+            namespace: "alice".into(),
+            workflow_id: "racing-workflow".into(),
+            run_id_hex: "123456781234123412341234567890ab".into(),
+        };
+        let backend = Arc::new(MockBackend {
+            state: Mutex::new(MockState {
+                db_running: vec![db_run.clone()],
+                ..Default::default()
+            }),
+        });
+        let engine = Engine::new(demo_catalog(), Arc::clone(&coord), Arc::clone(&backend));
+        let close = UpdaterRequest::CloseGate {
+            update_id: "update".into(),
+            rev: "rev".into(),
+        };
+        let check = || UpdaterRequest::CheckDrain {
+            update_id: "update".into(),
+        };
+        assert_eq!(
+            engine.handle_updater_request(close).await,
+            UpdaterResponse::GateClosed
+        );
+        assert!(matches!(
+            engine.handle_updater_request(check()).await,
+            UpdaterResponse::DrainBusy {
+                active_workflows: 1,
+                ..
+            }
+        ));
+        let poll = coord
+            .begin_remote_pickup()
+            .expect("active workflows can still drain");
+
+        backend.state.lock().unwrap().db_running.clear();
+        assert!(matches!(engine.handle_updater_request(check()).await,
+            UpdaterResponse::DrainBusy { ref detail, .. } if detail.contains("1 request(s)")));
+        assert!(coord.begin_remote_pickup().is_err());
+        assert!(matches!(
+            engine.handle_updater_request(check()).await,
+            UpdaterResponse::DrainBusy { .. }
+        ));
+
+        // Simulate a query/activity received from the already-forwarded poll.
+        // Even if History has no running workflow, check_drain must see the lease.
+        let kind = ledger::RemoteTaskKind::Activity;
+        let key = TrackedKey {
+            namespace: "alice".into(),
+            workflow_id: db_run.workflow_id.clone(),
+            run_id: Some(pg::format_uuid_hex(&db_run.run_id_hex)),
+        };
+        coord
+            .record_remote_lease(b"test-token", kind, "alice-greet", key)
+            .unwrap();
+        drop(poll);
+        assert!(matches!(
+            engine.handle_updater_request(check()).await,
+            UpdaterResponse::DrainBusy {
+                active_workflows: 0,
+                active_leases: 1,
+                ..
+            }
+        ));
+        coord
+            .finish_remote_lease(b"test-token", "alice", "alice-greet", kind)
+            .unwrap();
+
+        // Check the backend again, rather than reusing the pre-fence scan.
+        backend.state.lock().unwrap().db_running.push(db_run);
+        assert!(matches!(
+            engine.handle_updater_request(check()).await,
+            UpdaterResponse::DrainBusy {
+                active_workflows: 1,
+                ..
+            }
+        ));
+        backend.state.lock().unwrap().db_running.clear();
+        assert_eq!(
+            engine.handle_updater_request(check()).await,
+            UpdaterResponse::DrainQuiescent
+        );
+        assert!(coord.begin_remote_pickup().is_err());
+        assert_eq!(
+            engine
+                .handle_updater_request(UpdaterRequest::ReopenGate {
+                    update_id: "update".into(),
+                })
+                .await,
+            UpdaterResponse::GateReopened
+        );
+        assert!(coord.begin_remote_pickup().is_ok());
+    }
+
     fn demo_catalog() -> Catalog {
         let workers = "\
 lab-worker:
@@ -994,7 +1135,7 @@ workers:
     #[tokio::test]
     async fn test_enforces_delegated_permissions_and_workflow_type_verification() {
         let dir = std::env::temp_dir().join(format!("boreal-engine-test-1-{}", std::process::id()));
-        let coord = Arc::new(Coordinator::open(&dir).unwrap());
+        let coord = Arc::new(Coordinator::open(&dir, false).unwrap());
         let backend = Arc::new(MockBackend {
             state: Mutex::new(MockState::default()),
         });
@@ -1107,7 +1248,7 @@ workers:
     #[tokio::test]
     async fn test_drain_covers_schedules_abandoned_children_db_and_uncertainty() {
         let dir = std::env::temp_dir().join(format!("boreal-engine-test-2-{}", std::process::id()));
-        let coord = Arc::new(Coordinator::open(&dir).unwrap());
+        let coord = Arc::new(Coordinator::open(&dir, false).unwrap());
         let backend = Arc::new(MockBackend {
             state: Mutex::new(MockState {
                 unpaused_schedules: vec![("alice".into(), "hourly".into())],
@@ -1251,7 +1392,7 @@ workers:
     #[tokio::test]
     async fn test_summary_isolates_caller_counts_and_degrades_gracefully() {
         let dir = std::env::temp_dir().join(format!("boreal-engine-test-3-{}", std::process::id()));
-        let coord = Arc::new(Coordinator::open(&dir).unwrap());
+        let coord = Arc::new(Coordinator::open(&dir, false).unwrap());
         let backend = Arc::new(MockBackend {
             state: Mutex::new(MockState::default()),
         });
@@ -1364,7 +1505,7 @@ workers:
         let catalog = Catalog::from_yaml(workers, &users).unwrap();
 
         let dir = std::env::temp_dir().join(format!("boreal-engine-test-4-{}", std::process::id()));
-        let coord = Arc::new(Coordinator::open(&dir).unwrap());
+        let coord = Arc::new(Coordinator::open(&dir, false).unwrap());
         let backend = Arc::new(MockBackend {
             state: Mutex::new(MockState::default()),
         });

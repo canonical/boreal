@@ -1,5 +1,6 @@
 {
   lib,
+  openssl,
   pkg-config,
   protobuf,
   rustPlatform,
@@ -34,5 +35,7 @@ rustPlatform.buildRustPackage {
     pkg-config
     protobuf
   ];
+  nativeCheckInputs = [ openssl ];
+  checkFlags = [ "--include-ignored" ];
   meta.mainProgram = "boreal-broker";
 }

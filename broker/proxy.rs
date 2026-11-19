@@ -22,11 +22,12 @@ use temporalio_common::protos::temporal::api::{
     workflow::v1::{NewWorkflowExecutionInfo, WorkflowExecutionInfo},
     workflowservice::v1::{
         CountSchedulesRequest, CreateScheduleRequest, DeleteScheduleRequest,
-        DescribeNamespaceRequest, DescribeScheduleRequest, DescribeScheduleResponse,
-        DescribeWorkflowExecutionRequest, DescribeWorkflowExecutionResponse,
-        GetWorkflowExecutionHistoryRequest, ListScheduleMatchingTimesRequest, ListSchedulesRequest,
-        PatchScheduleRequest, PollActivityTaskQueueRequest, PollActivityTaskQueueResponse,
-        PollNexusTaskQueueRequest, PollWorkflowTaskQueueRequest, PollWorkflowTaskQueueResponse,
+        DescribeNamespaceRequest, DescribeNamespaceResponse, DescribeScheduleRequest,
+        DescribeScheduleResponse, DescribeWorkflowExecutionRequest,
+        DescribeWorkflowExecutionResponse, GetWorkflowExecutionHistoryRequest,
+        ListScheduleMatchingTimesRequest, ListSchedulesRequest, PatchScheduleRequest,
+        PollActivityTaskQueueRequest, PollActivityTaskQueueResponse, PollNexusTaskQueueRequest,
+        PollWorkflowTaskQueueRequest, PollWorkflowTaskQueueResponse,
         RecordActivityTaskHeartbeatByIdRequest, RecordActivityTaskHeartbeatRequest,
         RecordWorkerHeartbeatRequest, RequestCancelWorkflowExecutionRequest,
         RespondActivityTaskCanceledByIdRequest, RespondActivityTaskCanceledRequest,
@@ -34,16 +35,19 @@ use temporalio_common::protos::temporal::api::{
         RespondActivityTaskFailedByIdRequest, RespondActivityTaskFailedRequest,
         RespondNexusTaskCompletedRequest, RespondNexusTaskFailedRequest,
         RespondQueryTaskCompletedRequest, RespondWorkflowTaskCompletedRequest,
-        RespondWorkflowTaskFailedRequest, ShutdownWorkerRequest, StartWorkflowExecutionRequest,
-        StartWorkflowExecutionResponse, UpdateScheduleRequest,
+        RespondWorkflowTaskCompletedResponse, RespondWorkflowTaskFailedRequest,
+        ShutdownWorkerRequest, StartWorkflowExecutionRequest, StartWorkflowExecutionResponse,
+        UpdateScheduleRequest,
     },
 };
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Semaphore, oneshot};
 
 use boreal_common::catalog::{self, Catalog};
 
-use crate::ledger::{self, Coordinator, TrackedKey};
+use crate::ledger::{self, Coordinator, RemoteTaskKind, TrackedKey};
+use crate::remote::RemoteIngress;
 
 const MAX_GRPC_BODY_BYTES: usize = 16 * 1024 * 1024;
 const WORKFLOW_SERVICE_PREFIX: &str = "/temporal.api.workflowservice.v1.WorkflowService/";
@@ -155,34 +159,83 @@ pub async fn serve_worker_listener(
     coordinator: Arc<Coordinator>,
     catalog: Arc<Catalog>,
 ) {
-    let binding = Arc::new(binding);
-    let upstream = Arc::new(UpstreamPool::new(upstream_addr));
+    let gate = Arc::new(WorkerGate {
+        binding: Arc::new(binding),
+        upstream: Arc::new(UpstreamPool::new(upstream_addr)),
+        coordinator,
+        catalog,
+        remote: false,
+    });
     loop {
         let Ok((stream, _)) = listener.accept().await else {
             continue;
         };
         let _ = stream.set_nodelay(true);
-        let binding = Arc::clone(&binding);
+        tokio::spawn(serve_worker_connection(stream, Arc::clone(&gate)));
+    }
+}
+
+pub async fn serve_remote_listener(
+    listener: TcpListener,
+    ingress: RemoteIngress,
+    upstream_addr: String,
+    coordinator: Arc<Coordinator>,
+    catalog: Arc<Catalog>,
+) {
+    let upstream = Arc::new(UpstreamPool::new(upstream_addr));
+    let handshakes = Arc::new(Semaphore::new(64));
+    loop {
+        let Ok((stream, _)) = listener.accept().await else {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            continue;
+        };
+        let Ok(handshake) = Arc::clone(&handshakes).try_acquire_owned() else {
+            continue;
+        };
+        let _ = stream.set_nodelay(true);
+        let ingress = ingress.clone();
         let upstream = Arc::clone(&upstream);
         let coordinator = Arc::clone(&coordinator);
         let catalog = Arc::clone(&catalog);
         tokio::spawn(async move {
-            let svc = service_fn(move |req: Request<Incoming>| {
-                let binding = Arc::clone(&binding);
-                let upstream = Arc::clone(&upstream);
-                let coordinator = Arc::clone(&coordinator);
-                let catalog = Arc::clone(&catalog);
-                async move {
-                    Ok::<_, Infallible>(
-                        handle_worker_rpc(req, &binding, &upstream, &coordinator, &catalog).await,
-                    )
-                }
-            });
-            let _ = server_http2::Builder::new(TokioExecutor::new())
-                .serve_connection(TokioIo::new(stream), svc)
+            let accepted = ingress.accept(stream).await;
+            drop(handshake);
+            if let Some((stream, binding)) = accepted {
+                serve_worker_connection(
+                    stream,
+                    Arc::new(WorkerGate {
+                        binding,
+                        upstream,
+                        coordinator,
+                        catalog,
+                        remote: true,
+                    }),
+                )
                 .await;
+            }
         });
     }
+}
+
+struct WorkerGate {
+    binding: Arc<WorkerBinding>,
+    upstream: Arc<UpstreamPool>,
+    coordinator: Arc<Coordinator>,
+    catalog: Arc<Catalog>,
+    remote: bool,
+}
+
+async fn serve_worker_connection<IO>(stream: IO, gate: Arc<WorkerGate>)
+where
+    IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let svc = service_fn(move |req: Request<Incoming>| {
+        let gate = Arc::clone(&gate);
+        async move { Ok::<_, Infallible>(handle_worker_rpc(req, gate).await) }
+    });
+    let _ = server_http2::Builder::new(TokioExecutor::new())
+        .serve_connection(TokioIo::new(stream), svc)
+        .await;
 }
 
 fn grpc_error(code: u8, message: &str) -> Response<GrpcBody> {
@@ -241,6 +294,7 @@ struct GatePermit {
     track: PostTrack,
     rewritten: Option<Vec<u8>>,
     admit: Option<(String, String)>,
+    finish_remote: Option<(RemoteTaskKind, Vec<u8>)>,
 }
 
 fn permit(track: PostTrack) -> GatePermit {
@@ -248,6 +302,7 @@ fn permit(track: PostTrack) -> GatePermit {
         track,
         rewritten: None,
         admit: None,
+        finish_remote: None,
     }
 }
 
@@ -264,11 +319,16 @@ async fn authorize_worker_request(
     method: &str,
     payload: &[u8],
     header_ns: Option<&str>,
-    binding: &WorkerBinding,
-    coordinator: &Coordinator,
-    catalog: &Catalog,
-    upstream: &UpstreamPool,
+    gate: &WorkerGate,
 ) -> Result<GatePermit, (u8, String)> {
+    let WorkerGate {
+        binding,
+        coordinator,
+        catalog,
+        upstream,
+        remote,
+    } = gate;
+    let remote = *remote;
     let deny = |msg: &str| (7u8, msg.to_owned());
     let bad = |msg: &str| (3u8, msg.to_owned());
 
@@ -281,6 +341,44 @@ async fn authorize_worker_request(
         }
     };
 
+    let completion = |token: Vec<u8>,
+                      kind: RemoteTaskKind,
+                      terminal: bool|
+     -> Result<GatePermit, (u8, String)> {
+        let mut permit = permit(PostTrack::None);
+        if remote {
+            if !coordinator.has_remote_lease(&token, &binding.owner, &binding.task_queue, kind) {
+                // This could also be a retry of an already accepted completion.
+                return Err((
+                    5,
+                    "no outstanding remote task with this token and binding".into(),
+                ));
+            }
+            if terminal {
+                permit.finish_remote = Some((kind, token));
+            }
+        } else {
+            coordinator.complete_lease(&token);
+        }
+        Ok(permit)
+    };
+
+    if remote
+        && matches!(
+            method,
+            "PollNexusTaskQueue"
+                | "RespondNexusTaskCompleted"
+                | "RespondNexusTaskFailed"
+                | "RespondActivityTaskCompletedById"
+                | "RespondActivityTaskFailedById"
+                | "RespondActivityTaskCanceledById"
+        )
+    {
+        return Err(deny(
+            "RPC cannot be accounted for on the remote worker gate",
+        ));
+    }
+
     match method {
         "GetSystemInfo" => Ok(permit(PostTrack::None)),
         "DescribeNamespace" => {
@@ -290,32 +388,45 @@ async fn authorize_worker_request(
             Ok(permit(PostTrack::None))
         }
         "PollWorkflowTaskQueue" => {
-            let req = PollWorkflowTaskQueueRequest::decode(payload)
+            let mut req = PollWorkflowTaskQueueRequest::decode(payload)
                 .map_err(|_| bad("invalid PollWorkflowTaskQueueRequest"))?;
             check_ns(&req.namespace)?;
-            let Some(tq) = req.task_queue.as_ref() else {
+            let Some(tq) = req.task_queue.as_mut() else {
                 return Err(bad("missing task_queue"));
             };
             if tq.kind() == TaskQueueKind::Sticky {
-                if !tq.normal_name.is_empty() && tq.normal_name != binding.task_queue {
+                if (remote || !tq.normal_name.is_empty()) && tq.normal_name != binding.task_queue {
                     return Err(deny("sticky poll normal_name mismatch"));
+                }
+                if remote {
+                    tq.name = remote_sticky_name(binding, &tq.name);
                 }
             } else if tq.name != binding.task_queue {
                 return Err(deny("worker task_queue access denied"));
             }
-            Ok(permit(PostTrack::PollWorkflow))
+            let mut permit = permit(PostTrack::PollWorkflow);
+            if remote {
+                req.worker_control_task_queue.clear();
+                permit.rewritten = Some(req.encode_to_vec());
+            }
+            Ok(permit)
         }
         "PollActivityTaskQueue" => {
-            let req = PollActivityTaskQueueRequest::decode(payload)
+            let mut req = PollActivityTaskQueueRequest::decode(payload)
                 .map_err(|_| bad("invalid PollActivityTaskQueueRequest"))?;
             check_ns(&req.namespace)?;
             let Some(tq) = req.task_queue.as_ref() else {
                 return Err(bad("missing task_queue"));
             };
-            if tq.name != binding.task_queue {
+            if tq.name != binding.task_queue || (remote && tq.kind() == TaskQueueKind::Sticky) {
                 return Err(deny("worker activity task_queue access denied"));
             }
-            Ok(permit(PostTrack::PollActivity))
+            let mut permit = permit(PostTrack::PollActivity);
+            if remote {
+                req.worker_control_task_queue.clear();
+                permit.rewritten = Some(req.encode_to_vec());
+            }
+            Ok(permit)
         }
         "PollNexusTaskQueue" => {
             let req = PollNexusTaskQueueRequest::decode(payload)
@@ -330,12 +441,12 @@ async fn authorize_worker_request(
             Ok(permit(PostTrack::None))
         }
         "RespondWorkflowTaskCompleted" => {
-            let req = RespondWorkflowTaskCompletedRequest::decode(payload)
+            let mut req = RespondWorkflowTaskCompletedRequest::decode(payload)
                 .map_err(|_| bad("invalid RespondWorkflowTaskCompletedRequest"))?;
             check_ns(&req.namespace)?;
             let mut child_keys = Vec::new();
-            for cmd in &req.commands {
-                match &cmd.attributes {
+            for cmd in &mut req.commands {
+                match &mut cmd.attributes {
                     Some(CommandAttrs::StartChildWorkflowExecutionCommandAttributes(attr)) => {
                         if !attr.namespace.is_empty() && attr.namespace != binding.owner {
                             return Err(deny("cross-namespace child workflow denied"));
@@ -361,27 +472,62 @@ async fn authorize_worker_request(
                     ) if !attr.namespace.is_empty() && attr.namespace != binding.owner => {
                         return Err(deny("cross-namespace external cancel denied"));
                     }
+                    Some(CommandAttrs::ScheduleActivityTaskCommandAttributes(attr)) if remote => {
+                        attr.request_eager_execution = false;
+                    }
                     _ => {}
                 }
             }
-            if !child_keys.is_empty() {
-                let _ = coordinator.track_runs(child_keys);
+            let mut permit = if remote {
+                completion(
+                    req.task_token.clone(),
+                    RemoteTaskKind::Workflow,
+                    !req.intermediate_page,
+                )?
+            } else {
+                permit(PostTrack::None)
+            };
+            if remote {
+                if let Some(tq) = req
+                    .sticky_attributes
+                    .as_mut()
+                    .and_then(|attr| attr.worker_task_queue.as_mut())
+                {
+                    if tq.kind() != TaskQueueKind::Sticky || tq.normal_name != binding.task_queue {
+                        return Err(deny("sticky completion task_queue mismatch"));
+                    }
+                    tq.name = remote_sticky_name(binding, &tq.name);
+                }
+                req.return_new_workflow_task = false;
+                req.worker_control_task_queue.clear();
+                permit.rewritten = Some(req.encode_to_vec());
             }
-            coordinator.complete_lease(&req.task_token);
-            Ok(permit(PostTrack::None))
+            if !child_keys.is_empty() {
+                let tracked = coordinator.track_runs(child_keys);
+                if remote {
+                    tracked.map_err(|e| (13, e.detail()))?;
+                }
+            }
+            if !remote {
+                coordinator.complete_lease(&req.task_token);
+            }
+            Ok(permit)
         }
         "RespondWorkflowTaskFailed" => {
             let req = RespondWorkflowTaskFailedRequest::decode(payload)
                 .map_err(|_| bad("invalid RespondWorkflowTaskFailedRequest"))?;
             check_ns(&req.namespace)?;
-            coordinator.complete_lease(&req.task_token);
-            Ok(permit(PostTrack::None))
+            completion(req.task_token, RemoteTaskKind::Workflow, true)
         }
         "RespondQueryTaskCompleted" => {
             let req = RespondQueryTaskCompletedRequest::decode(payload)
                 .map_err(|_| bad("invalid RespondQueryTaskCompletedRequest"))?;
             check_ns(&req.namespace)?;
-            Ok(permit(PostTrack::None))
+            if remote {
+                completion(req.task_token, RemoteTaskKind::Query, true)
+            } else {
+                Ok(permit(PostTrack::None))
+            }
         }
         "RecordActivityTaskHeartbeat" => {
             let req = RecordActivityTaskHeartbeatRequest::decode(payload)
@@ -399,8 +545,7 @@ async fn authorize_worker_request(
             let req = RespondActivityTaskCompletedRequest::decode(payload)
                 .map_err(|_| bad("invalid RespondActivityTaskCompletedRequest"))?;
             check_ns(&req.namespace)?;
-            coordinator.complete_lease(&req.task_token);
-            Ok(permit(PostTrack::None))
+            completion(req.task_token, RemoteTaskKind::Activity, true)
         }
         "RespondActivityTaskCompletedById" => {
             let req = RespondActivityTaskCompletedByIdRequest::decode(payload)
@@ -412,8 +557,7 @@ async fn authorize_worker_request(
             let req = RespondActivityTaskFailedRequest::decode(payload)
                 .map_err(|_| bad("invalid RespondActivityTaskFailedRequest"))?;
             check_ns(&req.namespace)?;
-            coordinator.complete_lease(&req.task_token);
-            Ok(permit(PostTrack::None))
+            completion(req.task_token, RemoteTaskKind::Activity, true)
         }
         "RespondActivityTaskFailedById" => {
             let req = RespondActivityTaskFailedByIdRequest::decode(payload)
@@ -425,8 +569,7 @@ async fn authorize_worker_request(
             let req = RespondActivityTaskCanceledRequest::decode(payload)
                 .map_err(|_| bad("invalid RespondActivityTaskCanceledRequest"))?;
             check_ns(&req.namespace)?;
-            coordinator.complete_lease(&req.task_token);
-            Ok(permit(PostTrack::None))
+            completion(req.task_token, RemoteTaskKind::Activity, true)
         }
         "RespondActivityTaskCanceledById" => {
             let req = RespondActivityTaskCanceledByIdRequest::decode(payload)
@@ -478,11 +621,17 @@ async fn authorize_worker_request(
             Ok(permit(PostTrack::None))
         }
         "StartWorkflowExecution" => {
-            let req = StartWorkflowExecutionRequest::decode(payload)
+            let mut req = StartWorkflowExecutionRequest::decode(payload)
                 .map_err(|_| bad("invalid StartWorkflowExecutionRequest"))?;
             header_matches(header_ns, &req.namespace)?;
             authorize_start(catalog, &binding.owner, &req)?;
-            Ok(permit(PostTrack::StartWorkflow))
+            let mut permit = permit(PostTrack::StartWorkflow);
+            if remote {
+                req.request_eager_execution = false;
+                permit.rewritten = Some(req.encode_to_vec());
+            }
+            permit.admit = Some((req.namespace, req.workflow_id));
+            Ok(permit)
         }
         "RequestCancelWorkflowExecution" => {
             let req = RequestCancelWorkflowExecutionRequest::decode(payload)
@@ -513,13 +662,21 @@ async fn authorize_worker_request(
             Ok(permit(PostTrack::None))
         }
         "ShutdownWorker" => {
-            let req = ShutdownWorkerRequest::decode(payload)
+            let mut req = ShutdownWorkerRequest::decode(payload)
                 .map_err(|_| bad("invalid ShutdownWorkerRequest"))?;
             check_ns(&req.namespace)?;
             if !req.task_queue.is_empty() && req.task_queue != binding.task_queue {
                 return Err(deny("worker shutdown task_queue mismatch"));
             }
-            Ok(permit(PostTrack::None))
+            let mut permit = permit(PostTrack::None);
+            if remote {
+                req.task_queue.clone_from(&binding.task_queue);
+                if !req.sticky_task_queue.is_empty() {
+                    req.sticky_task_queue = remote_sticky_name(binding, &req.sticky_task_queue);
+                }
+                permit.rewritten = Some(req.encode_to_vec());
+            }
+            Ok(permit)
         }
         "RecordWorkerHeartbeat" => {
             let req = RecordWorkerHeartbeatRequest::decode(payload)
@@ -545,6 +702,16 @@ async fn authorize_worker_request(
         "ListScheduleMatchingTimes" => authorize_matching_times(payload, header_ns, binding),
         _ => Err(deny("RPC method is not permitted on Boreal worker gate")),
     }
+}
+
+fn remote_sticky_name(binding: &WorkerBinding, name: &str) -> String {
+    // The supplied normal_name alone is not proof of sticky queue ownership.
+    // Scope both registration and lookup to the authenticated worker binding.
+    let data = format!("{}\0{}\0{name}", binding.owner, binding.task_queue);
+    format!(
+        "boreal-remote-sticky-{}",
+        ledger::digest_hex(data.as_bytes())
+    )
 }
 
 fn header_matches(header_ns: Option<&str>, namespace: &str) -> Result<(), (u8, String)> {
@@ -736,6 +903,7 @@ fn authorize_create_schedule(
         track: PostTrack::None,
         rewritten: Some(req.encode_to_vec()),
         admit,
+        finish_remote: None,
     })
 }
 
@@ -874,6 +1042,7 @@ async fn authorize_update_schedule(
         track: PostTrack::None,
         rewritten: Some(req.encode_to_vec()),
         admit,
+        finish_remote: None,
     })
 }
 
@@ -911,6 +1080,7 @@ async fn authorize_patch_schedule(
         track: PostTrack::None,
         rewritten: None,
         admit,
+        finish_remote: None,
     })
 }
 
@@ -1187,13 +1357,7 @@ fn grpc_status_error(headers: &HeaderMap, trailers: Option<&HeaderMap>) -> (u8, 
     (code, message.to_owned())
 }
 
-async fn handle_worker_rpc(
-    req: Request<Incoming>,
-    binding: &WorkerBinding,
-    upstream: &UpstreamPool,
-    coordinator: &Coordinator,
-    catalog: &Catalog,
-) -> Response<GrpcBody> {
+async fn handle_worker_rpc(req: Request<Incoming>, gate: Arc<WorkerGate>) -> Response<GrpcBody> {
     if req.method() != http::Method::POST {
         return grpc_error(3, "gRPC requires HTTP POST");
     }
@@ -1227,42 +1391,12 @@ async fn handle_worker_rpc(
         Err((code, msg)) => return grpc_error(code, msg),
     };
 
-    let permit = match authorize_worker_request(
-        method,
-        payload,
-        header_ns.as_deref(),
-        binding,
-        coordinator,
-        catalog,
-        upstream,
-    )
-    .await
+    let permit = match authorize_worker_request(method, payload, header_ns.as_deref(), &gate).await
     {
         Ok(permit) => permit,
         Err((code, msg)) => return grpc_error(code, &msg),
     };
 
-    let mut admission = if permit.track == PostTrack::StartWorkflow {
-        let Ok(start) = StartWorkflowExecutionRequest::decode(payload) else {
-            return grpc_error(3, "invalid StartWorkflowExecutionRequest");
-        };
-        match admit_worker_start(
-            coordinator,
-            &binding.owner,
-            &start.namespace,
-            &start.workflow_id,
-        ) {
-            Ok(admission) => Some(admission),
-            Err((code, msg)) => return grpc_error(code, &msg),
-        }
-    } else if let Some((namespace, workflow_id)) = permit.admit.clone() {
-        match admit_schedule(coordinator, &namespace, &workflow_id) {
-            Ok(admission) => Some(admission),
-            Err((code, msg)) => return grpc_error(code, &msg),
-        }
-    } else {
-        None
-    };
     let forward_bytes = match permit.rewritten.as_deref() {
         Some(encoded) => pack_unary_grpc(encoded),
         None => req_bytes.clone(),
@@ -1270,7 +1404,7 @@ async fn handle_worker_rpc(
 
     let Ok(uri) = Uri::builder()
         .scheme("http")
-        .authority(upstream.addr.as_str())
+        .authority(gate.upstream.addr.as_str())
         .path_and_query(path.as_str())
         .build()
     else {
@@ -1284,15 +1418,111 @@ async fn handle_worker_rpc(
     for (name, val) in &parts.headers {
         if name == http::header::HOST
             || name == "grpc-accept-encoding"
+            || (gate.remote && name == "temporal-namespace")
             || (permit.rewritten.is_some() && name == http::header::CONTENT_LENGTH)
         {
             continue;
         }
         out_req.headers_mut().append(name.clone(), val.clone());
     }
+    if gate.remote
+        && let Some(value) = parts.headers.get("temporal-namespace")
+    {
+        out_req
+            .headers_mut()
+            .insert("temporal-namespace", value.clone());
+    }
 
-    let upstream_resp = match upstream.send(out_req).await {
-        Ok(r) => r,
+    if gate.remote {
+        // A downstream RST_STREAM must not drop the pickup guard while
+        // Temporal is still servicing the RPC. Finish independently of the
+        // connection, but do not grant work if delivery is already impossible.
+        let (reply, result) = oneshot::channel();
+        tokio::spawn(async move {
+            let response = forward_worker_rpc(out_req, permit, &gate, Some(&reply)).await;
+            let _ = reply.send(response);
+        });
+        result
+            .await
+            .unwrap_or_else(|_| grpc_error(14, "remote worker RPC interrupted"))
+    } else {
+        forward_worker_rpc(out_req, permit, &gate, None).await
+    }
+}
+
+async fn forward_worker_rpc(
+    out_req: Request<GrpcBody>,
+    permit: GatePermit,
+    gate: &WorkerGate,
+    reply: Option<&oneshot::Sender<Response<GrpcBody>>>,
+) -> Response<GrpcBody> {
+    let WorkerGate {
+        upstream,
+        coordinator,
+        binding,
+        remote,
+        ..
+    } = gate;
+    let remote = *remote;
+    let poll = matches!(
+        permit.track,
+        PostTrack::PollWorkflow | PostTrack::PollActivity
+    );
+    let _pickup = if remote && (poll || permit.track == PostTrack::StartWorkflow) {
+        if reply.is_some_and(oneshot::Sender::is_closed) {
+            return grpc_error(1, "remote worker request canceled");
+        }
+        match coordinator.begin_remote_pickup() {
+            Ok(guard) => Some(guard),
+            Err(_) => {
+                return grpc_error(
+                    14,
+                    "remote worker pickup is temporarily fenced for an update",
+                );
+            }
+        }
+    } else {
+        None
+    };
+
+    let admission = if let Some((namespace, workflow_id)) = &permit.admit {
+        let result = if permit.track == PostTrack::StartWorkflow {
+            admit_worker_start(coordinator, &binding.owner, namespace, workflow_id)
+        } else {
+            admit_schedule(coordinator, namespace, workflow_id)
+        };
+        match result {
+            Ok(admission) => Some(admission),
+            Err((code, msg)) => return grpc_error(code, &msg),
+        }
+    } else {
+        None
+    };
+
+    let is_workflow_completion = out_req
+        .uri()
+        .path()
+        .ends_with("/RespondWorkflowTaskCompleted");
+    let hide_worker_commands = remote && out_req.uri().path().ends_with("/DescribeNamespace");
+    let upstream_call = async {
+        let (parts, body) = upstream.send(out_req).await?.into_parts();
+        let buffered = Limited::new(body, MAX_GRPC_BODY_BYTES)
+            .collect()
+            .await
+            .map_err(|_| "failed to collect upstream gRPC response".to_owned())?;
+        Ok::<_, String>((parts, buffered.trailers().cloned(), buffered.to_bytes()))
+    };
+    let upstream_result = if remote && poll {
+        // Temporal's normal poll deadline is one minute. Bound orphaned
+        // RPCs even if the upstream connection has stopped making progress.
+        tokio::time::timeout(std::time::Duration::from_secs(75), upstream_call)
+            .await
+            .unwrap_or_else(|_| Err("upstream remote poll timed out".into()))
+    } else {
+        upstream_call.await
+    };
+    let (mut resp_parts, trailers, mut resp_bytes) = match upstream_result {
+        Ok(result) => result,
         Err(err) => {
             if let Some(admission) = admission {
                 finish_admission(coordinator, admission, None);
@@ -1300,62 +1530,135 @@ async fn handle_worker_rpc(
             return grpc_error(14, &err);
         }
     };
+    let status = grpc_status_error(&resp_parts.headers, trailers.as_ref());
+    let remote_success = resp_parts.status == StatusCode::OK && status.0 == 0;
 
-    let (resp_parts, resp_body) = upstream_resp.into_parts();
-    let Ok(buffered) = Limited::new(resp_body, MAX_GRPC_BODY_BYTES).collect().await else {
+    if permit.track == PostTrack::StartWorkflow {
+        let success = if remote {
+            remote_success
+        } else {
+            !resp_Parts_has_grpc_error(&resp_parts.headers, trailers.as_ref())
+        };
+        let decoded = success
+            .then(|| {
+                unpack_unary_grpc(&resp_bytes)
+                    .ok()
+                    .and_then(|bytes| StartWorkflowExecutionResponse::decode(bytes).ok())
+            })
+            .flatten();
+        let run_id = decoded
+            .as_ref()
+            .map(|resp| resp.run_id.clone())
+            .filter(|id| !id.is_empty());
+        if let Some(admission) = admission {
+            finish_admission(coordinator, admission, run_id);
+        }
+        if remote {
+            if !remote_success {
+                return grpc_error(status.0.max(1), &status.1);
+            }
+            if decoded.is_none_or(|response| response.eager_workflow_task.is_some()) {
+                return grpc_error(13, "unexpected remote workflow start response");
+            }
+        }
+    } else if permit.admit.is_some() {
         if let Some(admission) = admission {
             finish_admission(coordinator, admission, None);
         }
-        return grpc_error(14, "failed to collect upstream gRPC response");
-    };
-    let trailers = buffered.trailers().cloned();
-    let resp_bytes = buffered.to_bytes();
-
-    if permit.track == PostTrack::StartWorkflow {
-        let run_id = if !resp_Parts_has_grpc_error(&resp_parts.headers, trailers.as_ref())
-            && let Ok(resp_proto) = unpack_unary_grpc(&resp_bytes)
-            && let Ok(decoded) = StartWorkflowExecutionResponse::decode(resp_proto)
-            && !decoded.run_id.is_empty()
-        {
-            Some(decoded.run_id)
-        } else {
+    } else if poll {
+        if remote && !remote_success {
+            return grpc_error(status.0.max(1), &status.1);
+        }
+        let decoded = if resp_Parts_has_grpc_error(&resp_parts.headers, trailers.as_ref()) {
             None
+        } else {
+            unpack_unary_grpc(&resp_bytes)
+                .ok()
+                .and_then(|payload| decode_poll(permit.track, payload))
         };
-        if let Some(admission) = admission.take() {
-            finish_admission(coordinator, admission, run_id);
-        }
-    } else if permit.admit.is_some() {
-        if let Some(admission) = admission.take() {
-            finish_admission(coordinator, admission, None);
-        }
-    } else if permit.track != PostTrack::None
-        && !resp_Parts_has_grpc_error(&resp_parts.headers, trailers.as_ref())
-        && let Ok(resp_proto) = unpack_unary_grpc(&resp_bytes)
-    {
-        match permit.track {
-            PostTrack::PollWorkflow => {
-                if let Ok(decoded) = PollWorkflowTaskQueueResponse::decode(resp_proto)
-                    && !decoded.task_token.is_empty()
-                {
-                    let (wf_id, run_id) = decoded
-                        .workflow_execution
-                        .map(|e| (e.workflow_id, e.run_id))
-                        .unwrap_or_default();
-                    coordinator.record_lease(decoded.task_token, &binding.owner, &wf_id, &run_id);
+        if let Some((token, execution, kind)) = decoded {
+            if remote && token.is_empty() && execution.is_some() {
+                return grpc_error(13, "remote poll returned an execution without a task token");
+            }
+            if !token.is_empty() {
+                let (workflow_id, run_id) = execution
+                    .map(|e| (e.workflow_id, e.run_id))
+                    .unwrap_or_default();
+                if remote {
+                    if reply.is_some_and(oneshot::Sender::is_closed) {
+                        return grpc_error(1, "remote worker request canceled");
+                    }
+                    if workflow_id.is_empty() || run_id.is_empty() {
+                        return grpc_error(
+                            13,
+                            "remote poll returned a task without an execution identity",
+                        );
+                    }
+                    if let Err(e) = coordinator.record_remote_lease(
+                        &token,
+                        kind,
+                        &binding.task_queue,
+                        TrackedKey {
+                            namespace: binding.owner.clone(),
+                            workflow_id,
+                            run_id: Some(run_id),
+                        },
+                    ) {
+                        return grpc_error(13, &e.detail());
+                    }
+                } else {
+                    coordinator.record_lease(token, &binding.owner, &workflow_id, &run_id);
                 }
             }
-            PostTrack::PollActivity => {
-                if let Ok(decoded) = PollActivityTaskQueueResponse::decode(resp_proto)
-                    && !decoded.task_token.is_empty()
-                {
-                    let (wf_id, run_id) = decoded
-                        .workflow_execution
-                        .map(|e| (e.workflow_id, e.run_id))
-                        .unwrap_or_default();
-                    coordinator.record_lease(decoded.task_token, &binding.owner, &wf_id, &run_id);
-                }
-            }
-            PostTrack::StartWorkflow | PostTrack::None => {}
+        } else if remote {
+            return grpc_error(13, "invalid remote poll response");
+        }
+    }
+
+    if remote && is_workflow_completion && remote_success {
+        let decoded = unpack_unary_grpc(&resp_bytes)
+            .ok()
+            .and_then(|bytes| RespondWorkflowTaskCompletedResponse::decode(bytes).ok());
+        if decoded
+            .is_none_or(|resp| resp.workflow_task.is_some() || !resp.activity_tasks.is_empty())
+        {
+            // This was not a permitted pickup route; never forward
+            // a task from an incompatible upstream implementation.
+            return grpc_error(13, "unexpected remote workflow completion response");
+        }
+    }
+
+    if let Some((kind, token)) = permit.finish_remote {
+        // A token-scoped terminal worker response says the worker is done.
+        // Temporal NotFound also settles it (e.g. if the task timed out),
+        // but transport errors and other ambiguous failures do not.
+        if (remote_success || (resp_parts.status == StatusCode::OK && status.0 == 5))
+            && let Err(e) =
+                coordinator.finish_remote_lease(&token, &binding.owner, &binding.task_queue, kind)
+        {
+            return grpc_error(13, &e.detail());
+        }
+    }
+    if remote && is_workflow_completion && !remote_success {
+        return grpc_error(status.0.max(1), &status.1);
+    }
+
+    if hide_worker_commands && remote_success {
+        let decoded = unpack_unary_grpc(&resp_bytes)
+            .ok()
+            .and_then(|bytes| DescribeNamespaceResponse::decode(bytes).ok());
+        let Some(mut response) = decoded else {
+            return grpc_error(13, "invalid DescribeNamespace response");
+        };
+        if let Some(caps) = response
+            .namespace_info
+            .as_mut()
+            .and_then(|info| info.capabilities.as_mut())
+        {
+            // These controls are delivered through a special Nexus poller.
+            caps.worker_commands = false;
+            resp_bytes = pack_unary_grpc(&response.encode_to_vec());
+            resp_parts.headers.remove(http::header::CONTENT_LENGTH);
         }
     }
 
@@ -1363,6 +1666,32 @@ async fn handle_worker_rpc(
     *final_resp.status_mut() = resp_parts.status;
     *final_resp.headers_mut() = resp_parts.headers;
     final_resp
+}
+
+fn decode_poll(
+    track: PostTrack,
+    payload: &[u8],
+) -> Option<(Vec<u8>, Option<WorkflowExecution>, RemoteTaskKind)> {
+    match track {
+        PostTrack::PollWorkflow => {
+            let decoded = PollWorkflowTaskQueueResponse::decode(payload).ok()?;
+            let kind = if decoded.query.is_some() {
+                RemoteTaskKind::Query
+            } else {
+                RemoteTaskKind::Workflow
+            };
+            Some((decoded.task_token, decoded.workflow_execution, kind))
+        }
+        PostTrack::PollActivity => {
+            let decoded = PollActivityTaskQueueResponse::decode(payload).ok()?;
+            Some((
+                decoded.task_token,
+                decoded.workflow_execution,
+                RemoteTaskKind::Activity,
+            ))
+        }
+        PostTrack::StartWorkflow | PostTrack::None => None,
+    }
 }
 
 #[allow(non_snake_case)]
@@ -1394,6 +1723,249 @@ mod tests {
         out.extend_from_slice(&(encoded.len() as u32).to_be_bytes());
         out.extend_from_slice(&encoded);
         Bytes::from(out)
+    }
+
+    #[tokio::test]
+    async fn remote_fence_keeps_accepted_poll_counted_through_task_delivery() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::sync::Notify;
+
+        let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream.local_addr().unwrap().to_string();
+        let polled = Arc::new(Notify::new());
+        let release_poll = Arc::new(Notify::new());
+        let upstream_polled = Arc::clone(&polled);
+        let upstream_release = Arc::clone(&release_poll);
+        tokio::spawn(async move {
+            let (stream, _) = upstream.accept().await.unwrap();
+            let attempts = Arc::new(AtomicUsize::new(0));
+            let service = service_fn(move |req: Request<Incoming>| {
+                let polled = Arc::clone(&upstream_polled);
+                let release = Arc::clone(&upstream_release);
+                let attempts = Arc::clone(&attempts);
+                async move {
+                    let path = req.uri().path().to_owned();
+                    let bytes = req.into_body().collect().await.unwrap().to_bytes();
+                    let payload = unpack_unary_grpc(&bytes).unwrap();
+                    let (data, status) = if path.ends_with("/PollWorkflowTaskQueue") {
+                        let task_queue = PollWorkflowTaskQueueRequest::decode(payload)
+                            .unwrap()
+                            .task_queue
+                            .unwrap();
+                        assert_eq!(
+                            task_queue.name,
+                            remote_sticky_name(
+                                &WorkerBinding {
+                                    owner: "alice".into(),
+                                    task_queue: "alice-greet".into(),
+                                },
+                                "same-sticky-name"
+                            )
+                        );
+                        polled.notify_one();
+                        release.notified().await;
+                        (
+                            pack_grpc_msg(&PollWorkflowTaskQueueResponse {
+                                task_token: vec![1, 2, 3],
+                                workflow_execution: Some(WorkflowExecution {
+                                    workflow_id: "workflow".into(),
+                                    run_id: "run".into(),
+                                }),
+                                ..Default::default()
+                            }),
+                            "0",
+                        )
+                    } else if path.ends_with("/RespondWorkflowTaskCompleted") {
+                        let req = RespondWorkflowTaskCompletedRequest::decode(payload).unwrap();
+                        assert!(!req.return_new_workflow_task);
+                        assert!(matches!(req.commands[0].attributes.as_ref().unwrap(),
+                            CommandAttrs::ScheduleActivityTaskCommandAttributes(a) if !a.request_eager_execution));
+                        match attempts.fetch_add(1, Ordering::SeqCst) {
+                            0 => (Bytes::new(), "14"),
+                            1 => (
+                                pack_grpc_msg(&RespondWorkflowTaskCompletedResponse {
+                                    workflow_task: Some(PollWorkflowTaskQueueResponse {
+                                        task_token: vec![4, 5, 6],
+                                        ..Default::default()
+                                    }),
+                                    ..Default::default()
+                                }),
+                                "0",
+                            ),
+                            _ => (
+                                pack_grpc_msg(&RespondWorkflowTaskCompletedResponse::default()),
+                                "0",
+                            ),
+                        }
+                    } else {
+                        panic!("a denied RPC reached upstream");
+                    };
+                    let mut trailers = HeaderMap::new();
+                    trailers.insert("grpc-status", HeaderValue::from_static(status));
+                    let mut response = Response::new(GrpcBody::with_parts(data, Some(trailers)));
+                    response.headers_mut().insert(
+                        http::header::CONTENT_TYPE,
+                        HeaderValue::from_static("application/grpc"),
+                    );
+                    Ok::<_, Infallible>(response)
+                }
+            });
+            server_http2::Builder::new(TokioExecutor::new())
+                .serve_connection(TokioIo::new(stream), service)
+                .await
+                .unwrap();
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let coordinator = Arc::new(Coordinator::open(dir.path(), true).unwrap());
+        let gate = Arc::new(WorkerGate {
+            binding: Arc::new(WorkerBinding {
+                owner: "alice".into(),
+                task_queue: "alice-greet".into(),
+            }),
+            upstream: Arc::new(UpstreamPool::new(upstream_addr)),
+            coordinator: Arc::clone(&coordinator),
+            catalog: Arc::new(Catalog::from_yaml("", &Default::default()).unwrap()),
+            remote: true,
+        });
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn({
+            let gate = Arc::clone(&gate);
+            async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                serve_worker_connection(stream, gate).await;
+            }
+        });
+        let mut client = WorkflowServiceClient::connect(format!("http://{addr}"))
+            .await
+            .unwrap();
+        let poll_request = PollWorkflowTaskQueueRequest {
+            namespace: "alice".into(),
+            task_queue: Some(TaskQueue {
+                name: "same-sticky-name".into(),
+                kind: TaskQueueKind::Sticky as i32,
+                normal_name: "alice-greet".into(),
+            }),
+            ..Default::default()
+        };
+        let mut wrong_queue = poll_request.clone();
+        wrong_queue.task_queue.as_mut().unwrap().normal_name = "alice-other".into();
+        assert_eq!(
+            client
+                .poll_workflow_task_queue(wrong_queue)
+                .await
+                .unwrap_err()
+                .code(),
+            Code::PermissionDenied
+        );
+        let poll = tokio::spawn({
+            let mut client = client.clone();
+            let request = poll_request.clone();
+            async move { client.poll_workflow_task_queue(request).await }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), polled.notified())
+            .await
+            .unwrap();
+        coordinator.close_gate("update", "rev").await.unwrap();
+        assert_eq!(coordinator.remote_drain("update", true).unwrap().pickups, 1);
+        assert_eq!(
+            client
+                .poll_workflow_task_queue(poll_request.clone())
+                .await
+                .unwrap_err()
+                .code(),
+            Code::Unavailable
+        );
+        assert_eq!(
+            client
+                .poll_nexus_task_queue(PollNexusTaskQueueRequest {
+                    namespace: "alice".into(),
+                    task_queue: Some(TaskQueue {
+                        name: "alice-greet".into(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                })
+                .await
+                .unwrap_err()
+                .code(),
+            Code::PermissionDenied
+        );
+        release_poll.notify_one();
+        let task = poll.await.unwrap().unwrap().into_inner();
+        let state = coordinator.remote_drain("update", false).unwrap();
+        assert_eq!((state.pickups, state.leases), (0, 1));
+
+        let response = RespondWorkflowTaskCompletedRequest {
+            namespace: "alice".into(), task_token: task.task_token, return_new_workflow_task: true,
+            commands: vec![Command {
+                attributes: Some(CommandAttrs::ScheduleActivityTaskCommandAttributes(
+                    temporalio_common::protos::temporal::api::command::v1::ScheduleActivityTaskCommandAttributes {
+                        request_eager_execution: true, ..Default::default()
+                    }
+                )), ..Default::default()
+            }], ..Default::default()
+        };
+        for expected in [Code::Unavailable, Code::Internal] {
+            assert_eq!(
+                client
+                    .respond_workflow_task_completed(response.clone())
+                    .await
+                    .unwrap_err()
+                    .code(),
+                expected
+            );
+            assert_eq!(coordinator.remote_drain("update", false).unwrap().leases, 1);
+        }
+        client
+            .respond_workflow_task_completed(response)
+            .await
+            .unwrap();
+        assert_eq!(coordinator.remote_drain("update", false).unwrap().leases, 0);
+
+        // Simulate cancellation of the HTTP/2 stream while the upstream RPC
+        // is still pending. Losing the receiver is not a settled pickup.
+        coordinator.reopen_gate("update").unwrap();
+        let permit = authorize_worker_request(
+            "PollWorkflowTaskQueue",
+            &poll_request.encode_to_vec(),
+            None,
+            &gate,
+        )
+        .await
+        .ok()
+        .unwrap();
+        let upstream_req = Request::post(format!(
+            "http://{}{WORKFLOW_SERVICE_PREFIX}PollWorkflowTaskQueue",
+            gate.upstream.addr,
+        ))
+        .version(http::Version::HTTP_2)
+        .body(GrpcBody::with_parts(
+            pack_unary_grpc(permit.rewritten.as_deref().unwrap()),
+            None,
+        ))
+        .unwrap();
+        let (reply, result) = oneshot::channel();
+        let canceled_poll = tokio::spawn(async move {
+            forward_worker_rpc(upstream_req, permit, &gate, Some(&reply)).await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), polled.notified())
+            .await
+            .unwrap();
+        drop(result);
+        coordinator.close_gate("next-update", "rev").await.unwrap();
+        assert_eq!(
+            coordinator
+                .remote_drain("next-update", true)
+                .unwrap()
+                .pickups,
+            1
+        );
+        release_poll.notify_one();
+        assert_eq!(canceled_poll.await.unwrap().headers()["grpc-status"], "1");
+        let state = coordinator.remote_drain("next-update", false).unwrap();
+        assert_eq!((state.pickups, state.leases), (0, 0));
     }
 
     #[tokio::test]
@@ -1442,7 +2014,7 @@ mod tests {
         });
 
         let dir = std::env::temp_dir().join(format!("boreal-proxy-test-{}", std::process::id()));
-        let coord = Arc::new(Coordinator::open(&dir).unwrap());
+        let coord = Arc::new(Coordinator::open(&dir, false).unwrap());
         let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let proxy_addr = proxy_listener.local_addr().unwrap();
 
@@ -1753,7 +2325,7 @@ workers:
                 .unwrap()
                 .as_nanos()
         ));
-        let coord = Arc::new(Coordinator::open(&dir).unwrap());
+        let coord = Arc::new(Coordinator::open(&dir, false).unwrap());
         let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let proxy_addr = proxy_listener.local_addr().unwrap();
         tokio::spawn(serve_worker_listener(
@@ -2049,7 +2621,7 @@ workers:
                 .as_nanos()
         ));
         let _ = std::fs::remove_dir_all(&dir);
-        let coord = Arc::new(Coordinator::open(&dir).unwrap());
+        let coord = Arc::new(Coordinator::open(&dir, false).unwrap());
         let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let proxy_addr = proxy_listener.local_addr().unwrap();
         tokio::spawn(serve_worker_listener(

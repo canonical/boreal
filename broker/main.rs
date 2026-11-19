@@ -3,6 +3,7 @@ mod ledger;
 mod netns;
 mod pg;
 mod proxy;
+mod remote;
 mod temporal;
 
 use std::env;
@@ -32,6 +33,7 @@ struct Config {
     internal_netns: Option<PathBuf>,
     worker_netns_dir: Option<PathBuf>,
     worker_listen_addr: String,
+    remote_workers_config: Option<PathBuf>,
     upstream_temporal_addr: String,
     pg_socket: PathBuf,
     pg_user: String,
@@ -58,6 +60,7 @@ impl Config {
             worker_netns_dir: env::var("BOREAL_WORKER_NETNS_DIR").ok().map(PathBuf::from),
             worker_listen_addr: env::var("BOREAL_WORKER_LISTEN_ADDR")
                 .unwrap_or_else(|_| "127.0.0.1:7233".into()),
+            remote_workers_config: env::var_os("BOREAL_REMOTE_WORKERS_CONFIG").map(PathBuf::from),
             upstream_temporal_addr: env::var("BOREAL_UPSTREAM_TEMPORAL_ADDR")
                 .unwrap_or_else(|_| "127.0.0.1:7233".into()),
             pg_socket: env::var("BOREAL_PG_SOCKET")
@@ -174,6 +177,7 @@ struct BoundSockets {
     user_listener: std::os::unix::net::UnixListener,
     updater_listener: std::os::unix::net::UnixListener,
     worker_listeners: Vec<(std::net::TcpListener, WorkerBinding)>,
+    remote_listener: Option<(std::net::TcpListener, remote::RemoteIngress)>,
 }
 
 fn setup_and_bind(cfg: &Config, catalog: &Catalog) -> Result<BoundSockets, String> {
@@ -188,6 +192,20 @@ fn setup_and_bind(cfg: &Config, catalog: &Catalog) -> Result<BoundSockets, Strin
                 .map_err(|e| e.detail())?
                 .gid(),
         )
+    };
+
+    let remote_listener = match &cfg.remote_workers_config {
+        Some(path) => {
+            if os::current_euid() != 0 || broker_uid == 0 {
+                return Err(
+                    "remote worker ingress requires root startup and a non-root broker user".into(),
+                );
+            }
+            // This listener belongs to the host netns; load its credentials
+            // before joining the internal netns and dropping root.
+            Some(remote::RemoteIngress::bind(path, catalog, 0)?)
+        }
+        None => None,
     };
 
     let user_listener = netns::bind_unix_socket(&cfg.broker_socket, broker_uid, broker_gid, 0o660)?;
@@ -233,6 +251,7 @@ fn setup_and_bind(cfg: &Config, catalog: &Catalog) -> Result<BoundSockets, Strin
         user_listener,
         updater_listener,
         worker_listeners,
+        remote_listener,
     })
 }
 
@@ -286,7 +305,7 @@ async fn run_broker(
     bound: BoundSockets,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let coordinator = Arc::new(
-        Coordinator::open(&cfg.state_dir)
+        Coordinator::open(&cfg.state_dir, bound.remote_listener.is_some())
             .map_err(|e| format!("open state {}: {}", cfg.state_dir.display(), e.detail()))?,
     );
     let backend = Arc::new(LiveBackend::new(
@@ -304,6 +323,17 @@ async fn run_broker(
 
     let user_listener = UnixListener::from_std(bound.user_listener)?;
     let updater_listener = UnixListener::from_std(bound.updater_listener)?;
+
+    if let Some((std_tcp, ingress)) = bound.remote_listener {
+        let tcp = TcpListener::from_std(std_tcp)?;
+        tokio::spawn(proxy::serve_remote_listener(
+            tcp,
+            ingress,
+            cfg.upstream_temporal_addr.clone(),
+            Arc::clone(&coordinator),
+            Arc::clone(&catalog),
+        ));
+    }
 
     for (std_tcp, binding) in bound.worker_listeners {
         let tcp = TcpListener::from_std(std_tcp)?;
