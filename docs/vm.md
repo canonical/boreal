@@ -56,6 +56,10 @@ Without `NIX_DISK_IMAGE`, the launcher uses `boreal.vm.diskImage`
 persists PostgreSQL Temporal state and guest state across restarts, and
 temporary per-start store images are not removed automatically.
 
+The reference demo also starts a `compute-01` peripheral container inside
+the guest. See the downstream worktree's `README.md` for the fleet check,
+how to launch with a fresh disk, and how to verify both `alice-greet` pollers.
+
 ## Interact over SSH and shut down
 
 From another terminal on the host:

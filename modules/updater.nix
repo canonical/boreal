@@ -22,7 +22,7 @@ let
       lib.concatLists (
         lib.mapAttrsToList (
           worker: workerCfg:
-          [ "boreal-worker-${user}-${worker}.service" ]
+          lib.optional workerCfg.placement.central "boreal-worker-${user}-${worker}.service"
           ++ lib.optional workerCfg.schedule.enable "boreal-schedule-${user}-${worker}.service"
         ) userCfg.workers
       )
@@ -69,7 +69,7 @@ in
     };
   };
 
-  config = lib.mkIf cfg.enable {
+  config = lib.mkIf (cfg.enable && borealCfg.role == "central") {
     assertions = [
       {
         assertion = validHost config.networking.hostName;

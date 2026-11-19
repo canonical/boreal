@@ -77,6 +77,11 @@ along with the pinned downstream revision.
   backfill wider than 24 hours is rejected. Polling RPCs still require
   `namespace == <user>` and `task_queue == <user>-<worker>`.
 
+Optional [peripheral replicas](remote-workers.md) reach the same broker gate
+over mutual TLS instead of a worker loopback listener. Their exact enrolled
+certificate selects the worker binding. This does not expose Temporal,
+PostgreSQL, or either broker Unix socket to the peripheral host.
+
 ## SSH surface and user secrets
 
 OpenSSH disables root login, SFTP, TCP/Unix/agent/X11 forwarding, tunnels,

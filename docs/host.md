@@ -84,6 +84,9 @@ nixosConfigurations.lab-metal-01 = boreal.lib.mkHost {
 };
 ```
 
+For a fleet with remote replicas, use [central and peripheral hosts](remote-workers.md)
+and validate the evaluated host set with `boreal.lib.mkFleetCheck`.
+
 For user `<user>` and worker `<worker>`, Boreal isolates PostgreSQL and
 `services.temporal` inside `/run/netns/boreal-internal` and configures
 `boreal-worker-<user>-<worker>.service` inside
@@ -92,7 +95,7 @@ For user `<user>` and worker `<worker>`, Boreal isolates PostgreSQL and
 and `TEMPORAL_NAMESPACE=<user>`. Both worker and schedule executables receive
 `<worker>` as their first argument. Use `boreal_worker::task_queue(worker)`
 to derive `<user>-<worker>` from the Temporal namespace and deployed worker
-name. Do not mix differently registered worker packages on the same queue.
+ name. Do not mix differently registered worker packages on the same queue.
 
 Build the worker crate with `boreal.lib.buildRustWorker` and list every bin as
 an output, plus `schema`:

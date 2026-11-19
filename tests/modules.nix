@@ -134,6 +134,72 @@ let
 
   configured = mkHost sampleLabModule;
 
+  remoteLab = {
+    boreal = {
+      enable = true;
+      users.alice.workers = {
+        train = {
+          package = trainBin.train;
+          placement.peripherals = [ "compute-01" ];
+        };
+        daily = {
+          package = helloBin.hello;
+          placement = {
+            central = false;
+            peripherals = [ "compute-01" ];
+          };
+          schedule = {
+            enable = true;
+            package = helloBin.hello-schedule;
+          };
+        };
+      };
+    };
+  };
+  remoteHost =
+    name: extra:
+    self.lib.mkHost {
+      inherit system;
+      modules = [
+        (baseContainer // { networking.hostName = name; })
+        remoteLab
+        extra
+      ];
+    };
+  central = remoteHost "lab" {
+    boreal.remote.central = {
+      listenAddress = "192.168.42.1:7443";
+      serverCertificate = "/run/pki/server.pem";
+      serverKey = "/run/pki/server.key";
+      clientCaCertificate = "/run/pki/ca.pem";
+      clientCertificatesDirectory = "/run/pki/pins";
+    };
+    boreal.updater.package = updaterStub;
+    boreal.updater.enable = true;
+  };
+  peripheral = remoteHost "compute-01" {
+    boreal.role = "peripheral";
+    boreal.remote.peripheral = {
+      address = "192.168.42.1:7443";
+      serverCaCertificate = "/run/pki/ca.pem";
+      clientCredentialsDirectory = "/run/pki/client";
+    };
+  };
+  fleetCheck = self.lib.mkFleetCheck {
+    inherit pkgs;
+    hosts = {
+      lab = central;
+      compute-01 = peripheral;
+    };
+  };
+  centralServices = central.config.systemd.services;
+  peripheralServices = peripheral.config.systemd.services;
+  remoteWorker = peripheralServices.boreal-worker-alice-train;
+  remotePolicy = central.config.environment.etc."boreal/remote-workers.json";
+  remotePins =
+    map (replica: replica.certificate)
+      (builtins.fromJSON (builtins.readFile remotePolicy.source)).replicas;
+
   labCheckDrv = self.lib.mkLabCheck {
     inherit pkgs;
     modules = [ sampleLabModule ];
@@ -449,6 +515,32 @@ assert selfManifestHost.environment.etc."boreal/version".text == "1.2.3\n";
 assert versionEtc.user == "root" && versionEtc.group == "boreal" && versionEtc.mode == "0440";
 assert versionEtc.text == "0.1.0\n";
 assert import ./deployment-label.nix;
+assert import ./fleet.nix { inherit lib; };
+assert fleetCheck.drvPath != "";
+assert !configured.environment.etc ? "boreal/remote-workers.json";
+assert centralServices ? boreal-worker-alice-train;
+assert !centralServices ? boreal-worker-alice-daily;
+assert centralServices ? boreal-schedule-alice-daily;
+assert remotePolicy.user == "root" && remotePolicy.mode == "0400";
+assert
+  remotePins == [
+    "/run/pki/pins/alice-daily@compute-01.pem"
+    "/run/pki/pins/alice-train@compute-01.pem"
+  ];
+assert
+  centralServices.boreal-broker.environment.BOREAL_REMOTE_WORKERS_CONFIG
+  == "/etc/boreal/remote-workers.json";
+assert !peripheral.config.services.temporal.enable && !peripheral.config.services.postgresql.enable;
+assert !peripheralServices ? boreal-broker && !peripheralServices ? boreal-schedule-alice-daily;
+assert !peripheral.config.users.users ? admin && peripheral.config.users.users.alice.isSystemUser;
+assert peripheralServices ? boreal-worker-alice-daily;
+assert !remoteWorker.serviceConfig ? NetworkNamespacePath;
+assert remoteWorker.environment.TEMPORAL_ADDRESS == "192.168.42.1:7443";
+assert
+  remoteWorker.environment.TEMPORAL_NAMESPACE == "alice"
+  && remoteWorker.environment.TEMPORAL_TLS == "true";
+assert builtins.elem "client.key:/run/pki/client/alice-train.key"
+  remoteWorker.serviceConfig.LoadCredential;
 assert deploymentEtc.text == "d9c4975\n";
 assert
   deploymentEtc.user == "root" && deploymentEtc.group == "root" && deploymentEtc.mode == "0444";

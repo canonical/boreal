@@ -14,7 +14,12 @@ let
   workerUnits = lib.concatLists (
     lib.mapAttrsToList (
       user: userCfg:
-      map (worker: "boreal-worker-${user}-${worker}.service") (builtins.attrNames userCfg.workers)
+      lib.concatLists (
+        lib.mapAttrsToList (
+          worker: workerCfg:
+          lib.optional workerCfg.placement.central "boreal-worker-${user}-${worker}.service"
+        ) userCfg.workers
+      )
     ) borealCfg.users
   );
 
@@ -34,8 +39,8 @@ in
   options.boreal.admin = {
     enable = lib.mkOption {
       type = lib.types.bool;
-      default = borealCfg.enable;
-      defaultText = lib.literalExpression "config.boreal.enable";
+      default = borealCfg.enable && borealCfg.role == "central";
+      defaultText = lib.literalExpression ''config.boreal.enable && config.boreal.role == "central"'';
       description = "Enable the restricted Boreal admin account and root helper.";
     };
 
@@ -69,7 +74,7 @@ in
     };
   };
 
-  config = lib.mkIf (borealCfg.enable && cfg.enable) {
+  config = lib.mkIf (borealCfg.enable && borealCfg.role == "central" && cfg.enable) {
     users.groups.boreal-admin = { };
 
     users.users = {

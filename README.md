@@ -57,7 +57,8 @@ deployment.
   `updater schedule` once no pipelines are running, activates the exact
   prebuilt closure, fails closed on uncertainty, and never runs automatic GC.
 
-See [architecture](docs/architecture.md) and [updater](updater/README.md).
+See [architecture](docs/architecture.md), [central and peripheral workers](docs/remote-workers.md),
+and [updater](updater/README.md).
 
 ## Label a deployment with its Git version tag
 
@@ -175,6 +176,8 @@ separate private Git remotes.
   - `mkLabCheck { pkgs, modules, specialArgs ? {} }` — `nix flake check`
     derivation verifying module assertions and secret-free `/etc/boreal/` YAML
     generation.
+  - `mkFleetCheck { pkgs, hosts }` — checks that the specified NixOS hosts
+    share a worker placement map and have exactly one central host.
   - `mkDevShell pkgs { ... }` and `buildRustWorker pkgs { ... }` — Rust
     development shell and Temporal worker package builder linking
     `${boreal}/worker` at `.boreal/boreal-worker` without manual `outputHashes`.

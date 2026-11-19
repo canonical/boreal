@@ -152,6 +152,15 @@ in
   options.boreal = {
     enable = mkEnableOption "Boreal lab users, workers, and permission policies";
 
+    role = mkOption {
+      type = types.enum [
+        "central"
+        "peripheral"
+      ];
+      default = "central";
+      description = "Run the Boreal control plane or only workers placed on this peripheral.";
+    };
+
     version = mkOption {
       type = types.str;
       default = defaultLabVersion;
@@ -248,6 +257,19 @@ in
                       description = "Worker executable output. The bin name is the output name, and the sibling schema output supplies schema.yaml.";
                     };
 
+                    placement = {
+                      central = mkOption {
+                        type = types.bool;
+                        default = true;
+                        description = "Run a replica on the fleet's central host.";
+                      };
+                      peripherals = mkOption {
+                        type = types.listOf types.str;
+                        default = [ ];
+                        description = "Peripheral hostnames that run one replica each.";
+                      };
+                    };
+
                     schedule = {
                       enable = mkOption {
                         type = types.bool;
@@ -329,6 +351,8 @@ in
         }
       ];
 
+    })
+    (mkIf (cfg.enable && cfg.role == "central") {
       nix.gc.automatic = lib.mkForce false;
       boot.kernel.sysctl = lib.mkIf (!config.boot.isContainer) {
         "kernel.yama.ptrace_scope" = lib.mkDefault 2;
@@ -441,7 +465,7 @@ in
                 ProtectProc = "invisible";
               };
             };
-          }) workerEntries
+          }) (lib.filter (entry: entry.cfg.placement.central) workerEntries)
         )
         // builtins.listToAttrs (
           lib.concatMap (

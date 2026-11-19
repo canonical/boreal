@@ -11,7 +11,18 @@ let
 
   workerUnits = lib.concatLists (
     lib.mapAttrsToList (
-      user: userCfg: map (worker: "boreal-worker-${user}-${worker}") (builtins.attrNames userCfg.workers)
+      user: userCfg:
+      lib.concatLists (
+        lib.mapAttrsToList (
+          worker: workerCfg:
+          lib.optional (
+            if config.boreal.role == "central" then
+              workerCfg.placement.central
+            else
+              builtins.elem config.networking.hostName workerCfg.placement.peripherals
+          ) "boreal-worker-${user}-${worker}"
+        ) userCfg.workers
+      )
     ) config.boreal.users
   );
 in
@@ -81,15 +92,17 @@ in
     system.stateVersion = lib.mkDefault "26.05";
     system.switch.enable = lib.mkDefault false;
 
-    boreal.admin = {
+    boreal.admin = lib.mkIf (config.boreal.role == "central") {
       enable = lib.mkDefault true;
       allowPoweroff = lib.mkDefault true;
       keys = lib.unique (vmCfg.adminKeys ++ vmCfg.devAuthorizedKeys);
     };
 
-    users.users = lib.mapAttrs (_: _: {
-      openssh.authorizedKeys.keys = vmCfg.devAuthorizedKeys;
-    }) config.boreal.users;
+    users.users = lib.mkIf (config.boreal.role == "central") (
+      lib.mapAttrs (_: _: {
+        openssh.authorizedKeys.keys = vmCfg.devAuthorizedKeys;
+      }) config.boreal.users
+    );
 
     services.openssh = {
       enable = true;

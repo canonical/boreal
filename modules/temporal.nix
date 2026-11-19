@@ -54,7 +54,7 @@ let
   workerNetnsUnits = map (entry: "boreal-netns-worker-${entry.unitKey}.service") workerEntries;
 in
 {
-  config = lib.mkIf cfg.enable {
+  config = lib.mkIf (cfg.enable && cfg.role == "central") {
     users.groups = {
       temporal = { };
       boreal-pg = { };

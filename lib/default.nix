@@ -40,6 +40,16 @@ in
       ++ modules;
     };
 
+  mkFleetCheck =
+    { pkgs, hosts }:
+    let
+      failures = import ./fleet.nix { inherit lib; } hosts;
+    in
+    if failures != [ ] then
+      throw "Boreal fleet check failed:\n${lib.concatMapStringsSep "\n" (line: "- ${line}") failures}"
+    else
+      pkgs.runCommand "boreal-fleet-check" { } "touch \"$out\"";
+
   mkLabCheck =
     {
       pkgs,
