@@ -1,19 +1,21 @@
 [package]
-name = "lab-vault"
+name = "demo-dispatch"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "lab-vault"
+name = "demo-dispatch"
+path = "main.rs"
+
+[[bin]]
+name = "schema"
 path = "main.rs"
 
 [dependencies]
-boreal-worker = { workspace = true, features = ["read-secrets"] }
-futures.workspace = true
-lab-core = { path = "../lab-core" }
-temporalio-common.workspace = true
+boreal-worker = { workspace = true, features = ["schema"] }
+demo-core.workspace = true
 temporalio-macros.workspace = true
 temporalio-sdk.workspace = true
-tokio.workspace = true
+temporalio-workflow.workspace = true

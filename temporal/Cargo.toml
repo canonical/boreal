@@ -1,5 +1,5 @@
 [workspace]
-members = ["lab-core", "lab-worker", "lab-worker-alt", "lab-client", "lab-vault"]
+members = ["demo-core", "demo-desk", "demo-dispatch", "demo-vault"]
 resolver = "3"
 
 [workspace.package]
@@ -9,13 +9,14 @@ rust-version = "1.92"
 license = "MIT"
 
 [workspace.dependencies]
-boreal-worker = { path = "../.boreal/boreal-worker", features = ["schema"] }
+boreal-worker = { path = "../.boreal/boreal-worker" }
+demo-core = { path = "demo-core" }
 futures = "0.3"
-schemars = "1"
+schemars = { version = "1", features = ["preserve_order"] }
 serde = { version = "1", features = ["derive"] }
-temporalio-client = "~1.2.0"
+serde_json = "1"
 temporalio-common = "~1.2.0"
 temporalio-macros = "~1.2.0"
 temporalio-sdk = "~1.2.0"
 temporalio-workflow = "~1.2.0"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }

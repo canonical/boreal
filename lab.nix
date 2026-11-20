@@ -1,50 +1,33 @@
-{
-  self,
-  pkgs,
-  publicKey,
-  ...
-}:
+{ self, pkgs, ... }:
 
 let
-  demoPackages = self.packages.${pkgs.stdenv.hostPlatform.system};
+  demo = self.packages.${pkgs.stdenv.hostPlatform.system};
+  vaultPackage = demo.demo-vault.demo-vault;
 in
 {
   boreal = {
     enable = true;
 
-    users = {
-      alice = {
-        keys = [ publicKey ];
-        vault = {
-          package = demoPackages.lab-vault.lab-vault;
-          grants.greet = [ "verify-demo-token" ];
-        };
+    users.alice = {
+      editMode = "vi";
+      workers.desk.package = demo.demo-desk.demo-desk;
+      vault = {
+        package = vaultPackage;
+        grants.desk = [ "check-desk-badge" ];
+      };
+    };
+
+    users.shared = {
+      workers.dispatch = {
+        package = demo.demo-dispatch.demo-dispatch;
         permissions = {
-          read = true;
-          write = false;
-        };
-        workers = {
-          greet = {
-            package = demoPackages.lab-worker.lab-worker;
-            permissions.write = [ "bob" ];
-            placement = {
-              central = true;
-              peripherals = [ "compute-01" ];
-            };
-          };
-          count = {
-            package = demoPackages.lab-worker-alt.lab-worker-alt;
-            permissions.read = [ "bob" ];
-          };
+          read = [ "alice" ];
+          write = [ "alice" ];
         };
       };
-
-      bob = {
-        keys = [ publicKey ];
-        workers = {
-          greet.package = demoPackages.lab-worker.lab-worker;
-          count.package = demoPackages.lab-worker-alt.lab-worker-alt;
-        };
+      vault = {
+        package = vaultPackage;
+        grants.dispatch = [ "check-dispatch-key" ];
       };
     };
   };

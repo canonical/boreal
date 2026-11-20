@@ -1,211 +1,118 @@
-# Boreal `downstreams/demo-lab` deployment
+# Dispatch Desk
 
-Reference downstream lab consuming `github:canonical/boreal`. This orphan
-branch (`downstreams/demo-lab`) lives in gitignored `downstreams/demo-lab`
-inside a Boreal checkout. `boreal-vm` is the central QEMU guest and starts
-`compute-01` as a NixOS container. Both poll `alice-greet` in the same Temporal
-namespace (`alice`); all other workers, Temporal, PostgreSQL, the Boreal SSH
-interfaces, and the updater stay on `boreal-vm`.
-The container shares the VM kernel: this exercises remote worker transport,
-not isolation from the VM administrator.
+A small, offline Boreal lab for manual testing. Open a request at Alice's
+desk, send it to the shared dispatch desk, and get back a receipt.
 
-The broker's remote worker listener is `192.0.2.1:7443` on `ve-compute-01`,
-reachable from the container at `192.0.2.2`. The veth has peer-only routes;
-there is no NAT or forwarded port for the container. At boot the VM generates
-a demo CA, an IP-SAN server certificate, and a pinned client certificate for
-`alice-greet@compute-01`. The private keys are created with mode `0600` in
-`/run`, not in the Nix store. Only the public CA certificate and the client
-certificate/key are mounted into the container, read-only. The CA signing key
-is deleted after issuance. This PKI is only for the disposable demo, not a
-production provisioning example. The certificates are valid for seven days;
-reboot the demo VM to generate a new set.
-
-Note: `downstreams/demo-lab` shares a disposable demo SSH public key across
-`alice`, `bob`, and `admin` for local VM testing; replace those keys with
-distinct per-user public keys in any real deployment.
-
-## Development and checks
-
-Run these commands from `downstreams/demo-lab`. The existing lock pins an older
-local Boreal revision, so override it with a checkout containing remote worker
-support. Refresh the lock against a suitable published revision before using
-it on another machine; the commands here do not update it.
-
-```sh
-demo_flake=.
-boreal_input=../..
+```text
+Alice's desk ──→ Alice's vault checks desk_badge
+             └─→ shared dispatch ──→ shared vault checks dispatch_key
+                                └─→ non-secret receipt
 ```
 
-If either checkout has new, untracked source files, use snapshots instead:
-Git-backed flakes omit those files. Review the untracked files before taking a
-snapshot; do not include credentials. `git ls-files` excludes ignored files
-such as `.boreal`, build outputs, and qcow2 images.
+Each vault checks only a disposable fixture. No token, token length, or
+token-derived value is sent to Temporal. There are no external services.
+
+| Runtime | What to test |
+| --- | --- |
+| QEMU VM (x86-64) | Two SSH users and Temporal namespaces, distinct vault stores, and one-way delegation: Alice may start/read shared dispatch. Shared cannot run Alice's desk. |
+| Local Podman | The same desk, dispatch, and vault binaries, interactive forms, scripted input, and persistence. Both workers run in `local` with one fixture store; this is **not** a permissions test. |
+
+## Use the working framework checkout
+
+Run the examples from this worktree. `../..` is the enclosing Boreal checkout;
+point it at your framework checkout if you cloned this branch elsewhere. The
+override is needed for local mode until a framework release with `mkLocal` is
+pinned here. It does not modify the lock file.
 
 ```sh
-snapshot=$(mktemp -d)
-snapshot_sources() {
-  mkdir -p "$2"
-  git -C "$1" ls-files -z --cached --others --exclude-standard |
-    tar -C "$1" --null --no-recursion -cf - -T - |
-    tar -xf - -C "$2"
+framework=$(realpath ../..)
+local_lab() {
+  nix run .#boreal-local --override-input boreal "$framework" --no-write-lock-file -- "$@"
 }
-snapshot_sources ../.. "$snapshot/boreal"
-snapshot_sources . "$snapshot/demo"
-demo_flake="path:$snapshot/demo"
-boreal_input="path:$snapshot/boreal"
 ```
 
-The `fleet` check validates both evaluated NixOS hosts and their placements;
-the `lab` check validates the central lab's generated schemas and policies.
+## Local Podman
+
+Use a regular Linux user with working rootless Podman. Set up the lab's private
+relative mount once. These example strings are **test fixtures**, not real
+credentials.
 
 ```sh
-nix flake check "$demo_flake" --override-input boreal "$boreal_input" --no-write-lock-file
-nix develop "$demo_flake" --override-input boreal "$boreal_input" --no-write-lock-file
-cargo test --manifest-path temporal/Cargo.toml --workspace --exclude lab-vault --locked
-cargo test --manifest-path temporal/Cargo.toml --package lab-vault --locked
+fixture_dir=$(local_lab secret-path)
+(umask 077; mkdir -p -- "$fixture_dir")
+printf '%s' 'demo-only-desk' | local_lab secrets set desk_badge
+printf '%s' 'demo-only-dispatch' | local_lab secrets set dispatch_key
+local_lab
 ```
 
-## Run the disposable VM
-
-From the demo Git checkout, build with `boreal-build` so both SSH prompts show
-the demo's Git revision even with a local framework override. This uses the
-Git checkout, not the `path:` snapshot above, and leaves `flake.lock` alone.
-Expect the seven-character demo hash, an exact version tag on a clean tagged
-commit, or `<hash>+` if the demo has tracked changes. Changes in the Boreal
-checkout do not add `+` to the demo's label.
+In the shell, `run desk` opens the request form. Fill in a requester, pick a
+zone, and confirm. `list`, `view <id>`, and `result <id>` show the execution and
+receipt. To test input and output without the form:
 
 ```sh
-nix run "$boreal_input#boreal-build" -- . boreal-vm vm --override-input boreal "$boreal_input"
+printf '%s' '{"requester":"Avery","zone":"north"}' |
+  local_lab run desk --id desk-local --input-json -
+local_lab result desk-local
 ```
 
-Choose a fresh disk path so no existing qcow2 is reused or overwritten. If
-another VM already uses SSH port `2222`, shut it down before launching. The
-`QEMU_KERNEL_PARAMS` line opens an unauthenticated root shell **only on this
-VM's local serial console** for smoke checks. Omit that line for ordinary SSH
-use, and don't enable it on a shared or production VM.
+`run` submits immediately. If the result is still running, try again. Use a
+new ID for another run. The desk result includes `dispatch_namespace`,
+`dispatch_workflow_id`, and a receipt such as `Dispatch confirmed for Avery in
+the north zone.` `local_lab stop` stops the lab without deleting its
+SQLite state, fixture secrets, or selector-only shell history. Reopen the shell
+and use Arrow Up to verify only the selector was persisted, not its input.
+
+## Disposable QEMU VM
+
+Paste a disposable **public** SSH key into `boreal.vm.devAuthorizedKeys` in
+`flake.nix`. The VM accepts that key as `alice`, `shared`, and `admin`; never
+use shared SSH keys on a real lab or put a private key in the checkout.
+Ensure loopback port `2222` is free (or
+change `boreal.vm.sshPort`). Use a fresh disk for the new topology rather than
+reusing an old demo image.
 
 ```sh
-disk_dir=$(mktemp -d "$HOME/boreal-replica-demo.XXXXXXXX")
-printf 'Fresh VM disk directory: %s\n' "$disk_dir"
-NIX_DISK_IMAGE="$disk_dir/boreal-vm.qcow2" \
-  QEMU_KERNEL_PARAMS='systemd.debug_shell=ttyS0 systemd.mask=serial-getty@ttyS0.service' \
-  ./result/bin/run-boreal-vm
+disk_dir=$(mktemp -d "$HOME/dispatch-desk.XXXXXXXX")
+printf 'VM state: %s\n' "$disk_dir"
+NIX_DISK_IMAGE="$disk_dir/dispatch-desk.qcow2" \
+  nix run .#boreal-vm --override-input boreal "$framework" --no-write-lock-file
 ```
 
-In another terminal, set `disk_dir` to the printed directory to keep the fresh
-VM's SSH host key separate from other VMs. Connect as `alice` or `bob` with the
-private key matching the demo public key:
+In another terminal, set `disk_dir` to the printed path. Use `ssh -i` in the
+helper if the disposable key is not already in your agent.
 
 ```sh
 vm_ssh() { ssh -p 2222 -o "UserKnownHostsFile=$disk_dir/known_hosts" "$@"; }
+printf '%s' 'demo-only-desk' | vm_ssh alice@127.0.0.1 'secrets set desk_badge'
+printf '%s' 'demo-only-dispatch' | vm_ssh shared@127.0.0.1 'secrets set dispatch_key'
 vm_ssh alice@127.0.0.1
-# Inside boreal-shell:
-workers
-permissions
-run greet --id alice-run-1 --input-json '{"name":"Alice Smith","wait_seconds":5}'
-status alice-run-1
-result alice-run-1
-run count --id alice-run-2 --input-json '{"name":"Élan","wait_seconds":1}'
-secrets set api_token
-secrets list
-exit
 ```
 
-To fill in a workflow interactively, run `run greet`. In choice lists, use
-Up/Down to move one item and Left/Right to page through five items at a time.
-Arrow Up recalls your exact JSON command in the same session; after reconnecting,
-workflow inputs are no longer in history.
+Manual checks:
 
-Or pipe a secret over stdin without putting secret contents in arguments or
-history:
+1. As Alice, `run desk` and then `result <id>`. A receipt confirms that Alice's
+   vault check, the cross-namespace handoff, and the shared vault check worked.
+2. As Alice, `list --owner shared` and `result <dispatch-id> --owner shared`
+   should show the delegated run. `run dispatch --owner shared` also opens the
+   shared workflow directly.
+3. As `shared`, `run dispatch` works, but `run desk --owner alice` is denied.
+   In each user's shell, `secrets list` shows only that user's fixture.
+4. On a fresh VM, seed only `desk_badge` and run the desk workflow before
+   seeding `dispatch_key`: dispatch should fail, not fall back to Alice's
+   store. Seed the missing fixture and submit a new run to verify recovery.
+
+To shut down the disposable guest after testing, run
+`vm_ssh admin@127.0.0.1 poweroff`.
+
+## Checks
 
 ```sh
-vm_ssh alice@127.0.0.1 'secrets set api_token' < "$HOME/private/my-token-file"
+nix build .#checks.x86_64-linux.lab --override-input boreal "$framework" --no-write-lock-file
+nix develop --override-input boreal "$framework" --no-write-lock-file
+cargo fmt --manifest-path temporal/Cargo.toml --all -- --check
+cargo test --manifest-path temporal/Cargo.toml --workspace --exclude demo-vault --locked
+cargo test --manifest-path temporal/Cargo.toml --package demo-vault --locked
 ```
 
-## Verify the peripheral replica
-
-The greeting includes the hostname of the worker that ran the activity:
-`Hello Replica from boreal-vm.` or `Hello Replica from compute-01.` A fresh
-workflow result is enough to identify the activity host without root access.
-
-From the VM's local root console, check service status and the veth:
-
-```sh
-systemctl status boreal-demo-pki container@compute-01 boreal-broker boreal-worker-alice-greet
-ip -4 address show dev ve-compute-01
-ss -lnt 'sport = :7443'
-nixos-container run compute-01 -- systemctl status boreal-worker-alice-greet
-```
-
-Query Temporal from its isolated namespace (not through the broker ingress).
-After the workers have polled, the `alice-greet` queue should list identities
-for both `boreal-vm` and `compute-01`:
-
-```sh
-ip netns exec boreal-internal temporal task-queue describe \
-  --address 127.0.0.1:7233 --namespace alice --task-queue alice-greet \
-  --task-queue-type workflow --select-unversioned
-```
-
-For a stronger smoke check on the **fresh demo VM only**, stop the central
-`alice-greet` replica from the VM console:
-
-```sh
-systemctl stop boreal-worker-alice-greet.service
-```
-
-From the SSH terminal, start a new workflow and check its result after it
-completes. This run should return `Hello Replica from compute-01.`:
-
-```sh
-printf '%s\n' '{"name":"Replica","wait_seconds":1}' |
-  vm_ssh alice@127.0.0.1 'run greet --id replica-smoke --input-json -'
-vm_ssh alice@127.0.0.1 'result replica-smoke'
-```
-
-Back on the VM console, check the workflow history for `compute-01` and restore
-the central replica:
-
-```sh
-ip netns exec boreal-internal temporal workflow show \
-  --address 127.0.0.1:7233 --namespace alice --workflow-id replica-smoke --output json
-systemctl start boreal-worker-alice-greet.service
-```
-
-For startup issues, check `journalctl -b -u boreal-demo-pki -u
-container@compute-01 -u boreal-broker` on the VM, or `nixos-container run
-compute-01 -- journalctl -b -u boreal-worker-alice-greet` for the worker. Use a
-new workflow ID if repeating the test on the same VM.
-
-## Verify the central vault
-
-In the disposable VM, set a **test-only** `api_token` through Alice's hidden
-SSH prompt. The demo vault verifies that this fixed token exists and is
-nonempty; it does not return the token, its length, or a token-derived value.
-
-```text
-secrets set api_token
-run greet --id vault-smoke --input-json '{"name":"Replica","wait_seconds":1,"verify_secret":true}'
-result vault-smoke
-```
-
-Use the Alice shell. `alice-vault` runs only on `boreal-vm`. To verify both
-paths in the same run, leave the central `alice-greet` replica stopped during
-this check while keeping `alice-vault` running. Expect `Hello Replica from
-compute-01.` after the vault verifies the token. Restore the central greeting
-replica afterward. `alice-count` has no vault grant, and a greeting without
-`verify_secret` does not need the token.
-
-Connect to the restricted admin interface (`boreal-admin`) to inspect the
-central services or shut down the VM when finished:
-
-```sh
-vm_ssh admin@127.0.0.1
-# Inside boreal-admin:
-services
-service status temporal
-service restart boreal-worker-alice-greet
-updater status
-poweroff
-```
+Vault and ordinary worker packages are built separately so Cargo features
+cannot give an ordinary worker the vault's `read-secrets` feature.

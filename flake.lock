@@ -7,18 +7,18 @@
         ]
       },
       "locked": {
-        "lastModified": 1794712946,
-        "narHash": "sha256-ksvjzjS/lz/+nS+lzHrfTUYW6koPqVJe1lTH0G9gdBI=",
-        "ref": "refs/heads/main",
-        "rev": "3bc62a4f896b4768331e775a75a0313b11403889",
-        "revCount": 63,
+        "lastModified": 1795152102,
+        "narHash": "sha256-tv/x8AnpzZ04MqtpjyfIiwliad/SvZTI8SkJ7KSVhxE=",
+        "ref": "main",
+        "rev": "b9aa0edc9e62e858714fedcc7899d9e3c8a99806",
+        "revCount": 149,
         "type": "git",
-        "url": "file:///home/pseudoc/projects/github/boreal"
+        "url": "ssh://git@github.com/canonical/boreal.git"
       },
       "original": {
-        "owner": "canonical",
-        "repo": "boreal",
-        "type": "github"
+        "ref": "main",
+        "type": "git",
+        "url": "ssh://git@github.com/canonical/boreal.git"
       }
     },
     "nixpkgs": {
