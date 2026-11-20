@@ -7,6 +7,11 @@ pkgs:
 let
   system = pkgs.stdenv.hostPlatform.system;
   inherit (self.packages.${system}) boreal-broker boreal-shell;
+  vaultConfig = if vault == null || !lib.isDerivation vault then vault else { package = vault; };
+  vaultPackage = if vaultConfig == null then null else vaultConfig.package;
+  secretDir = if vaultConfig == null then null else vaultConfig.secretDir or null;
+  relativeDir = if secretDir == null then "" else lib.removePrefix "./" secretDir;
+  safeComponent = part: part != "." && part != ".." && builtins.match "[A-Za-z0-9._-]+" part != null;
   names = builtins.attrNames workers;
   validName = name: builtins.match "[a-z][a-z0-9_-]*" name != null;
   validBin =
@@ -53,7 +58,7 @@ let
       boreal-broker
     ]
     ++ builtins.attrValues workers
-    ++ lib.optional (vault != null) vault;
+    ++ lib.optional (vaultPackage != null) vaultPackage;
     extraCommands = ''
       mkdir -p etc home/local/.config/boreal/secrets data ipc
       printf 'root:x:0:0:root:/root:/sbin/nologin\n' > etc/passwd
@@ -74,8 +79,17 @@ assert lib.assertMsg (builtins.all
   (builtins.attrValues workers)
 ) "mkLocal: workers must be executable buildRustWorker outputs with schemas";
 assert lib.assertMsg (
-  vault == null || ((vault.borealVault or false) && validBin vault)
-) "mkLocal: vault must be an executable buildRustVault output";
+  vaultConfig == null
+  || (vaultPackage != null && (vaultPackage.borealVault or false) && validBin vaultPackage)
+) "mkLocal: vault.package must be an executable buildRustVault output";
+assert lib.assertMsg (
+  secretDir == null
+  || (
+    builtins.isString secretDir
+    && !builtins.hasContext secretDir
+    && builtins.all safeComponent (lib.splitString "/" relativeDir)
+  )
+) "mkLocal: vault.secretDir must be a relative runtime path string with no traversal";
 pkgs.writeShellApplication {
   name = "boreal-local";
   runtimeInputs = [
@@ -91,7 +105,8 @@ pkgs.writeShellApplication {
     archive=${image}
     archive_policy=${archivePolicy}
     image_ref=${image.imageName}:${image.imageTag}
-    vault_bin=${if vault == null then "" else lib.escapeShellArg (binOf vault)}
+    vault_bin=${if vaultPackage == null then "" else lib.escapeShellArg (binOf vaultPackage)}
+    vault_secret_rel=${lib.escapeShellArg relativeDir}
     worker_names=(${lib.escapeShellArgs names})
     worker_bins=(${lib.escapeShellArgs (map (name: binOf workers.${name}) names)})
   ''

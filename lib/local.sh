@@ -6,10 +6,10 @@ die() {
 case ${1-} in
     -h|--help)
         printf '%s\n' 'Usage: boreal-local [run|list|status|result|workers|secrets set ...]' \
-            '       boreal-local [stop|logs]' \
+            '       boreal-local [stop|logs|secret-path]' \
             'With no arguments, open the interactive local Boreal shell.'
         exit 0 ;;
-    stop|logs)
+    stop|logs|secret-path)
         [[ $# == 1 ]] || die "usage: boreal-local $1" ;;
 esac
 
@@ -17,32 +17,47 @@ esac
 [[ -z ${SSH_CONNECTION-}${SSH_CLIENT-}${SSH_TTY-}${SSH_ORIGINAL_COMMAND-} ]] \
     || die 'local mode is not available in an SSH session'
 [[ $# != 0 || ( -t 0 && -t 1 ) ]] || die 'interactive mode requires a terminal'
-[[ -n ${XDG_RUNTIME_DIR-} ]] || die 'XDG_RUNTIME_DIR is required for rootless Podman'
 umask 077
+
+verify_private_dir() {
+    [[ -d $1 && ! -L $1 && $(stat -c '%u:%a' -- "$1") == "$UID:700" ]] \
+        || die "expected a private, owned 0700 directory: $1"
+}
 
 private_dir() {
     if [[ ! -e $1 && ! -L $1 ]]; then
         mkdir -m 700 -- "$1" || die "cannot create $1"
     fi
-    [[ -d $1 && ! -L $1 && $(stat -c '%u:%a' -- "$1") == "$UID:700" ]] \
-        || die "expected a private, owned 0700 directory: $1"
+    verify_private_dir "$1"
 }
 
 # Checkout identity does not depend on the commit, the flake lock or the image.
 checkout=$(pwd -P)
 key=$(printf '%s' "$checkout" | sha256sum)
 key=${key:0:24}
-state_base=$(realpath -m -- "${XDG_STATE_HOME:-$HOME/.local/state}")
-runtime_base=$(realpath -e -- "$XDG_RUNTIME_DIR")
-for path in "$state_base" "$runtime_base"; do
-    case $path/ in
-        /nix/store/*|"$checkout/"*|*:*) die "unsafe state or runtime path: $path" ;;
+safe_base() {
+    case $1/ in
+        /nix/store/*|"$checkout/"*|*:*) die "unsafe state or runtime path: $1" ;;
     esac
-done
+}
+state_base=$(realpath -m -- "${XDG_STATE_HOME:-$HOME/.local/state}")
+safe_base "$state_base"
 name=boreal-local-$key
 profile=$state_base/boreal-local/$key
 home=$profile/home
 catalog=$profile/catalog
+secrets=$home/.config/boreal/secrets
+if [[ -n $vault_secret_rel ]]; then
+    secrets=$profile/mounts/$vault_secret_rel
+fi
+if [[ ${1-} == secret-path ]]; then
+    printf '%s\n' "$secrets"
+    exit 0
+fi
+
+[[ -n ${XDG_RUNTIME_DIR-} ]] || die 'XDG_RUNTIME_DIR is required for rootless Podman'
+runtime_base=$(realpath -e -- "$XDG_RUNTIME_DIR")
+safe_base "$runtime_base"
 ipc=$runtime_base/$name
 socket=$ipc/broker.sock
 [[ $(printf '%s' "$socket" | wc -c) -lt 100 ]] || die 'XDG_RUNTIME_DIR is too long for the broker socket'
@@ -111,11 +126,28 @@ private_dir "$profile/temporal"
 private_dir "$profile/broker"
 private_dir "$ipc"
 
+shell_options=()
+vault_mount_id=
+if [[ -n $vault_secret_rel ]]; then
+    # Validate each parent, rather than letting a symlink escape the profile.
+    mount_dir=$profile/mounts
+    verify_private_dir "$mount_dir"
+    IFS=/ read -r -a parts <<< "$vault_secret_rel"
+    for part in "${parts[@]}"; do
+        mount_dir+=/$part
+        verify_private_dir "$mount_dir"
+    done
+    # An existing bind mount still points to the original directory after a rename.
+    vault_mount_id=$vault_secret_rel:$(stat -c '%d:%i' -- "$secrets")
+    shell_options=(--secret-dir "$secrets")
+fi
+
 start_container() {
     local container=$1 network=$2
     shift 2
     podman run --detach --name "$container" --label "$label" \
-        --label "$build_label=$image_ref" --network "$network" \
+        --label "$build_label=$image_ref" --label "dev.boreal.vault-mount=$vault_mount_id" \
+        --network "$network" \
         --pull=never --userns=keep-id --user "$UID:$gid" --pid=private --ipc=private \
         --sdnotify=ignore --restart=no --passwd=true \
         --passwd-entry "local:x:$UID:$gid::/home/local:/sbin/nologin" \
@@ -164,11 +196,13 @@ launch() {
         "$image_ref" "$broker_bin" local /catalog /ipc/broker.sock /data
     if [[ -n $vault_bin ]]; then
         # Match the vault account's passwd home. No other container gets this mount.
-        private_dir "$home/.config"
-        private_dir "$home/.config/boreal"
-        private_dir "$home/.config/boreal/secrets"
+        if [[ -z $vault_secret_rel ]]; then
+            private_dir "$home/.config"
+            private_dir "$home/.config/boreal"
+            private_dir "$secrets"
+        fi
         start_container "$name-vault" "container:$temporal" \
-            --volume "$home/.config/boreal/secrets:/home/local/.config/boreal/secrets:ro,Z" \
+            --volume "$secrets:/home/local/.config/boreal/secrets:ro,Z" \
             "$image_ref" "$vault_bin"
     fi
     for i in "${!worker_names[@]}"; do
@@ -182,8 +216,8 @@ launch() {
 check_runtime() {
     local item="${1-}" info
     info=$(podman inspect --type container --format \
-        '{{.State.Running}} {{index .Config.Labels "dev.boreal.image"}}' "$item")
-    [[ $info == "true $image_ref" ]]
+        '{{.State.Running}} {{index .Config.Labels "dev.boreal.image"}} {{index .Config.Labels "dev.boreal.vault-mount"}}' "$item")
+    [[ $info == "true $image_ref $vault_mount_id" ]]
 }
 
 names=$(containers)
@@ -210,4 +244,4 @@ done
 [[ -S $socket && ! -L $socket && -O $socket ]] || die 'local broker socket unavailable; run boreal-local stop first'
 trap - EXIT INT TERM
 exec 9>&-
-exec "$shell_bin" --local "$home" "$catalog" "$socket" "$@"
+exec "$shell_bin" --local "$home" "$catalog" "$socket" "${shell_options[@]}" "$@"

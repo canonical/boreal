@@ -50,7 +50,10 @@ shell and the suffixes of the `local-<worker>` task queues.
 ```nix
 packages.${system}.boreal-local = boreal.lib.mkLocal pkgs {
   workers.example = self.packages.${system}.example-worker.example;
-  # vault = self.packages.${system}.lab-vault.lab-vault;
+  # vault = {
+  #   package = self.packages.${system}.lab-vault.lab-vault;
+  #   secretDir = "./fixtures/alice";
+  # };
 };
 
 devShells.${system}.default = boreal.lib.mkDevShell pkgs {
@@ -81,8 +84,28 @@ nix develop -c boreal-local secrets set NAME < ./fixture-file
 ```
 
 Store the fixture file outside the checkout. The command stores it in the
-profile's `home/.config/boreal/secrets` (`0700` directory, `0600` files). The
-launcher mounts that directory read-only only in the vault container, at the
+profile's `home/.config/boreal/secrets` by default. To choose another directory,
+set `vault.secretDir` to a **quoted relative runtime path**, such as
+`"./fixtures/alice"`. It resolves under the profile's `mounts/` directory,
+not the checkout. Don't use a Nix path literal: the build must only see the
+path string, never the directory contents.
+
+Before starting the runtime with an explicit mount, create its directory:
+
+```sh
+secret_dir=$(nix run .#boreal-local -- secret-path)
+(umask 077; mkdir -p -- "$secret_dir")
+```
+
+`secret-path` doesn't start containers. An explicit path must already exist;
+the launcher rejects absolute paths, `..`, symlinks, and directories in the
+mount path that aren't owned by the developer with mode `0700`. Secret files
+must still use mode `0600`. If you change the mount setting or replace the
+directory, stop the runtime before starting it again. The launcher does not
+move existing secrets. History stays in the profile home regardless of the
+mount path.
+
+Only the vault container mounts the secret directory, read-only at the
 UID's actual passwd home. Existing vault activities use the same feature-gated
 `boreal_worker::read_secret` or `read_secret_bytes` API as in a deployment;
 there is no environment-variable path override and no host home mount.
