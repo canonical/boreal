@@ -15,6 +15,10 @@ in
     users = {
       alice = {
         keys = [ publicKey ];
+        vault = {
+          package = demoPackages.lab-vault.lab-vault;
+          grants.greet = [ "verify-demo-token" ];
+        };
         permissions = {
           read = true;
           write = false;

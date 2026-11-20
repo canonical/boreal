@@ -61,7 +61,8 @@ the `lab` check validates the central lab's generated schemas and policies.
 ```sh
 nix flake check "$demo_flake" --override-input boreal "$boreal_input" --no-write-lock-file
 nix develop "$demo_flake" --override-input boreal "$boreal_input" --no-write-lock-file
-cargo test --manifest-path temporal/Cargo.toml --workspace --locked
+cargo test --manifest-path temporal/Cargo.toml --workspace --exclude lab-vault --locked
+cargo test --manifest-path temporal/Cargo.toml --package lab-vault --locked
 ```
 
 ## Run the disposable VM
@@ -176,6 +177,25 @@ For startup issues, check `journalctl -b -u boreal-demo-pki -u
 container@compute-01 -u boreal-broker` on the VM, or `nixos-container run
 compute-01 -- journalctl -b -u boreal-worker-alice-greet` for the worker. Use a
 new workflow ID if repeating the test on the same VM.
+
+## Verify the central vault
+
+In the disposable VM, set a **test-only** `api_token` through Alice's hidden
+SSH prompt. The demo vault verifies that this fixed token exists and is
+nonempty; it does not return the token, its length, or a token-derived value.
+
+```text
+secrets set api_token
+run greet --id vault-smoke --input-json '{"name":"Replica","wait_seconds":1,"verify_secret":true}'
+result vault-smoke
+```
+
+Use the Alice shell. `alice-vault` runs only on `boreal-vm`. To verify both
+paths in the same run, leave the central `alice-greet` replica stopped during
+this check while keeping `alice-vault` running. Expect `Hello Replica from
+compute-01.` after the vault verifies the token. Restore the central greeting
+replica afterward. `alice-count` has no vault grant, and a greeting without
+`verify_secret` does not need the token.
 
 Connect to the restricted admin interface (`boreal-admin`) to inspect the
 central services or shut down the VM when finished:

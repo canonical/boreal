@@ -57,6 +57,11 @@
             "scheduler"
           ];
           lab-worker-alt = mkTemporalCrate pkgs "lab-worker-alt" [ "lab-worker-alt" ];
+          lab-vault = boreal.lib.buildRustVault pkgs {
+            pname = "lab-vault";
+            src = ./temporal;
+            cargoLock.lockFile = ./temporal/Cargo.lock;
+          };
           lab-client = pkgs.rustPlatform.buildRustPackage {
             pname = "lab-client";
             version = (builtins.fromTOML (builtins.readFile ./temporal/Cargo.toml)).workspace.package.version;

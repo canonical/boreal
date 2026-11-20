@@ -10,6 +10,8 @@ use temporalio_sdk::{
     activities::{ActivityContext, ActivityError},
 };
 
+pub mod vault;
+
 pub const DEFAULT_WAIT_SECONDS: u64 = 20;
 pub const MAX_WAIT_SECONDS: u64 = 120 * 60;
 
@@ -20,6 +22,9 @@ pub struct DemoInput {
     /// Durable timer duration in seconds
     #[serde(default = "default_wait_seconds")]
     pub wait_seconds: u64,
+    /// Ask the central vault to verify the demo token (alice/greet only).
+    #[serde(default)]
+    pub verify_secret: bool,
 }
 
 fn default_wait_seconds() -> u64 {
@@ -27,7 +32,11 @@ fn default_wait_seconds() -> u64 {
 }
 
 pub fn validate_input(name: String, wait_seconds: u64) -> LabResult<DemoInput> {
-    let input = DemoInput { name, wait_seconds };
+    let input = DemoInput {
+        name,
+        wait_seconds,
+        verify_secret: false,
+    };
     input.validate()?;
     Ok(input)
 }
@@ -112,6 +121,18 @@ impl DemoWorkflow {
         // Durable Temporal timer persisted in event history.
         if ctx.timer(Duration::from_secs(input.wait_seconds)).await == TimerResult::Cancelled {
             return Err(WorkflowTermination::cancelled());
+        }
+        if input.verify_secret {
+            let options = boreal_worker::vault_activity_options(
+                ctx.namespace(),
+                ActivityOptions::schedule_to_close_timeout(Duration::from_secs(10)),
+            );
+            ctx.execute_activity(vault::Vault::verify_demo_token, (), options)
+                .await
+                .map_err(|error| match error {
+                    ActivityExecutionError::Cancelled(_) => WorkflowTermination::cancelled(),
+                    other => other.into(),
+                })?;
         }
         let greeting = ctx
             .execute_activity(
@@ -199,6 +220,7 @@ pub async fn register_greet_schedule(worker_name: &str) -> LabResult<()> {
     let input = DemoInput {
         name: "Scheduler".into(),
         wait_seconds: 1,
+        verify_secret: false,
     };
     let action = ScheduleAction::start_workflow(
         DemoWorkflow::scheduled(input.clone()),

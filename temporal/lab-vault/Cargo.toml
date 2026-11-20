@@ -1,0 +1,19 @@
+[package]
+name = "lab-vault"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "lab-vault"
+path = "main.rs"
+
+[dependencies]
+boreal-worker = { workspace = true, features = ["read-secrets"] }
+futures.workspace = true
+lab-core = { path = "../lab-core" }
+temporalio-common.workspace = true
+temporalio-macros.workspace = true
+temporalio-sdk.workspace = true
+tokio.workspace = true
