@@ -222,25 +222,34 @@ fn direct_workflow_commands_use_local_catalog_and_socket() {
     assert!(!profile.home.join("boreal.history").exists());
 }
 
-#[test]
-fn direct_secret_set_uses_only_the_private_profile_home() {
-    let profile = Profile::new();
-    let fixture = b"synthetic-test-input";
-    let mut child = profile
-        .local()
+const SECRET_FIXTURE: &[u8] = b"synthetic-test-input";
+
+fn set_fixture_secret(mut cmd: Command) -> Output {
+    let mut child = cmd
         .args(["secrets", "set", "fixture_key"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    child.stdin.take().unwrap().write_all(fixture).unwrap();
-    let output = child.wait_with_output().unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(SECRET_FIXTURE)
+        .unwrap();
+    child.wait_with_output().unwrap()
+}
+
+#[test]
+fn direct_secret_set_uses_only_the_private_profile_home() {
+    let profile = Profile::new();
+    let output = set_fixture_secret(profile.local());
     assert!(output.status.success(), "{output:?}");
     let secrets_dir = profile.home.join(".config/boreal/secrets");
     let meta = fs::metadata(secrets_dir.join("fixture_key")).unwrap();
     assert_eq!(meta.permissions().mode() & 0o777, 0o600);
-    assert_eq!(meta.len(), fixture.len() as u64);
+    assert_eq!(meta.len(), SECRET_FIXTURE.len() as u64);
     assert_eq!(
         fs::metadata(secrets_dir).unwrap().permissions().mode() & 0o777,
         0o700
@@ -252,12 +261,76 @@ fn direct_secret_set_uses_only_the_private_profile_home() {
 }
 
 #[test]
+fn direct_secret_set_uses_explicit_existing_directory() {
+    let profile = Profile::new();
+    let secret_dir = profile.root.join("fixture secrets");
+    DirBuilder::new().mode(0o700).create(&secret_dir).unwrap();
+    let mut cmd = profile.local();
+    cmd.arg("--secret-dir").arg(&secret_dir);
+    let output = set_fixture_secret(cmd);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        fs::read(secret_dir.join("fixture_key")).unwrap(),
+        SECRET_FIXTURE
+    );
+    assert_eq!(
+        fs::metadata(&secret_dir).unwrap().permissions().mode() & 0o7777,
+        0o700
+    );
+    assert!(!profile.home.join(".config").exists());
+    assert!(!profile.unrelated_home.join(".config").exists());
+    assert!(!profile.home.join("boreal.history").exists());
+}
+
+#[test]
+fn invalid_explicit_secret_directory_never_falls_back() {
+    let profile = Profile::new();
+    let missing = profile.root.join("missing");
+    let loose = profile.root.join("loose");
+    DirBuilder::new().mode(0o700).create(&loose).unwrap();
+    fs::set_permissions(&loose, Permissions::from_mode(0o750)).unwrap();
+    let linked = profile.root.join("link");
+    symlink(&profile.home, &linked).unwrap();
+
+    for (path, diagnostic) in [
+        (Path::new("relative"), "must be absolute"),
+        (missing.as_path(), "invalid local --secret-dir"),
+        (loose.as_path(), "must have mode 0700"),
+        (linked.join(".").as_path(), "non-symlink directory"),
+    ] {
+        assert_rejected(
+            profile
+                .local()
+                .arg("--secret-dir")
+                .arg(path)
+                .args(["secrets", "set", "fixture_key"])
+                .output()
+                .unwrap(),
+            diagnostic,
+        );
+    }
+    assert_rejected(
+        profile.local().arg("--secret-dir").output().unwrap(),
+        "usage:",
+    );
+    assert!(!missing.exists());
+    assert!(!profile.home.join(".config").exists());
+    assert!(!profile.unrelated_home.join(".config").exists());
+    assert_eq!(
+        fs::metadata(&loose).unwrap().permissions().mode() & 0o7777,
+        0o750
+    );
+}
+
+#[test]
 fn explicit_local_invocations_fail_closed() {
     let profile = Profile::new();
     for var in SSH_VARS {
         assert_rejected(
             profile
                 .local()
+                .arg("--secret-dir")
+                .arg(&profile.home)
                 .arg("list")
                 .env(var, "list")
                 .output()

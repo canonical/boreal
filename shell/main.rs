@@ -42,7 +42,7 @@ const ECHO: u32 = 0o000010;
 const TCSANOW: i32 = 0;
 const LOCAL_USAGE: &str = concat!(
     "usage: boreal-shell --local <profile-home> <catalog-dir> <broker-socket>",
-    " [command argv...]",
+    " [--secret-dir <absolute-path>] [command argv...]",
 );
 
 unsafe extern "C" {
@@ -78,17 +78,22 @@ impl Drop for EchoGuard {
     }
 }
 
-fn secret_store(profile_home: Option<&Path>) -> Result<Store, String> {
-    if let Some(home) = profile_home {
-        return Ok(Store::from_home(home, os::current_euid()));
+fn with_secret_store(
+    local: Option<&LocalProfile>,
+    f: impl FnOnce(&Store) -> Result<(), String>,
+) -> Result<(), String> {
+    if let Some(local) = local {
+        return f(local.secret_store());
     }
-    if !Path::new(DEFAULT_ETC_DIR).exists()
+    let store = if !Path::new(DEFAULT_ETC_DIR).exists()
         && !is_ssh_session()
         && let Ok(home) = env::var("BOREAL_TEST_HOME")
     {
-        return Ok(Store::from_home(home, os::current_euid()));
-    }
-    Store::for_current_user().map_err(|e| e.detail())
+        Store::from_home(home, os::current_euid())
+    } else {
+        Store::for_current_user().map_err(|e| e.detail())?
+    };
+    f(&store)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -129,18 +134,15 @@ fn run_script_command(
     command: ScriptCommand,
     local: Option<&LocalProfile>,
 ) -> Result<bool, Box<dyn Error>> {
-    let profile_home = local.map(LocalProfile::home);
     match command {
         ScriptCommand::SetSecret(name) => {
-            run_stdin_secret_set(&name, profile_home)?;
+            run_stdin_secret_set(&name, local)?;
             Ok(true)
         }
         ScriptCommand::Workflow(words) => {
             let (ctx, mode) = load_runtime(local)?;
             match ctx.parse_words(&words) {
-                Ok(Some(action)) => {
-                    execute_action(action, &mode, profile_home, false).map_err(Into::into)
-                }
+                Ok(Some(action)) => execute_action(action, &mode, local, false).map_err(Into::into),
                 Ok(None) => Ok(false),
                 Err(command::Error::Clap(err)) => {
                     // clap may echo an offending token, including an inline payload.
@@ -165,23 +167,24 @@ fn run_script_command(
     }
 }
 
-fn run_stdin_secret_set(name: &str, profile_home: Option<&Path>) -> Result<(), String> {
+fn run_stdin_secret_set(name: &str, local: Option<&LocalProfile>) -> Result<(), String> {
     if io::stdin().is_terminal() {
         return Err(
             "non-interactive 'secrets set <name>' requires piping secret bytes on stdin".into(),
         );
     }
-    let store = secret_store(profile_home)?;
-    let mut buf = Vec::new();
-    io::stdin()
-        .take((MAX_SECRET_BYTES + 1) as u64)
-        .read_to_end(&mut buf)
-        .map_err(|e| format!("read stdin: {e}"))?;
-    let res = store.put(name, &buf);
-    secret::zeroize(&mut buf);
-    let written = res.map_err(|e| e.detail())?;
-    println!("Stored secret '{name}' ({written} bytes).");
-    Ok(())
+    with_secret_store(local, |store| {
+        let mut buf = Vec::new();
+        io::stdin()
+            .take((MAX_SECRET_BYTES + 1) as u64)
+            .read_to_end(&mut buf)
+            .map_err(|e| format!("read stdin: {e}"))?;
+        let res = store.put(name, &buf);
+        secret::zeroize(&mut buf);
+        let written = res.map_err(|e| e.detail())?;
+        println!("Stored secret '{name}' ({written} bytes).");
+        Ok(())
+    })
 }
 
 fn load_runtime(local: Option<&LocalProfile>) -> Result<(Arc<Context>, Mode), String> {
@@ -247,13 +250,12 @@ fn confirm_prompt(question: &str) -> io::Result<bool> {
     Ok(trimmed.eq_ignore_ascii_case("y") || trimmed.eq_ignore_ascii_case("yes"))
 }
 
-fn handle_secret_action(action: SecretAction, profile_home: Option<&Path>) -> Result<(), String> {
-    let store = secret_store(profile_home)?;
+fn handle_secret_action(action: SecretAction, store: &Store) -> Result<(), String> {
     match action {
         SecretAction::List => {
             let entries = store.list().map_err(|e| e.detail())?;
             if entries.is_empty() {
-                println!("no secrets stored in ~/.config/boreal/secrets.");
+                println!("no secrets stored.");
             } else {
                 for entry in entries {
                     println!("{} ({} bytes, mode 0600)", entry.name(), entry.size());
@@ -309,13 +311,15 @@ fn handle_secret_action(action: SecretAction, profile_home: Option<&Path>) -> Re
 fn execute_action(
     action: Action,
     mode: &Mode,
-    profile_home: Option<&Path>,
+    local: Option<&LocalProfile>,
     interactive: bool,
 ) -> Result<bool, String> {
     match action {
         Action::Exit => Ok(true),
         Action::Prompt(_) => Err("unresolved interactive prompt".into()),
-        Action::Secrets(sec) => handle_secret_action(sec, profile_home).map(|()| true),
+        Action::Secrets(sec) => {
+            with_secret_store(local, |store| handle_secret_action(sec, store)).map(|()| true)
+        }
         Action::Workers => {
             let resp = mode.send(&Request::Workers)?;
             Ok(client::print_response(resp, mode.is_mock()))
@@ -334,7 +338,7 @@ fn execute_action(
             let input = match input {
                 RunInput::Json(raw) if raw == "-" => {
                     if interactive || io::stdin().is_terminal() {
-                        let method = if profile_home.is_some() {
+                        let method = if local.is_some() {
                             "a non-interactive local command"
                         } else {
                             "non-interactive SSH without a PTY"
@@ -638,7 +642,7 @@ fn run_interactive(local: Option<&LocalProfile>) -> Result<(), Box<dyn Error>> {
             Ok(Some(action)) => complete_action(action, &ctx, &mode)
                 .and_then(|action| {
                     action.map_or(Ok(true), |action| {
-                        execute_action(action, &mode, profile_home, true)
+                        execute_action(action, &mode, local, true)
                     })
                 })
                 .map(Submission::Continue)
@@ -662,7 +666,14 @@ fn run() -> Result<bool, Box<dyn Error>> {
         let [home, catalog, socket, command @ ..] = args.as_slice() else {
             return Err(LOCAL_USAGE.into());
         };
-        let profile = LocalProfile::open(home, catalog, socket)?;
+        let (secret_dir, command) = match command {
+            [flag, path, command @ ..] if flag == "--secret-dir" => {
+                (Some(path.as_os_str()), command)
+            }
+            [flag] if flag == "--secret-dir" => return Err(LOCAL_USAGE.into()),
+            _ => (None, command),
+        };
+        let profile = LocalProfile::open(home, catalog, socket, secret_dir)?;
         if command.is_empty() {
             return run_interactive(Some(&profile)).map(|()| true);
         }
