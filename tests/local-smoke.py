@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Run the local lab with fixture data under a throwaway profile and checkout."""
 
+import errno
 import fcntl
 import os
 import pathlib
@@ -19,29 +20,39 @@ def interactive(command, cwd, env, steps):
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
     child = subprocess.Popen(command, cwd=cwd, env=env, stdin=slave, stdout=slave, stderr=slave)
     os.close(slave)
+
+    def read_until(expected, timeout):
+        output = bytearray()
+        queries = 0
+        deadline = time.monotonic() + timeout
+        while expected is None or not all(needle in output for needle in expected):
+            remaining = deadline - time.monotonic()
+            assert remaining > 0 and select.select([master], [], [], remaining)[0], output
+            try:
+                chunk = os.read(master, 8192)
+            except OSError as err:
+                if err.errno != errno.EIO:
+                    raise
+                chunk = b""
+            if not chunk:
+                assert expected is None, f"shell closed: {output!r}"
+                break
+            output.extend(chunk)
+            count = output.count(b"\x1b[6n")
+            for _ in range(count - queries):
+                os.write(master, b"\x1b[1;1R")
+            queries = count
+        assert b"nineteen-byte-token" not in output
+        return output
+
     try:
         for keys, expected in steps:
             if keys:
                 os.write(master, keys)
-            output = bytearray()
-            queries = 0
-            deadline = time.monotonic() + 60
-            while not all(needle in output for needle in expected):
-                remaining = deadline - time.monotonic()
-                assert remaining > 0 and select.select([master], [], [], remaining)[0], output
-                try:
-                    chunk = os.read(master, 8192)
-                except OSError as err:
-                    raise AssertionError(f"shell closed: {output!r}") from err
-                assert chunk, f"shell closed: {output!r}"
-                output.extend(chunk)
-                count = output.count(b"\x1b[6n")
-                for _ in range(count - queries):
-                    os.write(master, b"\x1b[1;1R")
-                queries = count
-            assert b"nineteen-byte-token" not in output
+            read_until(expected, 60)
         os.write(master, b"exit\r")
-        assert child.wait(timeout=10) == 0
+        shutdown = read_until(None, 10)
+        assert child.wait(timeout=5) == 0, shutdown
     finally:
         if child.poll() is None:
             child.kill()
