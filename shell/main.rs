@@ -2,6 +2,7 @@ mod client;
 mod command;
 mod form;
 mod history;
+mod local;
 mod tui;
 mod workflow_completion;
 
@@ -22,6 +23,7 @@ use boreal_shell::terminal::{self, Host, Invocation, Session, Submission, is_ssh
 
 use crate::client::Mode;
 use crate::command::{Action, Context, Launch, Missing, SecretAction, Target};
+use crate::local::LocalProfile;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -38,6 +40,10 @@ struct Termios {
 
 const ECHO: u32 = 0o000010;
 const TCSANOW: i32 = 0;
+const LOCAL_USAGE: &str = concat!(
+    "usage: boreal-shell --local <profile-home> <catalog-dir> <broker-socket>",
+    " [command argv...]",
+);
 
 unsafe extern "C" {
     fn tcgetattr(fd: i32, termios_p: *mut Termios) -> i32;
@@ -72,7 +78,10 @@ impl Drop for EchoGuard {
     }
 }
 
-fn secret_store() -> Result<Store, String> {
+fn secret_store(profile_home: Option<&Path>) -> Result<Store, String> {
+    if let Some(home) = profile_home {
+        return Ok(Store::from_home(home, os::current_euid()));
+    }
     if !Path::new(DEFAULT_ETC_DIR).exists()
         && !is_ssh_session()
         && let Ok(home) = env::var("BOREAL_TEST_HOME")
@@ -83,21 +92,32 @@ fn secret_store() -> Result<Store, String> {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum SshCommand {
+enum ScriptCommand {
     SetSecret(String),
     Workflow(Vec<String>),
 }
 
-fn parse_ssh_command(raw_cmd: &str) -> Result<SshCommand, String> {
+fn parse_ssh_command(raw_cmd: &str) -> Result<ScriptCommand, String> {
     let words = shlex::split(raw_cmd).ok_or_else(|| "invalid quoting in SSH command".to_owned())?;
+    parse_script_command(words, false)
+}
+
+fn parse_script_command(words: Vec<String>, local: bool) -> Result<ScriptCommand, String> {
     match words.as_slice() {
         [cmd, sub, name] if cmd == "secrets" && sub == "set" => {
             secret::validate_name(name).map_err(|e| e.detail())?;
-            Ok(SshCommand::SetSecret(name.clone()))
+            Ok(ScriptCommand::SetSecret(name.clone()))
         }
-        [cmd, ..] if matches!(cmd.as_str(), "run" | "list" | "status" | "result") => {
-            Ok(SshCommand::Workflow(words))
+        [cmd, ..]
+            if matches!(cmd.as_str(), "run" | "list" | "status" | "result")
+                || (local && cmd == "workers") =>
+        {
+            Ok(ScriptCommand::Workflow(words))
         }
+        _ if local => Err(
+            "unsupported local command; use run, list, status, result, workers, or 'secrets set <name>'"
+                .into(),
+        ),
         _ => Err(
             "unsupported SSH command; use run, list, status, result, or 'secrets set <name>'"
                 .into(),
@@ -105,16 +125,22 @@ fn parse_ssh_command(raw_cmd: &str) -> Result<SshCommand, String> {
     }
 }
 
-fn run_ssh_command(raw_cmd: &str) -> Result<bool, Box<dyn Error>> {
-    match parse_ssh_command(raw_cmd)? {
-        SshCommand::SetSecret(name) => {
-            run_stdin_secret_set(&name)?;
+fn run_script_command(
+    command: ScriptCommand,
+    local: Option<&LocalProfile>,
+) -> Result<bool, Box<dyn Error>> {
+    let profile_home = local.map(LocalProfile::home);
+    match command {
+        ScriptCommand::SetSecret(name) => {
+            run_stdin_secret_set(&name, profile_home)?;
             Ok(true)
         }
-        SshCommand::Workflow(words) => {
-            let (ctx, mode) = load_runtime()?;
+        ScriptCommand::Workflow(words) => {
+            let (ctx, mode) = load_runtime(local)?;
             match ctx.parse_words(&words) {
-                Ok(Some(action)) => execute_action(action, &mode, false).map_err(Into::into),
+                Ok(Some(action)) => {
+                    execute_action(action, &mode, profile_home, false).map_err(Into::into)
+                }
                 Ok(None) => Ok(false),
                 Err(command::Error::Clap(err)) => {
                     // clap may echo an offending token, including an inline payload.
@@ -139,13 +165,13 @@ fn run_ssh_command(raw_cmd: &str) -> Result<bool, Box<dyn Error>> {
     }
 }
 
-fn run_stdin_secret_set(name: &str) -> Result<(), String> {
+fn run_stdin_secret_set(name: &str, profile_home: Option<&Path>) -> Result<(), String> {
     if io::stdin().is_terminal() {
         return Err(
             "non-interactive 'secrets set <name>' requires piping secret bytes on stdin".into(),
         );
     }
-    let store = secret_store()?;
+    let store = secret_store(profile_home)?;
     let mut buf = Vec::new();
     io::stdin()
         .take((MAX_SECRET_BYTES + 1) as u64)
@@ -158,7 +184,10 @@ fn run_stdin_secret_set(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn load_runtime() -> Result<(Arc<Context>, Mode), String> {
+fn load_runtime(local: Option<&LocalProfile>) -> Result<(Arc<Context>, Mode), String> {
+    if let Some(local) = local {
+        return Ok(local.runtime());
+    }
     let etc_path = Path::new(DEFAULT_ETC_DIR);
     if etc_path.exists() || is_ssh_session() {
         let user = os::user_by_uid(os::current_euid()).map_err(|e| e.detail())?;
@@ -218,8 +247,8 @@ fn confirm_prompt(question: &str) -> io::Result<bool> {
     Ok(trimmed.eq_ignore_ascii_case("y") || trimmed.eq_ignore_ascii_case("yes"))
 }
 
-fn handle_secret_action(action: SecretAction) -> Result<(), String> {
-    let store = secret_store()?;
+fn handle_secret_action(action: SecretAction, profile_home: Option<&Path>) -> Result<(), String> {
+    let store = secret_store(profile_home)?;
     match action {
         SecretAction::List => {
             let entries = store.list().map_err(|e| e.detail())?;
@@ -277,11 +306,16 @@ fn handle_secret_action(action: SecretAction) -> Result<(), String> {
     }
 }
 
-fn execute_action(action: Action, mode: &Mode, interactive: bool) -> Result<bool, String> {
+fn execute_action(
+    action: Action,
+    mode: &Mode,
+    profile_home: Option<&Path>,
+    interactive: bool,
+) -> Result<bool, String> {
     match action {
         Action::Exit => Ok(true),
         Action::Prompt(_) => Err("unresolved interactive prompt".into()),
-        Action::Secrets(sec) => handle_secret_action(sec).map(|()| true),
+        Action::Secrets(sec) => handle_secret_action(sec, profile_home).map(|()| true),
         Action::Workers => {
             let resp = mode.send(&Request::Workers)?;
             Ok(client::print_response(resp, mode.is_mock()))
@@ -300,7 +334,12 @@ fn execute_action(action: Action, mode: &Mode, interactive: bool) -> Result<bool
             let input = match input {
                 RunInput::Json(raw) if raw == "-" => {
                     if interactive || io::stdin().is_terminal() {
-                        return Err("--input-json - reads piped stdin; use non-interactive SSH without a PTY".into());
+                        let method = if profile_home.is_some() {
+                            "a non-interactive local command"
+                        } else {
+                            "non-interactive SSH without a PTY"
+                        };
+                        return Err(format!("--input-json - reads piped stdin; use {method}"));
                     }
                     let mut raw = String::new();
                     io::stdin()
@@ -551,11 +590,17 @@ fn resolve_prompt_host(is_mock: bool) -> Host {
     }
 }
 
-fn run_interactive() -> Result<(), Box<dyn Error>> {
+fn run_interactive(local: Option<&LocalProfile>) -> Result<(), Box<dyn Error>> {
     terminal::require_tty("boreal-shell")?;
-    let (ctx, mode) = load_runtime()?;
+    let (ctx, mode) = load_runtime(local)?;
+    let profile_home = local.map(LocalProfile::home);
 
-    if mode.is_mock() {
+    if local.is_some() {
+        println!(
+            "Boreal local shell ({}). Type help for commands.",
+            ctx.caller()
+        );
+    } else if mode.is_mock() {
         println!("Boreal shell preview: standalone mock-only mode (/etc/boreal not present).");
         println!("Type help for commands.");
     } else {
@@ -566,12 +611,22 @@ fn run_interactive() -> Result<(), Box<dyn Error>> {
     }
 
     let uid = os::current_euid();
-    let home = interactive_home(uid);
-    let home = home.as_deref().map_err(String::as_str);
+    let account_home;
+    let home = match profile_home {
+        Some(home) => Ok(home),
+        None => {
+            account_home = interactive_home(uid);
+            account_home.as_deref().map_err(String::as_str)
+        }
+    };
     Session {
         program: "boreal-shell",
         caller: ctx.caller(),
-        host: resolve_prompt_host(mode.is_mock()),
+        host: if local.is_some() {
+            Host::Local
+        } else {
+            resolve_prompt_host(mode.is_mock())
+        },
         home,
         history: Some(load_history(home, uid)),
     }
@@ -582,7 +637,9 @@ fn run_interactive() -> Result<(), Box<dyn Error>> {
             Ok(Some(Action::Exit)) => Ok(Submission::Exit),
             Ok(Some(action)) => complete_action(action, &ctx, &mode)
                 .and_then(|action| {
-                    action.map_or(Ok(true), |action| execute_action(action, &mode, true))
+                    action.map_or(Ok(true), |action| {
+                        execute_action(action, &mode, profile_home, true)
+                    })
                 })
                 .map(Submission::Continue)
                 .map_err(terminal::Error::Command),
@@ -594,9 +651,31 @@ fn run_interactive() -> Result<(), Box<dyn Error>> {
 }
 
 fn run() -> Result<bool, Box<dyn Error>> {
+    let mut args = env::args_os().skip(1);
+    // Check before Invocation's SSH_ORIGINAL_COMMAND handling so SSH cannot
+    // select local mode or cause a local invocation to fall through to SSH.
+    if args.next().is_some_and(|arg| arg == "--local") {
+        if is_ssh_session() {
+            return Err("--local is unavailable in SSH sessions".into());
+        }
+        let args: Vec<_> = args.collect();
+        let [home, catalog, socket, command @ ..] = args.as_slice() else {
+            return Err(LOCAL_USAGE.into());
+        };
+        let profile = LocalProfile::open(home, catalog, socket)?;
+        if command.is_empty() {
+            return run_interactive(Some(&profile)).map(|()| true);
+        }
+        let words = command
+            .iter()
+            .map(|arg| arg.to_str().map(str::to_owned))
+            .collect::<Option<Vec<_>>>()
+            .ok_or("local command arguments must be valid UTF-8")?;
+        return run_script_command(parse_script_command(words, true)?, Some(&profile));
+    }
     match Invocation::from_env()? {
-        Invocation::Interactive => run_interactive().map(|()| true),
-        Invocation::Command(command) => run_ssh_command(&command),
+        Invocation::Interactive => run_interactive(None).map(|()| true),
+        Invocation::Command(command) => run_script_command(parse_ssh_command(&command)?, None),
     }
 }
 
@@ -619,11 +698,11 @@ mod tests {
     fn test_ssh_command_filter_only_permits_allowlisted_commands() {
         assert_eq!(
             parse_ssh_command("secrets set api_token").unwrap(),
-            SshCommand::SetSecret("api_token".into())
+            ScriptCommand::SetSecret("api_token".into())
         );
         assert!(matches!(
             parse_ssh_command("run demo --id demo-0 --input-json -"),
-            Ok(SshCommand::Workflow(_))
+            Ok(ScriptCommand::Workflow(_))
         ));
         for rejected in [
             "",
@@ -631,6 +710,7 @@ mod tests {
             "id",
             "sftp-server",
             "scp -t /tmp/a",
+            "--local /profile /catalog /socket list",
             "workers",
             "secrets list",
             "secrets set api_token inline_secret",

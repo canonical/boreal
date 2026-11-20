@@ -118,6 +118,7 @@ impl Session<'_> {
 
         let deployment = match self.host {
             Host::Mock => UNKNOWN_DEPLOYMENT.to_owned(),
+            Host::Local => "local profile".to_owned(),
             Host::Live(_) => deployment_label(),
         };
         let mut prompt = Prompt::new(self.caller, self.host, &deployment, helix_state);

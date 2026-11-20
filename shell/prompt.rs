@@ -26,6 +26,7 @@ const MULTILINE_INDICATOR: &str = "\x1b[90m∙\x1b[0m ";
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Host {
     Live(String),
+    Local,
     Mock,
 }
 
@@ -94,6 +95,7 @@ impl Prompt {
         let clean_caller: String = caller.chars().filter(|c| !c.is_control()).collect();
         let host_label = match &host {
             Host::Live(name) => os::sanitize_hostname(name),
+            Host::Local => String::from("local"),
             Host::Mock => String::from("mock"),
         };
         let window_title = format!("Boreal {clean_caller}@{host_label}");
