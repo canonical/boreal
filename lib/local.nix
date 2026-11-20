@@ -9,6 +9,13 @@ let
   inherit (self.packages.${system}) boreal-broker boreal-shell;
   names = builtins.attrNames workers;
   validName = name: builtins.match "[a-z][a-z0-9_-]*" name != null;
+  validBin =
+    pkg:
+    validName pkg.outputName
+    && !(lib.elem pkg.outputName [
+      "out"
+      "schema"
+    ]);
   yaml = pkgs.formats.yaml { };
   schemaDirs = lib.unique (map (worker: toString worker.schema) (builtins.attrValues workers));
   schemas = yaml.generate "boreal-local-schemas.yaml" { directories = schemaDirs; };
@@ -63,11 +70,11 @@ assert lib.assertMsg (builtins.all (
   name: validName name && name != "vault" && !lib.hasSuffix "-vault" name
 ) names) "mkLocal: invalid worker name or reserved vault queue";
 assert lib.assertMsg (builtins.all
-  (worker: worker ? schema && validName worker.outputName && !(worker.borealVault or false))
+  (worker: worker ? schema && validBin worker && !(worker.borealVault or false))
   (builtins.attrValues workers)
 ) "mkLocal: workers must be executable buildRustWorker outputs with schemas";
 assert lib.assertMsg (
-  vault == null || ((vault.borealVault or false) && validName vault.outputName)
+  vault == null || ((vault.borealVault or false) && validBin vault)
 ) "mkLocal: vault must be an executable buildRustVault output";
 pkgs.writeShellApplication {
   name = "boreal-local";
