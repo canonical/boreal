@@ -169,7 +169,7 @@ launch() {
         private_dir "$home/.config/boreal/secrets"
         start_container "$name-vault" "container:$temporal" \
             --volume "$home/.config/boreal/secrets:/home/local/.config/boreal/secrets:ro,Z" \
-            "$image_ref" "$vault_bin" vault
+            "$image_ref" "$vault_bin"
     fi
     for i in "${!worker_names[@]}"; do
         worker=${worker_names[i]}
