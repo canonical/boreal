@@ -25,11 +25,16 @@
     in
     {
       devShells = forAllSystems (pkgs: {
-        default = boreal.lib.mkDevShell pkgs { };
+        default = boreal.lib.mkDevShell pkgs {
+          extraPackages = [ self.packages.${pkgs.stdenv.hostPlatform.system}.boreal-local ];
+        };
       });
 
       packages = forAllSystems (
         pkgs:
+        let
+          system = pkgs.stdenv.hostPlatform.system;
+        in
         {
           example-worker = boreal.lib.buildRustWorker pkgs {
             pname = "example-worker";
@@ -40,6 +45,9 @@
               "example"
               "schema"
             ];
+          };
+          boreal-local = boreal.lib.mkLocal pkgs {
+            workers.example = self.packages.${system}.example-worker.example;
           };
         }
         // nixpkgs.lib.optionalAttrs (pkgs.stdenv.hostPlatform.system == "x86_64-linux") {

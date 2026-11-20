@@ -40,6 +40,8 @@ in
       ++ modules;
     };
 
+  mkLocal = import ./local.nix { inherit self lib; };
+
   mkFleetCheck =
     { pkgs, hosts }:
     let
