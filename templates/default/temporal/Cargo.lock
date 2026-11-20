@@ -430,7 +430,6 @@ dependencies = [
  "temporalio-macros",
  "temporalio-sdk",
  "temporalio-workflow",
- "tokio",
  "validator",
 ]
 

@@ -82,7 +82,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
 With the `schema` feature, declare ordinary native workflow registrations once
-in the worker library:
+in `main.rs`:
 
 ```rust,ignore
 boreal_worker::declare_worker! {
@@ -96,9 +96,24 @@ boreal_worker::declare_worker! {
 }
 ```
 
-The worker binary uses the generated `worker_options(queue)`. The schema binary
-calls `boreal_worker::emit_schema(&[example_worker::schema()])`;
-`buildRustWorker` keeps the resulting `schema.yaml`, not the binary.
+Point both Cargo binaries at that file:
+
+```toml
+[[bin]]
+name = "example"
+path = "main.rs"
+
+[[bin]]
+name = "schema"
+path = "main.rs"
+```
+
+The macro generates `main` and dispatches using Cargo's compile-time binary
+name. `example` runs the worker; `schema` prints YAML without connecting to
+Temporal. `buildRustWorker` keeps the resulting `schema.yaml`, not the schema
+binary. Cargo may warn about the shared source file. In crates with custom
+entry points, pass `entrypoint = false,` before `package` to generate only
+`worker_options(queue)` and `schema()`.
 All three workflows register on the same queue. Only the two `export` entries
 are Boreal launch targets, and only their input types need `JsonSchema`.
 The `package` key matches the binary output, not the deployed worker name.

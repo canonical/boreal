@@ -4,9 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-
-[lib]
-path = "lib.rs"
+autobins = false
 
 [[bin]]
 name = "example"
@@ -14,7 +12,7 @@ path = "main.rs"
 
 [[bin]]
 name = "schema"
-path = "schema.rs"
+path = "main.rs"
 
 [dependencies]
 boreal-worker.workspace = true
@@ -26,4 +24,3 @@ temporalio-common.workspace = true
 temporalio-macros.workspace = true
 temporalio-sdk.workspace = true
 temporalio-workflow.workspace = true
-tokio.workspace = true

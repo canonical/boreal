@@ -24,12 +24,27 @@ pub use schemars;
 #[cfg(feature = "schema")]
 pub use validator;
 
-/// Defines `worker_options(queue)` and `schema()` from one workflow list.
+/// Defines `worker_options(queue)`, `schema()`, and the Cargo binary entry point.
 /// Only `export` entries are included in Boreal's launch catalog.
+/// Use `entrypoint = false` for declarations with a hand-written entry point.
 #[cfg(feature = "schema")]
 #[macro_export]
 macro_rules! declare_worker {
+    (entrypoint = false, $($declaration:tt)+) => {
+        $crate::declare_worker!(@definitions $($declaration)+);
+    };
+    (package = $package:literal, $($declaration:tt)+) => {
+        $crate::declare_worker!(@definitions package = $package, $($declaration)+);
+
+        #[allow(dead_code)] // A declaration can also live in a library module.
+        fn main() -> $crate::Result<()> {
+            $crate::run_entrypoint(
+                option_env!("CARGO_BIN_NAME"), $package, worker_options, schema,
+            )
+        }
+    };
     (
+        @definitions
         package = $package:literal,
         workflows = {
             $( $kind:ident $name:path $( : $workflow:ty => $description:literal )? ),+ $(,)?
@@ -74,6 +89,29 @@ pub type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
 pub const DEFAULT_SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
 pub const MAX_SECRET_BYTES: usize = 64 * 1024;
+
+#[cfg(feature = "schema")]
+#[doc(hidden)]
+pub fn run_entrypoint(
+    bin: Option<&str>,
+    package: &str,
+    options: impl FnOnce(String) -> Result<WorkerOptions>,
+    schema: impl FnOnce() -> WorkerSchema,
+) -> Result<()> {
+    match bin {
+        Some("schema") => Ok(emit_schema(&[schema()])?),
+        Some(bin) if bin == package => {
+            let worker = std::env::args()
+                .nth(1)
+                .ok_or_else(|| format!("usage: {package} <worker-name>"))?;
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?
+                .block_on(run_worker(&worker, options))
+        }
+        _ => Err(format!("expected Cargo binary '{package}' or 'schema', got {bin:?}").into()),
+    }
+}
 
 #[cfg(target_arch = "aarch64")]
 const O_NOFOLLOW: i32 = 0o100000;

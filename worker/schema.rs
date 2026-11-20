@@ -519,6 +519,21 @@ mod tests {
     }
 
     #[test]
+    fn test_entrypoint_rejects_an_unrecognized_binary() {
+        let err = crate::run_entrypoint(
+            Some("other"),
+            "example",
+            |_| panic!("must not configure a worker"),
+            || panic!("must not generate a schema"),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("expected Cargo binary 'example' or 'schema'")
+        );
+    }
+
+    #[test]
     fn test_render_schema_projects_flat_args_and_ignores_validator_bounds() {
         let yaml = render_schema(&[
             WorkerSchema::new::<DemoInput>("greet", "DemoWorkflow", "Run the greeting workflow"),
