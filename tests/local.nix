@@ -17,8 +17,23 @@ let
     src = ./vm-worker;
     cargoLock.lockFile = ./vm-worker/Cargo.lock;
   };
+  mkLocal =
+    secretDir:
+    self.lib.mkLocal pkgs {
+      workers = { inherit (worker) greet count; };
+      vault = {
+        package = vault.lab-vault;
+        inherit secretDir;
+      };
+    };
+  rejects = path: !(builtins.tryEval (mkLocal path).drvPath).success;
 in
-self.lib.mkLocal pkgs {
-  workers = { inherit (worker) greet count; };
-  vault = vault.lab-vault;
-}
+assert builtins.all rejects [
+  ""
+  "/fixtures/alice"
+  "../fixtures/alice"
+  "fixtures/../alice"
+  ./vm-worker
+  "${pkgs.hello}/fixtures"
+];
+mkLocal "./fixtures/alice"

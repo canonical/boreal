@@ -73,11 +73,14 @@ def smoke(first, rebuilt, root):
         "BOREAL_UPSTREAM_TEMPORAL_ADDR": "192.0.2.1:7233",
     }
 
-    def cli(binary, *args, data=None):
+    def cli(binary, *args, data=None, error=None):
         command = [binary, *args]
         result = subprocess.run(command, cwd=checkout, env=env, input=data,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=100)
-        assert result.returncode == 0, (command, result.stdout, result.stderr)
+        if error is not None:
+            assert result.returncode != 0 and error in result.stderr, result
+        else:
+            assert result.returncode == 0, (command, result.stdout, result.stderr)
         return result.stdout
 
     def vault_result(binary, workflow_id):
@@ -90,6 +93,26 @@ def smoke(first, rebuilt, root):
 
     ready = "\x1b[1;32m❯\x1b[0m ".encode()
     try:
+        secrets = pathlib.Path(os.fsdecode(cli(first, "secret-path").rstrip(b"\n")))
+        assert secrets.is_relative_to(state)
+        assert secrets.parts[-3:] == ("mounts", "fixtures", "alice")
+        assert not state.exists()
+        cli(first, "workers", error=b"expected a private, owned 0700 directory")
+
+        # A private directory outside the selected mount root must not be used by indirection.
+        outside = root / "outside"
+        outside.mkdir(mode=0o700)
+        (outside / "alice").mkdir(mode=0o700)
+        secrets.parent.parent.mkdir(mode=0o700)
+        secrets.parent.symlink_to(outside, target_is_directory=True)
+        cli(first, "workers", error=b"expected a private, owned 0700 directory")
+        secrets.parent.unlink()
+        secrets.parent.mkdir(mode=0o700)
+        secrets.mkdir(mode=0o750)
+        secrets.chmod(0o750)
+        cli(first, "workers", error=b"expected a private, owned 0700 directory")
+        secrets.chmod(0o700)
+
         interactive([first], checkout, env, [
             (b"", (b"Boreal local shell", ready)),
             (b"secrets set api_tok\r", (b"input hidden): ",)),
@@ -109,9 +132,20 @@ def smoke(first, rebuilt, root):
         assert selectors.splitlines()[-1] == b"run greet --id vault-first"
         assert b"Form-only" not in selectors and b"vault-check" not in selectors
         assert b"--input-json" not in selectors
-        secrets = home / ".config/boreal/secrets"
+        assert not (home / ".config/boreal/secrets").exists()
         assert secrets.stat().st_mode & 0o777 == 0o700
         assert (secrets / "api_tok").stat().st_mode & 0o777 == 0o600
+        cli(first, "secrets", "set", "stdin_only", data=b"other-fixture")
+        assert (secrets / "stdin_only").stat().st_mode & 0o777 == 0o600
+
+        moved = secrets.with_name("moved")
+        secrets.rename(moved)
+        secrets.mkdir(mode=0o700)
+        try:
+            cli(first, "workers", error=b"local runtime changed")
+        finally:
+            secrets.rmdir()
+            moved.rename(secrets)
 
         cli(first, "stop")
         # A rebuilt launcher in the same checkout must find the same state.
