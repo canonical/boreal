@@ -1,4 +1,30 @@
-# Remote worker ingress
+# Boreal broker
+
+## Standalone local mode
+
+```sh
+boreal-broker local <catalog-dir> <broker-socket> <state-dir>
+```
+
+Run this mode as the same non-root numeric UID as the shell, in a trusted pod
+with the Temporal dev server on `127.0.0.1:7233`. The server must already have
+the `local` namespace. The broker accepts only its own effective UID on the
+Unix socket and maps that UID to `local` without a passwd lookup. The private
+catalog must declare exactly one user, `local`; local workers use the usual
+`local-<worker>` task queues. Use `0700` for catalog directories and `0400`
+for `schemas.yaml`, `users/local/perms.yaml`, and the optional `version` file.
+
+The socket parent must belong to that UID and be private (`0700`). The broker
+never removes an existing path at the socket location: the launcher owns
+startup serialization and stale socket cleanup. Give local mode a separate
+state directory. It does not read production broker settings, expose an
+updater socket, or gate worker or vault traffic. Workers and the vault connect
+directly to Temporal. Prompt workflow counts use Temporal visibility instead
+of PostgreSQL.
+
+Running `boreal-broker` with no arguments still starts the production broker.
+
+## Remote worker ingress
 
 When `BOREAL_REMOTE_WORKERS_CONFIG` is unset, the broker does not listen for
 remote workers. When set, it names an absolute path to the deployment-managed
@@ -19,7 +45,7 @@ worker-gate policy still applies. Remote Nexus polling (including worker
 control queues), eager task delivery, and activity completion by ID are not
 supported. Use task-token completions for remote activities.
 
-## Updates and failures
+### Updates and failures
 
 Remote workers can poll while normal drain checks report active work. The first
 otherwise-quiescent check fences remote pickup and reports busy. The broker
