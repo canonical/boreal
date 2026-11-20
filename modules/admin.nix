@@ -20,6 +20,7 @@ let
           lib.optional workerCfg.placement.central "boreal-worker-${user}-${worker}.service"
         ) userCfg.workers
       )
+      ++ lib.optional (userCfg.vault != null) "boreal-worker-${user}-vault.service"
     ) borealCfg.users
   );
 

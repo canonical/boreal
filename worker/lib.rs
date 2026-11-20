@@ -1,12 +1,12 @@
+use std::{error::Error, future::Future, time::Duration};
+
+#[cfg(all(unix, feature = "read-secrets"))]
 use std::{
-    error::Error,
     ffi::CStr,
     fs::{self, File, OpenOptions},
-    future::Future,
     io::Read,
     os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
-    time::Duration,
 };
 
 pub use temporalio_client;
@@ -113,12 +113,12 @@ pub fn run_entrypoint(
     }
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(unix, feature = "read-secrets", target_arch = "aarch64"))]
 const O_NOFOLLOW: i32 = 0o100000;
-#[cfg(not(target_arch = "aarch64"))]
+#[cfg(all(unix, feature = "read-secrets", not(target_arch = "aarch64")))]
 const O_NOFOLLOW: i32 = 0o400000;
 
-#[cfg(unix)]
+#[cfg(all(unix, feature = "read-secrets"))]
 fn current_user_home() -> Result<(u32, PathBuf)> {
     #[repr(C)]
     struct Passwd {
@@ -170,6 +170,7 @@ fn current_user_home() -> Result<(u32, PathBuf)> {
     Ok((uid, PathBuf::from(home)))
 }
 
+#[cfg(all(unix, feature = "read-secrets"))]
 fn read_secret_from_home(home: &Path, owner_uid: u32, name: &str) -> Result<Vec<u8>> {
     let bytes = name.as_bytes();
     if bytes.is_empty()
@@ -214,16 +215,27 @@ fn read_secret_from_home(home: &Path, owner_uid: u32, name: &str) -> Result<Vec<
 
 /// Reads a user-managed secret from `~/.config/boreal/secrets/<name>` inside an activity.
 /// Never pass the returned bytes into workflow inputs, results, errors, or logs.
-#[cfg(unix)]
+#[cfg(all(unix, feature = "read-secrets"))]
 pub fn read_secret_bytes(name: &str) -> Result<Vec<u8>> {
     let (uid, home) = current_user_home()?;
     read_secret_from_home(&home, uid, name)
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, feature = "read-secrets"))]
 pub fn read_secret(name: &str) -> Result<String> {
     let bytes = read_secret_bytes(name)?;
     Ok(String::from_utf8(bytes)?)
+}
+
+/// Route an activity to this workflow namespace's central vault. Pass the
+/// namespace from the workflow context, not the environment or workflow input.
+pub fn vault_activity_options(
+    namespace: &str,
+    mut options: temporalio_sdk::ActivityOptions,
+) -> temporalio_sdk::ActivityOptions {
+    options.task_queue = Some(format!("{namespace}-vault"));
+    options.do_not_eagerly_execute = true;
+    options
 }
 
 /// Prefixes the configured worker name with the Temporal client namespace.
@@ -401,6 +413,7 @@ mod tests {
         assert_eq!(result, Err("worker error"));
     }
 
+    #[cfg(all(unix, feature = "read-secrets"))]
     #[test]
     fn test_read_secret_enforces_directory_and_file_modes() {
         use std::os::unix::fs::PermissionsExt;
@@ -425,5 +438,17 @@ mod tests {
         assert!(read_secret_from_home(&home, uid, "token").is_err());
 
         let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn test_vault_routing_uses_the_workflow_namespace() {
+        let options =
+            temporalio_sdk::ActivityOptions::start_to_close_timeout(Duration::from_secs(5));
+        assert_eq!(
+            vault_activity_options("alice", options)
+                .task_queue
+                .as_deref(),
+            Some("alice-vault")
+        );
     }
 }

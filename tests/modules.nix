@@ -133,6 +133,25 @@ let
   };
 
   configured = mkHost sampleLabModule;
+  vaultBin = self.lib.buildRustVault pkgs {
+    pname = "lab-vault";
+    src = ./vm-worker;
+    cargoLock.lockFile = ./vm-worker/Cargo.lock;
+  };
+  vaulted = mkHost {
+    imports = [ sampleLabModule ];
+    boreal.users.alice.vault = {
+      package = vaultBin.lab-vault;
+      grants.train = [ "verify-fixture-token" ];
+    };
+  };
+  invalidVault = mkHost {
+    imports = [ sampleLabModule ];
+    boreal.users.alice.vault = {
+      package = trainBin.train;
+      grants.train = [ "verify-fixture-token" ];
+    };
+  };
 
   remoteLab = {
     boreal = {
@@ -515,6 +534,16 @@ assert selfManifestHost.environment.etc."boreal/version".text == "1.2.3\n";
 assert versionEtc.user == "root" && versionEtc.group == "boreal" && versionEtc.mode == "0440";
 assert versionEtc.text == "0.1.0\n";
 assert import ./deployment-label.nix;
+assert !assertionFailed vaulted "Vault for alice";
+assert assertionFailed invalidVault "Vault for alice";
+assert vaulted.environment.etc."boreal/vaults.json".mode == "0400";
+assert vaulted.systemd.services.boreal-worker-alice-vault.serviceConfig.User == "alice";
+assert vaulted.systemd.services.boreal-worker-alice-train.serviceConfig.User != "alice";
+assert vaulted.systemd.services.boreal-worker-alice-train.serviceConfig.DynamicUser;
+assert vaulted.systemd.services.boreal-worker-alice-train.serviceConfig.ProtectHome;
+assert vaulted.systemd.services.boreal-worker-bob-eval.serviceConfig.User == "bob";
+assert builtins.elem "boreal-netns-worker-alice-vault.service"
+  vaulted.systemd.services.boreal-broker.requires;
 assert import ./fleet.nix { inherit lib; };
 assert fleetCheck.drvPath != "";
 assert !configured.environment.etc ? "boreal/remote-workers.json";

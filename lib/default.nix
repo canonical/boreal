@@ -151,123 +151,161 @@ in
       '';
     };
 
-  buildRustWorker =
-    pkgs:
-    {
-      pname,
-      src,
-      cargoLock,
-      version ? null,
-      ...
-    }@args:
-    let
-      cargoManifest =
-        let
-          manifestPath = src + "/Cargo.toml";
-        in
-        if builtins.pathExists manifestPath then
-          builtins.fromTOML (builtins.readFile manifestPath)
-        else
-          { };
-      resolvedVersion =
-        if version != null then
-          version
-        else
-          cargoManifest.workspace.package.version or cargoManifest.package.version or "0.1.0";
-      passthrough = builtins.removeAttrs args [
-        "pname"
-        "version"
-        "src"
-        "outputs"
-        "cargoBuildFlags"
-        "cargoTestFlags"
-        "nativeBuildInputs"
-        "postUnpack"
-        "postInstall"
-        "meta"
-      ];
-      outputs =
-        args.outputs or [
-          "out"
-          "schema"
+}
+// (
+  let
+    buildRust =
+      vault: pkgs:
+      {
+        pname,
+        src,
+        cargoLock,
+        version ? null,
+        ...
+      }@args:
+      let
+        cargoManifest =
+          let
+            manifestPath = src + "/Cargo.toml";
+          in
+          if builtins.pathExists manifestPath then
+            builtins.fromTOML (builtins.readFile manifestPath)
+          else
+            { };
+        resolvedVersion =
+          if version != null then
+            version
+          else
+            cargoManifest.workspace.package.version or cargoManifest.package.version or "0.1.0";
+        passthrough = builtins.removeAttrs args [
+          "pname"
+          "version"
+          "src"
+          "outputs"
+          "cargoTestFlags"
+          "nativeBuildInputs"
+          "preBuild"
+          "postUnpack"
+          "postInstall"
+          "meta"
+          "passthru"
         ];
-      binOutputs = builtins.filter (name: name != "out" && name != "schema") outputs;
-    in
-    assert lib.assertMsg (builtins.elem "out" outputs) "buildRustWorker: outputs must include out";
-    assert lib.assertMsg (builtins.elem "schema" outputs)
-      "buildRustWorker: outputs must include schema";
-    pkgs.rustPlatform.buildRustPackage (
-      passthrough
-      // {
-        inherit pname cargoLock;
-        version = resolvedVersion;
-        src = lib.cleanSourceWith {
-          inherit src;
-          filter =
-            path: type:
-            baseNameOf path != "target"
-            && baseNameOf path != ".boreal"
-            && baseNameOf path != "README.md"
-            && lib.cleanSourceFilter path type;
-        };
-        cargoBuildFlags =
-          args.cargoBuildFlags or [
+        outputs = args.outputs or ([ "out" ] ++ lib.optional (!vault) "schema" ++ lib.optional vault pname);
+        binOutputs = builtins.filter (name: name != "out" && name != "schema") outputs;
+        features = args.buildFeatures or [ ];
+      in
+      assert lib.assertMsg (
+        !(args ? cargoBuildFlags) && !(args ? buildAndTestSubdir)
+      ) "Boreal builds select exactly one Cargo package; use pname and buildFeatures";
+      assert lib.assertMsg (builtins.elem "out" outputs) "Boreal Rust builds must include out";
+      assert lib.assertMsg (
+        vault != builtins.elem "schema" outputs
+      ) "buildRustWorker: outputs must include schema";
+      assert lib.assertMsg (
+        !vault || builtins.length binOutputs == 1
+      ) "buildRustVault: exactly one executable output is required";
+      pkgs.rustPlatform.buildRustPackage (
+        passthrough
+        // {
+          inherit pname cargoLock;
+          version = resolvedVersion;
+          src = lib.cleanSourceWith {
+            inherit src;
+            filter =
+              path: type:
+              baseNameOf path != "target"
+              && baseNameOf path != ".boreal"
+              && baseNameOf path != "README.md"
+              && lib.cleanSourceFilter path type;
+          };
+          cargoBuildFlags = [
             "--package"
             pname
           ];
-        cargoTestFlags =
-          args.cargoTestFlags or [
-            "--package"
-            pname
-          ];
-        nativeBuildInputs = [
-          pkgs.pkg-config
-          pkgs.protobuf
-        ]
-        ++ (args.nativeBuildInputs or [ ]);
-        postUnpack = ''
-          mkdir -p "$NIX_BUILD_TOP/.boreal" "$sourceRoot/.boreal"
-          ln -sfn ${borealWorkerSrc} "$NIX_BUILD_TOP/.boreal/boreal-worker"
-          ln -sfn ${borealWorkerSrc} "$sourceRoot/.boreal/boreal-worker"
-        ''
-        + (args.postUnpack or "");
-        outputs = outputs;
-        # stdenv fixup expands ${!output}. Hyphenated names such as
-        # greet-schedule are valid Nix outputs but not bash identifiers.
-        dontFixup = true;
-        postInstall =
-          (args.postInstall or "")
-          + ''
-            if [[ ! -x $out/bin/schema ]]; then
-              echo "buildRustWorker: \$out/bin/schema was not installed" >&2
+          cargoTestFlags =
+            args.cargoTestFlags or [
+              "--package"
+              pname
+            ];
+          nativeBuildInputs = [
+            pkgs.pkg-config
+            pkgs.protobuf
+          ]
+          ++ (args.nativeBuildInputs or [ ]);
+          passthru = (args.passthru or { }) // {
+            borealVault = vault;
+          };
+          preBuild = (args.preBuild or "") + ''
+            boreal_features=$(cargo tree --locked --offline --color never --package ${lib.escapeShellArg pname} \
+              --target ${lib.escapeShellArg pkgs.stdenv.hostPlatform.rust.rustcTarget} \
+              --edges normal,build --prefix none --format '{p}|{f}' \
+              ${lib.optionalString (args.buildNoDefaultFeatures or false) "--no-default-features"} \
+              ${
+                lib.optionalString (features != [ ]) (
+                  lib.escapeShellArg ("--features=" + lib.concatStringsSep "," features)
+                )
+              }) || {
+              echo 'Boreal: unable to verify the selected Cargo feature graph' >&2
               exit 1
+            }
+            if grep -Eq '^boreal-worker v[^|]*\|([^,]*,)*read-secrets(,| |$)' <<< "$boreal_features"; then
+              boreal_secret_reader=true
+            else
+              boreal_secret_reader=false
             fi
-            schema_out="$(printenv schema)"
-            mkdir -p "$schema_out"
-            "$out/bin/schema" > "$schema_out/schema.yaml"
-            rm -f "$out/bin/schema"
-          ''
-          + lib.concatMapStrings (name: ''
-            if [[ ! -x "$out/bin/"${lib.escapeShellArg name} ]]; then
-              echo "buildRustWorker: \$out/bin/${name} was not installed" >&2
+            if [[ $boreal_secret_reader != ${if vault then "true" else "false"} ]]; then
+              echo 'Boreal: buildRustVault requires read-secrets; buildRustWorker forbids it' >&2
               exit 1
-            fi
-            dest="$(printenv ${lib.escapeShellArg name})"
-            mkdir -p "$dest/bin"
-            mv "$out/bin/"${lib.escapeShellArg name} "$dest/bin/"${lib.escapeShellArg name}
-          '') binOutputs
-          + ''
-            if command -v strip >/dev/null; then
-              for output in $outputs; do
-                prefix="$(printenv "$output")"
-                find "$prefix" -type f -executable -exec strip -S -p {} + || true
-              done
             fi
           '';
-        meta = {
-          mainProgram = pname;
+          postUnpack = ''
+            mkdir -p "$NIX_BUILD_TOP/.boreal" "$sourceRoot/.boreal"
+            ln -sfn ${borealWorkerSrc} "$NIX_BUILD_TOP/.boreal/boreal-worker"
+            ln -sfn ${borealWorkerSrc} "$sourceRoot/.boreal/boreal-worker"
+          ''
+          + (args.postUnpack or "");
+          outputs = outputs;
+          # stdenv fixup expands ${!output}. Hyphenated names such as
+          # greet-schedule are valid Nix outputs but not bash identifiers.
+          dontFixup = true;
+          postInstall =
+            (args.postInstall or "")
+            + lib.optionalString (!vault) ''
+              if [[ ! -x $out/bin/schema ]]; then
+                echo "buildRustWorker: \$out/bin/schema was not installed" >&2
+                exit 1
+              fi
+              schema_out="$(printenv schema)"
+              mkdir -p "$schema_out"
+              "$out/bin/schema" > "$schema_out/schema.yaml"
+              rm -f "$out/bin/schema"
+            ''
+            + lib.concatMapStrings (name: ''
+              if [[ ! -x "$out/bin/"${lib.escapeShellArg name} ]]; then
+                echo "buildRustWorker: \$out/bin/${name} was not installed" >&2
+                exit 1
+              fi
+              dest="$(printenv ${lib.escapeShellArg name})"
+              mkdir -p "$dest/bin"
+              mv "$out/bin/"${lib.escapeShellArg name} "$dest/bin/"${lib.escapeShellArg name}
+            '') binOutputs
+            + ''
+              if command -v strip >/dev/null; then
+                for output in $outputs; do
+                  prefix="$(printenv "$output")"
+                  find "$prefix" -type f -executable -exec strip -S -p {} + || true
+                done
+              fi
+            '';
+          meta = {
+            mainProgram = pname;
+          }
+          // (args.meta or { });
         }
-        // (args.meta or { });
-      }
-    );
-}
+      );
+  in
+  {
+    buildRustWorker = buildRust false;
+    buildRustVault = buildRust true;
+  }
+)

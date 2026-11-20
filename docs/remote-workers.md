@@ -53,8 +53,9 @@ The peripheral configures `boreal.remote.peripheral` with `address`,
 address, or an optional `serverName` on the peripheral. Credential options are
 absolute runtime paths, not Nix path literals or PEM contents. The peripheral
 uses systemd credentials to pass the files to the service. Provision only on
-machines you trust with task payloads. Application secrets are provisioned
-separately, in the peripheral runtime user's own home.
+machines you trust with task payloads. For operations using Alice's central
+secrets, use a [central activity vault](vault.md). The peripheral receives only
+the operation's non-secret result, never the secret value.
 
 Install the files before starting the services. Replacing a pin or private key
 at the same runtime path does not change the Nix configuration: restart the

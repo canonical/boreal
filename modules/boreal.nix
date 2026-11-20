@@ -119,6 +119,21 @@ let
     ) cfg.users
   );
   unitKeys = map (entry: entry.unitKey) workerEntries;
+  workerIdentity =
+    entry: kind:
+    "boreal-runtime-${
+      builtins.substring 0 16 (builtins.hashString "sha256" "${kind}:${entry.unitKey}")
+    }";
+  workerAccount =
+    entry: kind:
+    if cfg.users.${entry.user}.vault == null then
+      { User = entry.user; }
+    else
+      {
+        User = workerIdentity entry kind;
+        DynamicUser = true;
+        ProtectHome = true;
+      };
 
   referencedUsers = lib.concatLists (
     lib.mapAttrsToList (
@@ -250,6 +265,25 @@ in
               };
             };
 
+            vault = mkOption {
+              default = null;
+              description = "Optional central-only activity worker and the operations each user-owned worker may invoke.";
+              type = types.nullOr (
+                types.submodule {
+                  options = {
+                    package = mkOption {
+                      type = types.package;
+                      description = "Executable output of boreal.lib.buildRustVault.";
+                    };
+                    grants = mkOption {
+                      type = types.attrsOf (types.listOf types.str);
+                      description = "Worker name to exact Temporal activity type allowlist.";
+                    };
+                  };
+                }
+              );
+            };
+
             workers = mkOption {
               default = { };
               description = "Boreal Temporal workers owned by this user.";
@@ -324,7 +358,9 @@ in
           message = "boreal.temporalAddress must not be empty.";
         }
         {
-          assertion = lib.all (entry: schemaOf entry.cfg.package != null) workerEntries;
+          assertion = lib.all (
+            entry: schemaOf entry.cfg.package != null && !(entry.cfg.package.borealVault or false)
+          ) workerEntries;
           message = "Every Boreal worker package must have a schema output containing schema.yaml.";
         }
         {
@@ -333,12 +369,17 @@ in
         }
         {
           assertion = lib.all (
-            entry: !entry.cfg.schedule.enable || entry.cfg.schedule.package != null
+            entry:
+            !entry.cfg.schedule.enable
+            || (entry.cfg.schedule.package != null && !(entry.cfg.schedule.package.borealVault or false))
           ) workerEntries;
           message = "boreal.users.<user>.workers.<name>.schedule.package is required when schedule.enable is true.";
         }
         {
-          assertion = lib.all (user: !(builtins.elem user reservedUsers) && validName user) userNames;
+          assertion = lib.all (
+            user:
+            !(builtins.elem user reservedUsers) && !(lib.hasPrefix "boreal-runtime-" user) && validName user
+          ) userNames;
           message = "Every boreal.users account name must match ^[a-z][a-z0-9_-]*$ and must not be root or a reserved service account.";
         }
         {
@@ -348,6 +389,23 @@ in
         {
           assertion = builtins.length unitKeys == builtins.length (lib.unique unitKeys);
           message = "Boreal user-worker identifiers (<user>-<worker>) must be unique across boreal.users.";
+        }
+        {
+          assertion = lib.all (key: !(lib.hasSuffix "-vault" key)) unitKeys;
+          message = "Worker task queues ending in -vault are reserved for central vaults.";
+        }
+        {
+          assertion =
+            cfg.role != "central"
+            || lib.all (
+              entry:
+              cfg.users.${entry.user}.vault == null
+              || lib.all (kind: !(builtins.hasAttr (workerIdentity entry kind) config.users.users)) [
+                "worker"
+                "schedule"
+              ]
+            ) workerEntries;
+          message = "Vault-isolated worker or scheduler identities must not alias static system accounts.";
         }
         {
           assertion = lib.all (target: builtins.hasAttr target cfg.users) referencedUsers;
@@ -457,7 +515,6 @@ in
                 TEMPORAL_NAMESPACE = entry.user;
               };
               serviceConfig = {
-                User = entry.user;
                 NetworkNamespacePath = "/run/netns/boreal-worker-${entry.unitKey}";
                 ExecStart = "${binOf entry.cfg.package} ${entry.worker}";
                 Restart = "on-failure";
@@ -467,7 +524,8 @@ in
                 PrivateTmp = true;
                 ProtectSystem = "strict";
                 ProtectProc = "invisible";
-              };
+              }
+              // workerAccount entry "worker";
             };
           }) (lib.filter (entry: entry.cfg.placement.central) workerEntries)
         )
@@ -504,7 +562,6 @@ in
                     serviceConfig = {
                       Type = "oneshot";
                       RemainAfterExit = true;
-                      User = entry.user;
                       NetworkNamespacePath = "/run/netns/boreal-worker-${entry.unitKey}";
                       ExecStart = "${binOf pkg} ${entry.worker}";
                       Restart = "on-failure";
@@ -514,7 +571,8 @@ in
                       PrivateTmp = true;
                       ProtectSystem = "strict";
                       ProtectProc = "invisible";
-                    };
+                    }
+                    // workerAccount entry "schedule";
                   };
                 }
               ]

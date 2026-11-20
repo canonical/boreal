@@ -5,6 +5,7 @@ mod pg;
 mod proxy;
 mod remote;
 mod temporal;
+mod vault;
 
 use std::env;
 use std::path::{Path, PathBuf};
@@ -34,6 +35,7 @@ struct Config {
     worker_netns_dir: Option<PathBuf>,
     worker_listen_addr: String,
     remote_workers_config: Option<PathBuf>,
+    vault_config: Option<PathBuf>,
     upstream_temporal_addr: String,
     pg_socket: PathBuf,
     pg_user: String,
@@ -61,6 +63,7 @@ impl Config {
             worker_listen_addr: env::var("BOREAL_WORKER_LISTEN_ADDR")
                 .unwrap_or_else(|_| "127.0.0.1:7233".into()),
             remote_workers_config: env::var_os("BOREAL_REMOTE_WORKERS_CONFIG").map(PathBuf::from),
+            vault_config: env::var_os("BOREAL_VAULT_CONFIG").map(PathBuf::from),
             upstream_temporal_addr: env::var("BOREAL_UPSTREAM_TEMPORAL_ADDR")
                 .unwrap_or_else(|_| "127.0.0.1:7233".into()),
             pg_socket: env::var("BOREAL_PG_SOCKET")
@@ -180,7 +183,11 @@ struct BoundSockets {
     remote_listener: Option<(std::net::TcpListener, remote::RemoteIngress)>,
 }
 
-fn setup_and_bind(cfg: &Config, catalog: &Catalog) -> Result<BoundSockets, String> {
+fn setup_and_bind(
+    cfg: &Config,
+    catalog: &Catalog,
+    vault: &vault::Policy,
+) -> Result<BoundSockets, String> {
     let (broker_uid, broker_gid) = if let Some(user_name) = &cfg.run_user {
         let u = os::user_by_name(user_name).map_err(|e| e.detail())?;
         let gid = os::group_gid_by_name(&cfg.socket_group).map_err(|e| e.detail())?;
@@ -212,6 +219,9 @@ fn setup_and_bind(cfg: &Config, catalog: &Catalog) -> Result<BoundSockets, Strin
     let updater_listener = netns::bind_unix_socket(&cfg.updater_socket, 0, 0, 0o600)?;
 
     let mut worker_listeners = Vec::new();
+    if cfg.worker_netns_dir.is_none() && vault.owners().next().is_some() {
+        return Err("vaults require isolated worker network namespaces".into());
+    }
     if let Some(netns_dir) = &cfg.worker_netns_dir {
         for (owner, policy) in catalog.users() {
             for worker_name in policy.workers().keys() {
@@ -226,6 +236,18 @@ fn setup_and_bind(cfg: &Config, catalog: &Catalog) -> Result<BoundSockets, Strin
                     },
                 ));
             }
+        }
+        for owner in vault.owners() {
+            let queue = format!("{owner}-vault");
+            let ns_path = netns_dir.join(format!("boreal-worker-{queue}"));
+            let tcp = netns::bind_tcp_in_netns(&ns_path, &cfg.worker_listen_addr)?;
+            worker_listeners.push((
+                tcp,
+                WorkerBinding {
+                    owner: owner.to_owned(),
+                    task_queue: queue,
+                },
+            ));
         }
     }
 
@@ -288,21 +310,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let catalog = Catalog::load_from_dir(&cfg.etc_dir, expected_owner)
         .map_err(|e| format!("load catalog {}: {}", cfg.etc_dir.display(), e.detail()))?;
+    let vault = Arc::new(match cfg.vault_config.as_deref() {
+        Some(path) => vault::Policy::load(path, &catalog)?,
+        None => vault::Policy::default(),
+    });
 
     // Bind sockets, enter boreal-internal netns, and drop privileges while single-threaded
     // before spawning any Tokio runtime threads.
-    let bound = setup_and_bind(&cfg, &catalog)?;
+    let bound = setup_and_bind(&cfg, &catalog, &vault)?;
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    runtime.block_on(run_broker(cfg, catalog, bound))
+    runtime.block_on(run_broker(cfg, catalog, bound, vault))
 }
 
 async fn run_broker(
     cfg: Config,
     catalog: Catalog,
     bound: BoundSockets,
+    vault: Arc<vault::Policy>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let coordinator = Arc::new(
         Coordinator::open(&cfg.state_dir, bound.remote_listener.is_some())
@@ -332,6 +359,7 @@ async fn run_broker(
             cfg.upstream_temporal_addr.clone(),
             Arc::clone(&coordinator),
             Arc::clone(&catalog),
+            Arc::clone(&vault),
         ));
     }
 
@@ -343,6 +371,7 @@ async fn run_broker(
             cfg.upstream_temporal_addr.clone(),
             Arc::clone(&coordinator),
             Arc::clone(&catalog),
+            Arc::clone(&vault),
         ));
     }
 

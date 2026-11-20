@@ -16,6 +16,11 @@ let
       "schema"
     ];
   };
+  labVault = self.lib.buildRustVault pkgs {
+    pname = "lab-vault";
+    src = ./vm-worker;
+    cargoLock.lockFile = ./vm-worker/Cargo.lock;
+  };
 
   temporalCli = "${pkgs.temporal-cli}/bin/temporal";
 in
@@ -73,6 +78,10 @@ pkgs.testers.runNixOSTest {
         };
         users = {
           alice = {
+            vault = {
+              package = labVault.lab-vault;
+              grants.greet = [ "verify-fixture-token" ];
+            };
             permissions = {
               read = true;
               write = false;
@@ -121,6 +130,7 @@ pkgs.testers.runNixOSTest {
         "boreal-temporal-namespaces.service",
         "boreal-broker.service",
         "boreal-worker-alice-greet.service",
+        "boreal-worker-alice-vault.service",
         "boreal-schedule-alice-greet.service",
         "boreal-worker-alice-count.service",
         "boreal-worker-bob-greet.service",

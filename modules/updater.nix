@@ -26,6 +26,7 @@ let
           ++ lib.optional workerCfg.schedule.enable "boreal-schedule-${user}-${worker}.service"
         ) userCfg.workers
       )
+      ++ lib.optional (userCfg.vault != null) "boreal-worker-${user}-vault.service"
     ) borealCfg.users
   );
 

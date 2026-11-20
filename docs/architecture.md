@@ -99,8 +99,9 @@ permission-filtered completions. Non-interactive SSH accepts `run`, `list`,
 
 Secrets live in `~/.config/boreal/secrets/<name>` (`0700` directory, `0600`
 regular files, `O_NOFOLLOW`) and are written via non-echo TTY prompt or stdin
-redirection (`ssh <user>@<host> "secrets set <name>" < file`). Worker activities
-read secrets locally via `boreal_worker::read_secret` / `read_secret_bytes`.
+redirection (`ssh <user>@<host> "secrets set <name>" < file`). For an opted-in
+user, only their [central vault](vault.md) uses the `read-secrets` feature to read
+values locally. Ordinary central workers for that user run with separate UIDs.
 Workflow inputs, results, errors, heartbeats, and logs must never contain secret
 values.
 

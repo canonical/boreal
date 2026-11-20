@@ -1,0 +1,19 @@
+[package]
+name = "lab-vault"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+license = "MIT"
+
+[[bin]]
+name = "lab-vault"
+path = "main.rs"
+
+[dependencies]
+boreal-worker = { path = "../../.boreal/boreal-worker", features = ["read-secrets"] }
+futures = "0.3"
+lab-worker = { path = ".." }
+temporalio-common = "~1.2.0"
+temporalio-macros = "~1.2.0"
+temporalio-sdk = "~1.2.0"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

@@ -399,14 +399,14 @@ def test_ssh_shell_permissions_secrets_and_recovery() -> None:
         alice.send(b"secrets list\r")
         alice.wait_for(b"api_tok (19 bytes, mode 0600)", b"tty_tok (14 bytes, mode 0600)")
 
-        # Activity reads ~/.config/boreal/secrets/api_tok without leaking content into Temporal!
-        alice.send(run_line("greet", "sec-wf-1", "secret:api_tok", 1))
+        # The central vault verifies the fixture token without returning it.
+        alice.send(run_line("greet", "sec-wf-1", "vault-check", 1))
         alice.wait_for(b"started DemoWorkflow 'sec-wf-1' on alice/greet")
         for _ in range(30):
             time.sleep(0.4)
             alice.send(b"result sec-wf-1\r")
             res = alice.wait_for(b"run ID:")
-            if b"Secret length verified: 19" in res:
+            if b"Central vault verified the token." in res:
                 assert b"nineteen-byte-token" not in res
                 break
         else:

@@ -158,12 +158,14 @@ pub async fn serve_worker_listener(
     upstream_addr: String,
     coordinator: Arc<Coordinator>,
     catalog: Arc<Catalog>,
+    vault: Arc<crate::vault::Policy>,
 ) {
     let gate = Arc::new(WorkerGate {
         binding: Arc::new(binding),
         upstream: Arc::new(UpstreamPool::new(upstream_addr)),
         coordinator,
         catalog,
+        vault,
         remote: false,
     });
     loop {
@@ -181,6 +183,7 @@ pub async fn serve_remote_listener(
     upstream_addr: String,
     coordinator: Arc<Coordinator>,
     catalog: Arc<Catalog>,
+    vault: Arc<crate::vault::Policy>,
 ) {
     let upstream = Arc::new(UpstreamPool::new(upstream_addr));
     let handshakes = Arc::new(Semaphore::new(64));
@@ -197,6 +200,7 @@ pub async fn serve_remote_listener(
         let upstream = Arc::clone(&upstream);
         let coordinator = Arc::clone(&coordinator);
         let catalog = Arc::clone(&catalog);
+        let vault = Arc::clone(&vault);
         tokio::spawn(async move {
             let accepted = ingress.accept(stream).await;
             drop(handshake);
@@ -208,6 +212,7 @@ pub async fn serve_remote_listener(
                         upstream,
                         coordinator,
                         catalog,
+                        vault,
                         remote: true,
                     }),
                 )
@@ -222,6 +227,7 @@ struct WorkerGate {
     upstream: Arc<UpstreamPool>,
     coordinator: Arc<Coordinator>,
     catalog: Arc<Catalog>,
+    vault: Arc<crate::vault::Policy>,
     remote: bool,
 }
 
@@ -295,6 +301,7 @@ struct GatePermit {
     rewritten: Option<Vec<u8>>,
     admit: Option<(String, String)>,
     finish_remote: Option<(RemoteTaskKind, Vec<u8>)>,
+    finish_local: Option<Vec<u8>>,
 }
 
 fn permit(track: PostTrack) -> GatePermit {
@@ -303,6 +310,7 @@ fn permit(track: PostTrack) -> GatePermit {
         rewritten: None,
         admit: None,
         finish_remote: None,
+        finish_local: None,
     }
 }
 
@@ -327,10 +335,46 @@ async fn authorize_worker_request(
         catalog,
         upstream,
         remote,
+        vault,
     } = gate;
     let remote = *remote;
+    let vault_worker = vault.contains(&binding.task_queue);
+    let vault_enabled = vault.has_vault(&binding.owner);
+    let scope_sticky = remote || vault_enabled;
     let deny = |msg: &str| (7u8, msg.to_owned());
     let bad = |msg: &str| (3u8, msg.to_owned());
+
+    if crate::vault::reserved_queue(&binding.task_queue) && !vault_worker {
+        return Err(deny("the worker is bound to an unconfigured vault queue"));
+    }
+
+    if vault_worker
+        && (remote
+            || !matches!(
+                method,
+                "GetSystemInfo"
+                    | "DescribeNamespace"
+                    | "PollActivityTaskQueue"
+                    | "RecordActivityTaskHeartbeat"
+                    | "RespondActivityTaskCompleted"
+                    | "RespondActivityTaskFailed"
+                    | "RespondActivityTaskCanceled"
+                    | "RecordWorkerHeartbeat"
+                    | "ShutdownWorker"
+            ))
+    {
+        return Err(deny(
+            "RPC is not permitted on the central activity-only vault gate",
+        ));
+    }
+
+    let has_lease = |token: &[u8], kind| {
+        if remote {
+            coordinator.has_remote_lease(token, &binding.owner, &binding.task_queue, kind)
+        } else {
+            coordinator.has_local_lease(token, &binding.owner, &binding.task_queue, kind)
+        }
+    };
 
     let check_ns = |ns: &str| -> Result<(), (u8, String)> {
         header_matches(header_ns, ns)?;
@@ -357,6 +401,13 @@ async fn authorize_worker_request(
             if terminal {
                 permit.finish_remote = Some((kind, token));
             }
+        } else if vault_worker {
+            if !has_lease(&token, kind) {
+                return Err(deny("vault activity token was not delivered by this gate"));
+            }
+            if terminal {
+                permit.finish_local = Some(token);
+            }
         } else {
             coordinator.complete_lease(&token);
         }
@@ -379,6 +430,20 @@ async fn authorize_worker_request(
         ));
     }
 
+    if vault_enabled
+        && matches!(
+            method,
+            "RecordActivityTaskHeartbeatById"
+                | "RespondActivityTaskCompletedById"
+                | "RespondActivityTaskFailedById"
+                | "RespondActivityTaskCanceledById"
+        )
+    {
+        return Err(deny(
+            "vault-enabled namespaces require activity task tokens",
+        ));
+    }
+
     match method {
         "GetSystemInfo" => Ok(permit(PostTrack::None)),
         "DescribeNamespace" => {
@@ -395,17 +460,19 @@ async fn authorize_worker_request(
                 return Err(bad("missing task_queue"));
             };
             if tq.kind() == TaskQueueKind::Sticky {
-                if (remote || !tq.normal_name.is_empty()) && tq.normal_name != binding.task_queue {
+                if (scope_sticky || !tq.normal_name.is_empty())
+                    && tq.normal_name != binding.task_queue
+                {
                     return Err(deny("sticky poll normal_name mismatch"));
                 }
-                if remote {
+                if scope_sticky {
                     tq.name = remote_sticky_name(binding, &tq.name);
                 }
             } else if tq.name != binding.task_queue {
                 return Err(deny("worker task_queue access denied"));
             }
             let mut permit = permit(PostTrack::PollWorkflow);
-            if remote {
+            if scope_sticky {
                 req.worker_control_task_queue.clear();
                 permit.rewritten = Some(req.encode_to_vec());
             }
@@ -418,11 +485,13 @@ async fn authorize_worker_request(
             let Some(tq) = req.task_queue.as_ref() else {
                 return Err(bad("missing task_queue"));
             };
-            if tq.name != binding.task_queue || (remote && tq.kind() == TaskQueueKind::Sticky) {
+            if tq.name != binding.task_queue
+                || ((remote || vault_worker) && tq.kind() == TaskQueueKind::Sticky)
+            {
                 return Err(deny("worker activity task_queue access denied"));
             }
             let mut permit = permit(PostTrack::PollActivity);
-            if remote {
+            if remote || vault_worker {
                 req.worker_control_task_queue.clear();
                 permit.rewritten = Some(req.encode_to_vec());
             }
@@ -448,6 +517,13 @@ async fn authorize_worker_request(
             for cmd in &mut req.commands {
                 match &mut cmd.attributes {
                     Some(CommandAttrs::StartChildWorkflowExecutionCommandAttributes(attr)) => {
+                        if attr
+                            .task_queue
+                            .as_ref()
+                            .is_some_and(|q| crate::vault::reserved_queue(&q.name))
+                        {
+                            return Err(deny("vault queues do not run workflows"));
+                        }
                         if !attr.namespace.is_empty() && attr.namespace != binding.owner {
                             return Err(deny("cross-namespace child workflow denied"));
                         }
@@ -472,8 +548,41 @@ async fn authorize_worker_request(
                     ) if !attr.namespace.is_empty() && attr.namespace != binding.owner => {
                         return Err(deny("cross-namespace external cancel denied"));
                     }
-                    Some(CommandAttrs::ScheduleActivityTaskCommandAttributes(attr)) if remote => {
-                        attr.request_eager_execution = false;
+                    Some(CommandAttrs::ContinueAsNewWorkflowExecutionCommandAttributes(attr))
+                        if attr
+                            .task_queue
+                            .as_ref()
+                            .is_some_and(|q| crate::vault::reserved_queue(&q.name)) =>
+                    {
+                        return Err(deny("vault queues do not run workflows"));
+                    }
+                    Some(CommandAttrs::ScheduleActivityTaskCommandAttributes(attr)) => {
+                        if let Some(queue) = attr
+                            .task_queue
+                            .as_ref()
+                            .filter(|q| crate::vault::reserved_queue(&q.name))
+                        {
+                            let operation = attr
+                                .activity_type
+                                .as_ref()
+                                .map_or("", |ty| ty.name.as_str());
+                            if queue.kind() == TaskQueueKind::Sticky
+                                || !vault.allows(
+                                    &binding.owner,
+                                    &binding.task_queue,
+                                    &queue.name,
+                                    operation,
+                                )
+                                || !has_lease(&req.task_token, RemoteTaskKind::Workflow)
+                            {
+                                return Err(deny(
+                                    "vault activity is not permitted for this workflow task",
+                                ));
+                            }
+                            attr.request_eager_execution = false;
+                        } else if remote {
+                            attr.request_eager_execution = false;
+                        }
                     }
                     _ => {}
                 }
@@ -487,7 +596,7 @@ async fn authorize_worker_request(
             } else {
                 permit(PostTrack::None)
             };
-            if remote {
+            if scope_sticky {
                 if let Some(tq) = req
                     .sticky_attributes
                     .as_mut()
@@ -508,7 +617,9 @@ async fn authorize_worker_request(
                     tracked.map_err(|e| (13, e.detail()))?;
                 }
             }
-            if !remote {
+            if !remote && scope_sticky && !req.intermediate_page {
+                permit.finish_local = Some(req.task_token);
+            } else if !remote && !scope_sticky {
                 coordinator.complete_lease(&req.task_token);
             }
             Ok(permit)
@@ -533,6 +644,9 @@ async fn authorize_worker_request(
             let req = RecordActivityTaskHeartbeatRequest::decode(payload)
                 .map_err(|_| bad("invalid RecordActivityTaskHeartbeatRequest"))?;
             check_ns(&req.namespace)?;
+            if vault_worker && !has_lease(&req.task_token, RemoteTaskKind::Activity) {
+                return Err(deny("vault activity token was not delivered by this gate"));
+            }
             Ok(permit(PostTrack::None))
         }
         "RecordActivityTaskHeartbeatById" => {
@@ -626,7 +740,7 @@ async fn authorize_worker_request(
             header_matches(header_ns, &req.namespace)?;
             authorize_start(catalog, &binding.owner, &req)?;
             let mut permit = permit(PostTrack::StartWorkflow);
-            if remote {
+            if remote || vault.has_vault(&req.namespace) {
                 req.request_eager_execution = false;
                 permit.rewritten = Some(req.encode_to_vec());
             }
@@ -669,7 +783,7 @@ async fn authorize_worker_request(
                 return Err(deny("worker shutdown task_queue mismatch"));
             }
             let mut permit = permit(PostTrack::None);
-            if remote {
+            if scope_sticky {
                 req.task_queue.clone_from(&binding.task_queue);
                 if !req.sticky_task_queue.is_empty() {
                     req.sticky_task_queue = remote_sticky_name(binding, &req.sticky_task_queue);
@@ -904,6 +1018,7 @@ fn authorize_create_schedule(
         rewritten: Some(req.encode_to_vec()),
         admit,
         finish_remote: None,
+        finish_local: None,
     })
 }
 
@@ -1043,6 +1158,7 @@ async fn authorize_update_schedule(
         rewritten: Some(req.encode_to_vec()),
         admit,
         finish_remote: None,
+        finish_local: None,
     })
 }
 
@@ -1081,6 +1197,7 @@ async fn authorize_patch_schedule(
         rewritten: None,
         admit,
         finish_remote: None,
+        finish_local: None,
     })
 }
 
@@ -1461,6 +1578,7 @@ async fn forward_worker_rpc(
         coordinator,
         binding,
         remote,
+        vault,
         ..
     } = gate;
     let remote = *remote;
@@ -1503,7 +1621,8 @@ async fn forward_worker_rpc(
         .uri()
         .path()
         .ends_with("/RespondWorkflowTaskCompleted");
-    let hide_worker_commands = remote && out_req.uri().path().ends_with("/DescribeNamespace");
+    let hide_worker_commands = (remote || vault.has_vault(&binding.owner))
+        && out_req.uri().path().ends_with("/DescribeNamespace");
     let upstream_call = async {
         let (parts, body) = upstream.send(out_req).await?.into_parts();
         let buffered = Limited::new(body, MAX_GRPC_BODY_BYTES)
@@ -1532,6 +1651,11 @@ async fn forward_worker_rpc(
     };
     let status = grpc_status_error(&resp_parts.headers, trailers.as_ref());
     let remote_success = resp_parts.status == StatusCode::OK && status.0 == 0;
+    if (remote_success || status.0 == 5)
+        && let Some(token) = permit.finish_local.as_deref()
+    {
+        coordinator.complete_lease(token);
+    }
 
     if permit.track == PostTrack::StartWorkflow {
         let success = if remote {
@@ -1607,7 +1731,14 @@ async fn forward_worker_rpc(
                         return grpc_error(13, &e.detail());
                     }
                 } else {
-                    coordinator.record_lease(token, &binding.owner, &workflow_id, &run_id);
+                    coordinator.record_lease(
+                        token,
+                        &binding.owner,
+                        &binding.task_queue,
+                        kind,
+                        &workflow_id,
+                        &run_id,
+                    );
                 }
             }
         } else if remote {
@@ -1826,6 +1957,7 @@ mod tests {
             upstream: Arc::new(UpstreamPool::new(upstream_addr)),
             coordinator: Arc::clone(&coordinator),
             catalog: Arc::new(Catalog::from_yaml("", &Default::default()).unwrap()),
+            vault: Arc::default(),
             remote: true,
         });
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2027,6 +2159,7 @@ mod tests {
             upstream_addr,
             Arc::clone(&coord),
             Arc::new(Catalog::from_yaml("", &std::collections::BTreeMap::new()).unwrap()),
+            Arc::default(),
         ));
 
         let mut client = WorkflowServiceClient::connect(format!("http://{proxy_addr}"))
@@ -2216,6 +2349,212 @@ workers:
         Catalog::from_yaml(workers, &users).unwrap()
     }
 
+    #[tokio::test]
+    async fn test_vault_authorizes_the_operation_and_delivered_workflow_task() {
+        use temporalio_common::protos::temporal::api::{
+            command::v1::ScheduleActivityTaskCommandAttributes, common::v1::ActivityType,
+        };
+
+        let dir = std::env::temp_dir().join(format!("boreal-vault-test-{}", std::process::id()));
+        let coordinator = Arc::new(Coordinator::open(&dir, true).unwrap());
+        let catalog = Arc::new(cross_user_catalog());
+        let vault = Arc::new(
+            crate::vault::Policy::new(
+                serde_json::from_str(r#"{"alice":{"prep":["verify-token"]}}"#).unwrap(),
+                &catalog,
+            )
+            .unwrap(),
+        );
+        let gate = |owner: &str, task_queue: &str, remote| WorkerGate {
+            binding: Arc::new(WorkerBinding {
+                owner: owner.to_owned(),
+                task_queue: task_queue.to_owned(),
+            }),
+            upstream: Arc::new(UpstreamPool::new("unused".into())),
+            coordinator: Arc::clone(&coordinator),
+            catalog: Arc::clone(&catalog),
+            vault: Arc::clone(&vault),
+            remote,
+        };
+        let req = |namespace: &str, operation: &str, token: u8, queue_kind: TaskQueueKind| {
+            RespondWorkflowTaskCompletedRequest {
+                namespace: namespace.into(),
+                task_token: vec![token],
+                return_new_workflow_task: true,
+                commands: vec![Command {
+                    attributes: Some(CommandAttrs::ScheduleActivityTaskCommandAttributes(
+                        ScheduleActivityTaskCommandAttributes {
+                            task_queue: Some(TaskQueue {
+                                name: "alice-vault".into(),
+                                kind: queue_kind.into(),
+                                ..Default::default()
+                            }),
+                            activity_type: Some(ActivityType {
+                                name: operation.into(),
+                            }),
+                            request_eager_execution: true,
+                            ..Default::default()
+                        },
+                    )),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }
+            .encode_to_vec()
+        };
+        coordinator.record_lease(
+            vec![1],
+            "alice",
+            "alice-prep",
+            RemoteTaskKind::Workflow,
+            "job",
+            "1",
+        );
+        coordinator.record_lease(
+            vec![2],
+            "alice",
+            "alice-prep",
+            RemoteTaskKind::Activity,
+            "job",
+            "1",
+        );
+        coordinator
+            .record_remote_lease(
+                &[3],
+                RemoteTaskKind::Workflow,
+                "alice-prep",
+                TrackedKey {
+                    namespace: "alice".into(),
+                    workflow_id: "job".into(),
+                    run_id: Some("1".into()),
+                },
+            )
+            .unwrap();
+        for (remote, token) in [(false, 1), (true, 3)] {
+            let gate = gate("alice", "alice-prep", remote);
+            let payload = req("alice", "verify-token", token, TaskQueueKind::Normal);
+            let permit =
+                authorize_worker_request("RespondWorkflowTaskCompleted", &payload, None, &gate)
+                    .await
+                    .unwrap();
+            let forwarded =
+                RespondWorkflowTaskCompletedRequest::decode(permit.rewritten.as_deref().unwrap())
+                    .unwrap();
+            assert!(!forwarded.return_new_workflow_task);
+            assert!(matches!(forwarded.commands[0].attributes.as_ref(),
+                Some(CommandAttrs::ScheduleActivityTaskCommandAttributes(attr)) if !attr.request_eager_execution));
+        }
+        for (owner, queue, operation, token, queue_kind, remote) in [
+            (
+                "alice",
+                "alice-other",
+                "verify-token",
+                1,
+                TaskQueueKind::Normal,
+                false,
+            ),
+            (
+                "shared",
+                "shared-rig",
+                "verify-token",
+                1,
+                TaskQueueKind::Normal,
+                false,
+            ),
+            (
+                "alice",
+                "alice-prep",
+                "return-token",
+                1,
+                TaskQueueKind::Normal,
+                false,
+            ),
+            (
+                "alice",
+                "alice-prep",
+                "verify-token",
+                2,
+                TaskQueueKind::Normal,
+                false,
+            ),
+            (
+                "alice",
+                "alice-prep",
+                "verify-token",
+                1,
+                TaskQueueKind::Sticky,
+                false,
+            ),
+            (
+                "alice",
+                "alice-prep",
+                "verify-token",
+                1,
+                TaskQueueKind::Normal,
+                true,
+            ),
+        ] {
+            let payload = req(owner, operation, token, queue_kind);
+            assert!(matches!(
+                authorize_worker_request(
+                    "RespondWorkflowTaskCompleted",
+                    &payload,
+                    None,
+                    &gate(owner, queue, remote)
+                )
+                .await,
+                Err((7, _))
+            ));
+        }
+
+        let unconfigured = WorkerGate {
+            vault: Arc::default(),
+            ..gate("alice", "alice-prep", false)
+        };
+        let payload = req("alice", "verify-token", 1, TaskQueueKind::Normal);
+        assert!(matches!(
+            authorize_worker_request(
+                "RespondWorkflowTaskCompleted",
+                &payload,
+                None,
+                &unconfigured
+            )
+            .await,
+            Err((7, _))
+        ));
+
+        let poll = PollActivityTaskQueueRequest {
+            namespace: "alice".into(),
+            task_queue: Some(TaskQueue {
+                name: "alice-vault".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+        .encode_to_vec();
+        assert!(
+            authorize_worker_request(
+                "PollActivityTaskQueue",
+                &poll,
+                None,
+                &gate("alice", "alice-vault", false)
+            )
+            .await
+            .is_ok()
+        );
+        for (method, queue, remote) in [
+            ("PollActivityTaskQueue", "alice-prep", false),
+            ("PollActivityTaskQueue", "alice-vault", true),
+            ("PollWorkflowTaskQueue", "alice-vault", false),
+        ] {
+            assert!(matches!(
+                authorize_worker_request(method, &poll, None, &gate("alice", queue, remote)).await,
+                Err((7, _))
+            ));
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     fn described(task_queue: &str, workflow_type: &str, workflow_id: &str, run_id: &str) -> Bytes {
         use temporalio_common::protos::temporal::api::{
             common::v1::WorkflowType, workflow::v1::WorkflowExecutionInfo,
@@ -2337,6 +2676,7 @@ workers:
             upstream_addr,
             Arc::clone(&coord),
             Arc::new(cross_user_catalog()),
+            Arc::default(),
         ));
 
         let mut client = WorkflowServiceClient::connect(format!("http://{proxy_addr}"))
@@ -2447,7 +2787,14 @@ workers:
             .unwrap_err();
         assert_eq!(denied.code(), Code::FailedPrecondition);
 
-        coord.record_lease(vec![7, 7], "alice", "", "");
+        coord.record_lease(
+            vec![7, 7],
+            "alice",
+            "alice-prep",
+            RemoteTaskKind::Workflow,
+            "",
+            "",
+        );
         client
             .start_workflow_execution(StartWorkflowExecutionRequest {
                 namespace: "shared".into(),
@@ -2633,6 +2980,7 @@ workers:
             upstream_addr,
             Arc::clone(&coord),
             Arc::new(catalog),
+            Arc::default(),
         ));
         let mut client = WorkflowServiceClient::connect(format!("http://{proxy_addr}"))
             .await

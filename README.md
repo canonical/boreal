@@ -60,7 +60,7 @@ deployment.
   prebuilt closure, fails closed on uncertainty, and never runs automatic GC.
 
 See [architecture](docs/architecture.md), [central and peripheral workers](docs/remote-workers.md),
-and [updater](updater/README.md).
+[central vault activities](docs/vault.md), and [updater](updater/README.md).
 
 ## Label a deployment with its Git version tag
 

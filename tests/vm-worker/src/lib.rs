@@ -1,14 +1,14 @@
 use std::time::Duration;
 
 use schemars::JsonSchema;
-use validator::Validate;
 use serde::{Deserialize, Serialize};
-use temporalio_macros::{activities, workflow, workflow_methods};
+use temporalio_macros::{activities, activity_definitions, workflow, workflow_methods};
 use temporalio_sdk::{
     ActivityExecutionError, ActivityOptions, ApplicationFailure, ChildWorkflowOptions, TimerResult,
     WorkerOptions, WorkflowContext, WorkflowContextView, WorkflowResult, WorkflowTermination,
     activities::{ActivityContext, ActivityError},
 };
+use validator::Validate;
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Validate)]
 pub struct DemoInput {
@@ -35,15 +35,21 @@ pub struct DemoActivities;
 impl DemoActivities {
     #[activity]
     pub async fn greet(_ctx: ActivityContext, name: String) -> Result<String, ActivityError> {
-        if let Some(secret_name) = name.strip_prefix("secret:") {
-            let value = boreal_worker::read_secret(secret_name).map_err(|err| {
-                std::io::Error::new(std::io::ErrorKind::PermissionDenied, err.to_string())
-            })?;
-            return Ok(format!("Secret length verified: {}", value.len()));
-        }
         Ok(format!("Hello, {name}!"))
     }
 }
+
+pub struct Vault;
+
+#[activity_definitions]
+impl Vault {
+    #[activity(name = "verify-fixture-token")]
+    pub fn verify_fixture_token() -> Result<(), ActivityError> {
+        unimplemented!()
+    }
+}
+
+pub use vault::VerifyFixtureToken;
 
 pub struct CountActivities;
 
@@ -129,6 +135,16 @@ impl DemoWorkflow {
         }
         if ctx.timer(Duration::from_secs(input.wait_seconds)).await == TimerResult::Cancelled {
             return Err(WorkflowTermination::cancelled());
+        }
+        if input.name == "vault-check" {
+            let options = boreal_worker::vault_activity_options(
+                ctx.namespace(),
+                ActivityOptions::schedule_to_close_timeout(Duration::from_secs(8)),
+            );
+            ctx.execute_activity(Vault::verify_fixture_token, (), options)
+                .await
+                .map_err(WorkflowTermination::from)?;
+            return Ok("Central vault verified the token.".into());
         }
         ctx.execute_activity(
             DemoActivities::greet,

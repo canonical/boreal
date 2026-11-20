@@ -31,6 +31,8 @@ pub struct TrackedKey {
 #[derive(Clone, Debug)]
 struct Lease {
     namespace: String,
+    task_queue: String,
+    kind: RemoteTaskKind,
     granted_at: Instant,
 }
 
@@ -402,6 +404,8 @@ impl Coordinator {
         &self,
         task_token: Vec<u8>,
         namespace: &str,
+        task_queue: &str,
+        kind: RemoteTaskKind,
         workflow_id: &str,
         run_id: &str,
     ) {
@@ -427,9 +431,28 @@ impl Coordinator {
             task_token,
             Lease {
                 namespace: namespace.to_owned(),
+                task_queue: task_queue.to_owned(),
+                kind,
                 granted_at: Instant::now(),
             },
         );
+    }
+
+    pub fn has_local_lease(
+        &self,
+        token: &[u8],
+        namespace: &str,
+        task_queue: &str,
+        kind: RemoteTaskKind,
+    ) -> bool {
+        self.inner
+            .lock()
+            .unwrap()
+            .leases
+            .get(token)
+            .is_some_and(|lease| {
+                lease.namespace == namespace && lease.task_queue == task_queue && lease.kind == kind
+            })
     }
 
     /// Persist before giving a remote worker the reply. Unlike local work,

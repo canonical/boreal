@@ -18,10 +18,14 @@ downstream Boreal Rust workers:
   client's namespace and the deployed worker name. It installs `SIGTERM` and
   `SIGINT` handlers before connecting and continues driving `Worker::run` after
   shutdown so in-flight work can drain.
-- `read_secret(name)` / `read_secret_bytes(name)` — loads a user-managed secret
+- `read_secret(name)` / `read_secret_bytes(name)` (feature `read-secrets`) — loads a user-managed secret
   from `~/.config/boreal/secrets/<name>` after verifying `0700` directory and
   `0600` regular-file ownership. Never place returned secret values in Temporal
   inputs, results, errors, heartbeats, or logs.
+- `vault_activity_options(namespace, options)` — routes an activity to the
+  namespace's central vault and disables eager execution. Use `ctx.namespace()`
+  in the workflow. Only the vault package enables `read-secrets`; see
+  [central vault activities](../docs/vault.md).
 - Re-exports `temporalio_client`, `temporalio_common`, `temporalio_macros`,
   `temporalio_sdk`, and `temporalio_workflow`.
 
@@ -135,4 +139,5 @@ rules and checks not expressed by that schema in the workflow itself.
 ```sh
 cargo fmt --manifest-path worker/Cargo.toml -- --check
 cargo test --manifest-path worker/Cargo.toml --locked
+cargo test --manifest-path worker/Cargo.toml --locked --features schema,read-secrets
 ```

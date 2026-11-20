@@ -10,6 +10,7 @@ license = "MIT"
 
 [features]
 schema = ["dep:schemars", "dep:serde_json", "dep:validator"]
+read-secrets = []
 
 [lib]
 path = "lib.rs"

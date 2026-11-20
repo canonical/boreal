@@ -17,6 +17,7 @@ let
         inherit user worker;
         unitKey = "${user}-${worker}";
       }) userCfg.workers
+      ++ lib.optional (userCfg.vault != null) { unitKey = "${user}-vault"; }
     ) cfg.users
   );
 
