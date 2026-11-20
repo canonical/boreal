@@ -62,9 +62,10 @@
           modules = import ./tests/modules.nix {
             inherit self nixpkgs pkgs;
           };
-          template = builtins.seq templateOutputs.packages.${system}.example-worker.drvPath (
+          template = builtins.seq templateOutputs.devShells.${system}.default.drvPath (
             templateOutputs.checks.${system}.lab
           );
+          local = import ./tests/local.nix { inherit self pkgs; };
         }
         // nixpkgs.lib.optionalAttrs (system == "x86_64-linux") {
           vm = import ./tests/vm.nix {
