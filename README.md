@@ -117,6 +117,23 @@ works if the remote command preserves its quoting. Success is printed on
 stdout; errors go to stderr with a nonzero exit status. Don't put secrets in
 workflow inputs.
 
+## Run a lab locally
+
+In a downstream checkout wired for [`boreal-local`](docs/local.md):
+
+```sh
+nix develop -c boreal-local
+nix develop -c boreal-local run example --id local-1 --input-json - < input.json
+nix develop -c boreal-local result local-1
+nix develop -c boreal-local stop
+```
+
+The interactive command opens the real Boreal shell. Rootless Podman runs
+Temporal and the worker containers on this machine, without outside network
+access or a VM. The local profile keeps execution state, optional vault
+secrets, and selector-only shell history across sessions and builds. Use a
+VM to verify production deployment and authorization behavior.
+
 ## Framework development
 
 ```sh
@@ -189,9 +206,11 @@ separate private Git remotes.
     generation.
   - `mkFleetCheck { pkgs, hosts }` — checks that the specified NixOS hosts
     share a worker placement map and have exactly one central host.
-  - `mkDevShell pkgs { ... }` and `buildRustWorker pkgs { ... }` — Rust
-    development shell and Temporal worker package builder linking
-    `${boreal}/worker` at `.boreal/boreal-worker` without manual `outputHashes`.
+   - `mkDevShell pkgs { ... }` and `buildRustWorker pkgs { ... }` — Rust
+     development shell and Temporal worker package builder linking
+     `${boreal}/worker` at `.boreal/boreal-worker` without manual `outputHashes`.
+   - `mkLocal pkgs { workers, vault ? null }` — a `boreal-local` launcher
+     for a single-user local lab.
 - `nixosModules`:
   - `default` / `boreal` — `boreal.enable`, `boreal.users`, `boreal.admin`,
     and `boreal.updater`.

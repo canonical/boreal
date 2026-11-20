@@ -38,7 +38,26 @@ Boreal framework revision.
    `--override-input boreal ../.. --no-write-lock-file` to `nix` commands so
    local `file://` paths are not written into `flake.lock`.)*
 
-4. Test in the disposable QEMU VM:
+4. Run real workflows locally (Linux with rootless Podman configured):
+
+   ```sh
+   nix develop -c boreal-local
+   # In the prompt: run example
+   ```
+
+   Or submit directly with no prompts:
+
+   ```sh
+   nix develop -c boreal-local run example --id local-1 --input-json '{"message":"hello"}'
+   nix develop -c boreal-local result local-1
+   nix develop -c boreal-local stop
+   ```
+
+   Temporal, the broker, and the worker run locally on a private container
+   network with no external access. See the [local lab guide](https://github.com/canonical/boreal/blob/main/docs/local.md)
+   for profiles, vault testing, and prerequisites.
+
+5. Test deployment behavior in the disposable QEMU VM:
    - Set `boreal.vm.devAuthorizedKeys` in `flake.nix` (or `users.<user>.keys` in
      `lab.nix`) to your public SSH key, then launch:
 
@@ -54,7 +73,7 @@ Boreal framework revision.
      ssh -p 2222 admin@127.0.0.1 poweroff
      ```
 
-5. Deploy and stage updates:
+6. Deploy and stage updates:
    - Add `./hosts/<hostname>.nix` (importing `hardware-configuration.nix`,
      setting `networking.hostName = "<hostname>";`, and configuring
      `boreal.admin` and `boreal.updater.enable = true;`) and wire
