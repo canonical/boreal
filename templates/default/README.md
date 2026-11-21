@@ -5,6 +5,10 @@ and `boreal.lib.mkDevShell` automatically link `${boreal}/worker` at
 `.boreal/boreal-worker`, so `flake.lock` is the single source of truth for the
 Boreal framework revision.
 
+Develop with the Nix package manager on Linux; the development machine does
+not have to run NixOS. Local workflow execution also requires a working
+rootless Podman setup. NixOS runs on deployment hosts and inside the test VM.
+
 ## Quick start
 
 1. Create a new lab project (standalone repository):

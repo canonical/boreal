@@ -144,3 +144,33 @@ ssh admin@lab-metal-01 "updater status"
 
 See [the updater documentation](../updater/README.md) for drain and recovery
 semantics.
+
+## Build and label a generation without activating it
+
+Both SSH shells show the deployed **downstream** revision, not the revision of
+the Boreal framework input. Use the updater for production updates. To build
+without activating, run `boreal-build` from the root of a downstream Git
+checkout with a committed `HEAD` and a tracked, resolved `flake.lock`:
+
+```sh
+nix run github:canonical/boreal#boreal-build -- . lab-metal-01
+# From the starter lab, build the configured VM instead:
+nix run github:canonical/boreal#boreal-build -- . vm vm
+```
+
+The second argument is a key under `nixosConfigurations`; the third argument
+selects the VM output instead of the host system. The command creates a
+`result` link and does not activate the generation.
+
+The label uses an exact version tag such as `v1.2.3`, including annotated tags.
+If more than one matches, it uses the first in lexical order. Without a tag it
+shows the seven-character commit hash. If tracked files have staged or unstaged
+changes, it shows `<hash>+`, even if `HEAD` is tagged. Git flake builds do not
+include untracked files.
+
+Plain flake builds can use revision metadata when the downstream passes
+`specialArgs = { inherit self; };`, but do not see Git tags and may lose the
+revision when the effective lock changes. Append `--override-input boreal FLAKE`
+to the `boreal-build` arguments to use a local framework override without
+changing the downstream label or rewriting the lockfile. Sources without
+revision metadata show `unknown`.
