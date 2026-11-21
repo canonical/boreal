@@ -3,8 +3,8 @@
 let
   inherit (nixpkgs) lib;
 
-  borealWorkerSrc = lib.cleanSourceWith {
-    src = "${self}/worker";
+  borealSdkSrc = lib.cleanSourceWith {
+    src = "${self}/sdk";
     filter =
       path: type:
       baseNameOf path != "target"
@@ -148,7 +148,7 @@ in
         ++ extraPackages;
       shellHook = ''
         mkdir -p .boreal
-        ln -sfn ${borealWorkerSrc} .boreal/boreal-worker
+        ln -sfn ${borealSdkSrc} .boreal/boreal-sdk
         ${extraShellHook}
       '';
     };
@@ -250,7 +250,7 @@ in
               echo 'Boreal: unable to verify the selected Cargo feature graph' >&2
               exit 1
             }
-            if grep -Eq '^boreal-worker v[^|]*\|([^,]*,)*read-secrets(,| |$)' <<< "$boreal_features"; then
+            if grep -Eq '^boreal-sdk v[^|]*\|([^,]*,)*read-secrets(,| |$)' <<< "$boreal_features"; then
               boreal_secret_reader=true
             else
               boreal_secret_reader=false
@@ -262,8 +262,8 @@ in
           '';
           postUnpack = ''
             mkdir -p "$NIX_BUILD_TOP/.boreal" "$sourceRoot/.boreal"
-            ln -sfn ${borealWorkerSrc} "$NIX_BUILD_TOP/.boreal/boreal-worker"
-            ln -sfn ${borealWorkerSrc} "$sourceRoot/.boreal/boreal-worker"
+            ln -sfn ${borealSdkSrc} "$NIX_BUILD_TOP/.boreal/boreal-sdk"
+            ln -sfn ${borealSdkSrc} "$sourceRoot/.boreal/boreal-sdk"
           ''
           + (args.postUnpack or "");
           outputs = outputs;

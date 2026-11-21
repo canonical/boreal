@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use boreal_sdk::worker;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use temporalio_macros::{activities, workflow, workflow_methods};
@@ -70,13 +71,13 @@ impl ExampleWorkflow {
     }
 }
 
-boreal_worker::declare_worker! {
+worker::main! {
     package = "example",
     workflows = {
         export greet: ExampleWorkflow => "Run the starter example workflow",
     },
     configure = |opts| opts
-        .graceful_shutdown_period(boreal_worker::DEFAULT_SHUTDOWN_GRACE)
+        .graceful_shutdown_period(worker::DEFAULT_SHUTDOWN_GRACE)
         .register_activities(ExampleActivities),
 }
 

@@ -113,19 +113,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "boreal-worker"
+name = "boreal-sdk"
 version = "0.1.0"
 dependencies = [
  "boreal-schema",
  "schemars",
- "serde",
  "temporalio-client",
  "temporalio-common",
  "temporalio-macros",
  "temporalio-sdk",
  "temporalio-workflow",
  "tokio",
- "validator",
 ]
 
 [[package]]

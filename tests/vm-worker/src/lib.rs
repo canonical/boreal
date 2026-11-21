@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use boreal_sdk::worker;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use temporalio_macros::{activities, activity_definitions, workflow, workflow_methods};
@@ -137,10 +138,10 @@ impl DemoWorkflow {
             return Err(WorkflowTermination::cancelled());
         }
         if input.name == "vault-check" {
-            let options = boreal_worker::vault_activity_options(
-                ctx.namespace(),
-                ActivityOptions::schedule_to_close_timeout(Duration::from_secs(8)),
-            );
+            let options = ActivityOptions::with_schedule_to_close_timeout(Duration::from_secs(8))
+                .task_queue(worker::vault_task_queue(ctx.namespace()))
+                .do_not_eagerly_execute(true)
+                .build();
             ctx.execute_activity(Vault::verify_fixture_token, (), options)
                 .await
                 .map_err(WorkflowTermination::from)?;
@@ -191,18 +192,18 @@ impl CountWorkflow {
     }
 }
 
-pub fn greet_options(queue: String) -> boreal_worker::Result<WorkerOptions> {
+pub fn greet_options(queue: String) -> worker::Result<WorkerOptions> {
     Ok(WorkerOptions::new(queue)
-        .graceful_shutdown_period(boreal_worker::DEFAULT_SHUTDOWN_GRACE)
+        .graceful_shutdown_period(worker::DEFAULT_SHUTDOWN_GRACE)
         .register_activities(DemoActivities)
         .register_workflow::<ChildGreetingWorkflow>()?
         .register_workflow::<DemoWorkflow>()?
         .build())
 }
 
-pub fn count_options(queue: String) -> boreal_worker::Result<WorkerOptions> {
+pub fn count_options(queue: String) -> worker::Result<WorkerOptions> {
     Ok(WorkerOptions::new(queue)
-        .graceful_shutdown_period(boreal_worker::DEFAULT_SHUTDOWN_GRACE)
+        .graceful_shutdown_period(worker::DEFAULT_SHUTDOWN_GRACE)
         .register_activities(CountActivities)
         .register_workflow::<CountWorkflow>()?
         .build())

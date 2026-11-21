@@ -1,33 +1,29 @@
-# `boreal-worker` runtime crate
+# Boreal SDK
 
-`boreal-worker` provides the shared Unix Temporal worker lifecycle used by
-downstream Boreal Rust workers:
+`boreal-sdk` is the only Boreal crate downstream Rust projects declare. It
+handles worker startup and integration with Boreal without changing how you
+write Temporal workflows or activities.
 
-- `task_queue(worker)` — prefixes the deployed worker name with the configured
-  Temporal namespace. With `TEMPORAL_NAMESPACE=alice`, `task_queue("example")?`
-  returns `"alice-example"`. No Temporal connection, macro, or runtime wrapper
-  is required.
-- `connect()` — connects a Temporal `Client` from standard `TEMPORAL_ADDRESS`,
+- `worker::task_queue(worker)` — prefixes the deployed worker name with the
+  configured Temporal namespace. With `TEMPORAL_NAMESPACE=alice`,
+  `task_queue("example")?` returns `"alice-example"` without connecting.
+- `client::connect()` — connects a Temporal `Client` from standard `TEMPORAL_ADDRESS`,
   `TEMPORAL_NAMESPACE`, and TLS environment settings.
-- `connect_namespace(namespace)` — same connection settings, bound to another
-  user's Temporal namespace. Call it from an activity, then use upstream
+- `client::connect_namespace(namespace)` — same connection settings, bound to
+  another user's Temporal namespace. Call it from an activity, then use upstream
   `temporalio_client` `start_workflow`, `get_result`, and `cancel`. The worker
   gRPC gate checks `perms.yaml` using the listener owner, not the namespace
   argument. Do not call it from workflow code.
-- `run_worker(worker, build_options)` — derives the queue from the connected
+- `worker::run(worker, build_options)` — derives the queue from the connected
   client's namespace and the deployed worker name. It installs `SIGTERM` and
   `SIGINT` handlers before connecting and continues driving `Worker::run` after
   shutdown so in-flight work can drain.
-- `read_secret(name)` / `read_secret_bytes(name)` (feature `read-secrets`) — loads a user-managed secret
-  from `~/.config/boreal/secrets/<name>` after verifying `0700` directory and
-  `0600` regular-file ownership. Never place returned secret values in Temporal
-  inputs, results, errors, heartbeats, or logs.
-- `vault_activity_options(namespace, options)` — routes an activity to the
-  namespace's central vault and disables eager execution. Use `ctx.namespace()`
-  in the workflow. Only the vault package enables `read-secrets`; see
-  [central vault activities](../docs/vault.md).
-- Re-exports `temporalio_client`, `temporalio_common`, `temporalio_macros`,
-  `temporalio_sdk`, and `temporalio_workflow`.
+- `worker::vault_task_queue(namespace)` — returns `<namespace>-vault`. Use
+  `ctx.namespace()` and disable eager execution explicitly on Temporal's
+  activity options builder.
+- `schema` (feature `schema`) — declares and emits a worker's launch catalog.
+- `secret::read(name)` / `secret::read_bytes(name)` (feature `read-secrets`) —
+  reads user-managed values from a dedicated [vault package](../docs/vault.md).
 
 ## Schedules
 
@@ -41,7 +37,7 @@ first argument. This is the key in `boreal.users.<user>.workers`, not the binary
 name or the full queue. Migrate both entrypoints together when upgrading from
 `LAB_TASK_QUEUE`.
 
-The schedule bin uses `connect()` and `task_queue()`, upserts with
+The schedule bin uses `client::connect()` and `worker::task_queue()`, upserts with
 `Client::create_schedule` / `ScheduleHandle::update`, and exits. Do not add a
 Boreal schedule wrapper. The worker gate allows the stock schedule RPCs, clamps
 `catchup_window` to 60 seconds, and rejects a backfill wider than 24 hours.
@@ -49,9 +45,11 @@ While an update drain is closed, an unpaused create, unpause, trigger, or
 backfill fails and the oneshot retries.
 
 ```rust
-let worker = std::env::args().nth(1).ok_or("missing worker name")?;
-let queue = boreal_worker::task_queue(&worker)?;
-let client = boreal_worker::connect().await?;
+use boreal_sdk::{client, worker};
+
+let name = std::env::args().nth(1).ok_or("missing worker name")?;
+let queue = worker::task_queue(&name)?;
+let client = client::connect().await?;
 client
     .create_schedule(
         "hourly-hello",
@@ -72,24 +70,24 @@ client
 ## Downstream usage
 
 Downstream flakes using `boreal.lib.mkDevShell` and
-`boreal.lib.buildRustWorker` automatically receive `${boreal}/worker` linked at
-`.boreal/boreal-worker`, allowing `Cargo.toml` to reference it as a local path
-dependency without maintaining Git `outputHashes` in `flake.nix`:
+`boreal.lib.buildRustWorker` automatically get the pinned SDK linked at
+`.boreal/boreal-sdk`. Reference it relative to the relevant `Cargo.toml`, as
+in the [starter workspace](../templates/default/temporal/Cargo.toml):
 
 ```toml
 [dependencies]
-boreal-worker = { path = "../.boreal/boreal-worker", features = ["schema"] }
-schemars = { version = "1", features = ["preserve_order"] }
-serde = { version = "1", features = ["derive"] }
-validator = { version = "0.20", features = ["derive"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+boreal-sdk = { path = "../.boreal/boreal-sdk", features = ["schema"] }
 ```
 
-With the `schema` feature, declare ordinary native workflow registrations once
-in `main.rs`:
+Keep the usual Temporal and input-type dependencies. In particular, Temporal's
+procedural macros refer to upstream crates by name, so they still need direct
+Cargo dependencies. With `schema` enabled, declare native workflow
+registrations once in `main.rs`:
 
 ```rust,ignore
-boreal_worker::declare_worker! {
+use boreal_sdk::worker;
+
+worker::main! {
     package = "example",
     workflows = {
         export greet: ExampleWorkflow => "Run the starter greeting",
@@ -126,7 +124,7 @@ If the `example` package is deployed as `tools`, use
 `run tools --workflow count` to open the form (add `--id job-42` to set the
 workflow ID explicitly). The `workers` command lists the
 available aliases and their arguments. For a worker with one export, omit
-`--workflow`. Handwritten single-workflow schemas and `WorkerSchema::new`
+`--workflow`. Handwritten single-workflow schemas and `schema::Worker::new`
 still work without the macro.
 
 The generated catalog keeps each workflow's full Schemars schema. To skip the
@@ -134,10 +132,21 @@ interactive form, pass the input with `--input-json`.
 The broker validates against the selected workflow's schema. Keep business
 rules and checks not expressed by that schema in the workflow itself.
 
+## Upgrade from `boreal-worker`
+
+Update the pinned Boreal revision and rename the Cargo path dependency to
+`boreal-sdk` at `.boreal/boreal-sdk`. Regenerate `Cargo.lock` after entering the
+updated dev shell. Replace `declare_worker!` with `worker::main!`, use the
+module paths above, and import upstream Temporal crates directly where needed.
+For a handwritten schema binary, use `schema::emit`. For vault calls, use
+`worker::vault_task_queue` and set `.do_not_eagerly_execute(true)` on the
+Temporal builder. The deployed binaries, queues, and schema format do not
+change.
+
 ## Checks
 
 ```sh
-cargo fmt --manifest-path worker/Cargo.toml -- --check
-cargo test --manifest-path worker/Cargo.toml --locked
-cargo test --manifest-path worker/Cargo.toml --locked --features schema,read-secrets
+cargo fmt --manifest-path sdk/Cargo.toml --all -- --check
+cargo test --manifest-path sdk/Cargo.toml --locked
+cargo test --manifest-path sdk/Cargo.toml --workspace --all-features --locked
 ```

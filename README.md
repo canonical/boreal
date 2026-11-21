@@ -51,7 +51,7 @@ multi-user authorization before deploying.
 
 - **Use an existing lab:** [Run and inspect workflows over SSH](docs/workflows.md).
 - **Build a lab:** Start with the [downstream template guide](templates/default/README.md),
-  then see [local development](docs/local.md) and [worker packaging](worker/README.md).
+  then see [local development](docs/local.md) and the [Boreal SDK](sdk/README.md).
 - **Deploy a lab:** See [host configuration](docs/host.md),
   [remote workers](docs/remote-workers.md), and [safe updates](updater/README.md).
 - **Look up an interface:** See the [flake reference](docs/flake-reference.md)

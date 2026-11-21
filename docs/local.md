@@ -107,7 +107,7 @@ mount path.
 
 Only the vault container mounts the secret directory, read-only at the
 UID's actual passwd home. Existing vault activities use the same feature-gated
-`boreal_worker::read_secret` or `read_secret_bytes` API as in a deployment;
+`boreal_sdk::secret::read` or `read_bytes` API as in a deployment;
 there is no environment-variable path override and no host home mount.
 
 Use trusted binaries and test credentials. The local broker does not enforce

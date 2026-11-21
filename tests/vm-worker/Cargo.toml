@@ -29,11 +29,12 @@ name = "schema"
 path = "src/bin/schema.rs"
 
 [dependencies]
-boreal-worker = { path = "../.boreal/boreal-worker", features = ["schema"] }
+boreal-sdk = { path = "../.boreal/boreal-sdk", features = ["schema"] }
 futures = "0.3"
 schemars = { version = "1", features = ["preserve_order"] }
 serde = { version = "1", features = ["derive"] }
 validator = { version = "0.20", features = ["derive"] }
+temporalio-client = "~1.2.0"
 temporalio-common = "~1.2.0"
 temporalio-macros = "~1.2.0"
 temporalio-sdk = "~1.2.0"

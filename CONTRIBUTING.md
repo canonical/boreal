@@ -14,14 +14,14 @@ workspace for the framework crates:
 
 ```sh
 cargo test --manifest-path common/Cargo.toml --locked
-cargo test --manifest-path worker/Cargo.toml --locked
+cargo test --manifest-path sdk/Cargo.toml --workspace --locked
 cargo test --manifest-path broker/Cargo.toml --locked
 cargo test --manifest-path shell/Cargo.toml --locked
 cargo test --manifest-path admin/Cargo.toml --locked
 cargo test --manifest-path updater/Cargo.toml --locked
 ```
 
-- **Worker features:** See the [worker crate checks](worker/README.md#checks)
+- **SDK features:** See the [SDK checks](sdk/README.md#checks)
   for `schema` and `read-secrets` coverage.
 - **Flake and module changes:** Run `nix flake check`. The flake defines
   module, template, and local checks, plus a VM check on `x86_64-linux`.

@@ -1,13 +1,18 @@
+//! Declare the native Temporal workflows exposed through the Boreal shell.
+
 use boreal_schema::{self as catalog, Input};
 use schemars::JsonSchema;
 use temporalio_common::WorkflowDefinition;
 use temporalio_workflow::workflows::WorkflowImplementation;
 
-pub struct WorkerSchema(catalog::Worker);
+/// A worker's public launch catalog.
+pub struct Worker(catalog::Worker);
 
-pub struct WorkflowSchema(catalog::Workflow);
+/// An exported native Temporal workflow and its schema.
+pub struct Workflow(catalog::Workflow);
 
-impl WorkerSchema {
+impl Worker {
+    /// Declares a single-workflow catalog keyed by the worker binary name.
     pub fn new<T: JsonSchema>(
         name: &'static str,
         workflow: &'static str,
@@ -19,7 +24,7 @@ impl WorkerSchema {
         ))
     }
 
-    pub fn from_exports(name: &'static str, exports: Vec<WorkflowSchema>) -> Self {
+    pub fn from_exports(name: &'static str, exports: Vec<Workflow>) -> Self {
         Self(catalog::Worker::named(
             name,
             exports.into_iter().map(|export| export.0).collect(),
@@ -27,7 +32,7 @@ impl WorkerSchema {
     }
 }
 
-impl WorkflowSchema {
+impl Workflow {
     pub fn of<W>(alias: &'static str, description: &'static str) -> Self
     where
         W: WorkflowImplementation,
@@ -44,18 +49,20 @@ fn input<T: JsonSchema>(workflow: &'static str, description: &'static str) -> In
     Input::new(workflow, description, || schemars::schema_for!(T))
 }
 
-pub fn emit_schema(workers: &[WorkerSchema]) -> Result<(), String> {
-    print!("{}", render_schema(workers)?);
+/// Writes the launch catalog to stdout for the package's `schema` binary.
+pub fn emit(workers: &[Worker]) -> Result<(), String> {
+    print!("{}", render(workers)?);
     Ok(())
 }
 
-pub fn render_schema(workers: &[WorkerSchema]) -> Result<String, String> {
+fn render(workers: &[Worker]) -> Result<String, String> {
     catalog::render(workers.iter().map(|worker| &worker.0))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::worker;
     use temporalio_macros::{workflow, workflow_methods};
     use temporalio_sdk::{WorkflowContext, WorkflowResult};
 
@@ -95,14 +102,14 @@ mod tests {
         }
     }
 
-    crate::declare_worker! {
+    worker::main! {
         package = "example",
         workflows = {
             export greet: Greeting => "Say hello",
             internal self::Child,
             export count: Counting => "Count objects",
         },
-        configure = |opts| opts.graceful_shutdown_period(crate::DEFAULT_SHUTDOWN_GRACE),
+        configure = |opts| opts.graceful_shutdown_period(worker::DEFAULT_SHUTDOWN_GRACE),
     }
 
     #[test]
@@ -113,7 +120,7 @@ mod tests {
         assert!(options.register_workflow::<Counting>().is_err());
         assert!(options.register_workflow::<Child>().is_err());
 
-        let yaml = render_schema(&[schema()]).unwrap();
+        let yaml = render(&[schema()]).unwrap();
         assert!(yaml.contains("example:\n  workflows:\n    greet:\n      workflow: \"Greeting\""));
         assert!(yaml.contains("    count:\n      workflow: \"Count.V1\""));
         assert!(!yaml.contains("Child"));
@@ -121,7 +128,7 @@ mod tests {
 
     #[test]
     fn test_entrypoint_rejects_an_unrecognized_binary() {
-        let err = crate::run_entrypoint(
+        let err = worker::__run_entrypoint(
             Some("other"),
             "example",
             |_| panic!("must not configure a worker"),

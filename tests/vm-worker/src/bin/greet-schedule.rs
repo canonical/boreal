@@ -1,9 +1,10 @@
 use std::time::Duration;
 
-use boreal_worker::temporalio_client::schedules::{
+use boreal_sdk::{client, worker};
+use lab_worker::{DemoInput, DemoWorkflow};
+use temporalio_client::schedules::{
     CreateScheduleOptions, ScheduleAction, ScheduleError, ScheduleOverlapPolicy, ScheduleSpec,
 };
-use lab_worker::{DemoInput, DemoWorkflow};
 
 const SCHEDULE_ID: &str = "greet-30s";
 
@@ -15,12 +16,12 @@ fn already_exists(err: &ScheduleError) -> bool {
 }
 
 #[tokio::main]
-async fn main() -> boreal_worker::Result<()> {
+async fn main() -> worker::Result<()> {
     let worker = std::env::args()
         .nth(1)
         .ok_or("usage: greet-schedule <worker-name>")?;
-    let queue = boreal_worker::task_queue(&worker)?;
-    let client = boreal_worker::connect().await?;
+    let queue = worker::task_queue(&worker)?;
+    let client = client::connect().await?;
     let spec = ScheduleSpec::from_interval(Duration::from_secs(30));
     let input = DemoInput {
         name: "Scheduler".into(),

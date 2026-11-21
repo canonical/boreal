@@ -1,6 +1,7 @@
 /result
 /result-*
 /*.qcow2
+/sdk/target/
 /worker/target/
 /common/target/
 /broker/target/

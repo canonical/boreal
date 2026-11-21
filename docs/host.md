@@ -5,7 +5,7 @@ or maintained on a `downstreams/<name>` orphan branch) takes `boreal` as an
 input, defines a shared `lab.nix` for both its disposable test VM and
 bare-metal hosts, and wires host-specific settings separately. Both
 `boreal.lib.buildRustWorker` and `boreal.lib.mkDevShell` automatically link
-`${boreal}/worker` at `.boreal/boreal-worker` from the revision locked in
+`${boreal}/sdk` at `.boreal/boreal-sdk` from the revision locked in
 `flake.lock`, so downstream Rust crates only pin `boreal` in `flake.nix` /
 `flake.lock`:
 
@@ -93,7 +93,7 @@ For user `<user>` and worker `<worker>`, Boreal isolates PostgreSQL and
 `/run/netns/boreal-worker-<user>-<worker>` with `TEMPORAL_ADDRESS`
 (`boreal.temporalAddress`, default `127.0.0.1:7233`),
 and `TEMPORAL_NAMESPACE=<user>`. Both worker and schedule executables receive
-`<worker>` as their first argument. Use `boreal_worker::task_queue(worker)`
+`<worker>` as their first argument. Use `boreal_sdk::worker::task_queue(worker)`
 to derive `<user>-<worker>` from the Temporal namespace and deployed worker
  name. Do not mix differently registered worker packages on the same queue.
 
@@ -112,7 +112,7 @@ output. The module writes those directories to `/etc/boreal/schemas.yaml`.
 To register Temporal schedules, set `schedule.enable = true` and
 `schedule.package` to the schedule output. The module starts
 `boreal-schedule-<user>-<worker>.service`, a oneshot in that worker's network
-namespace. The binary should call `boreal_worker::connect()`, upsert schedules
+namespace. The binary should call `boreal_sdk::client::connect()`, upsert schedules
 with the stock Temporal client, and exit. Schedules are rows in Temporal, not a
 timer: the server starts the workflows, and the worker unit executes them.
 

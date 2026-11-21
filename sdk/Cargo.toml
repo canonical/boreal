@@ -9,14 +9,14 @@ rust-version = "1.92"
 license = "MIT"
 
 [package]
-name = "boreal-worker"
+name = "boreal-sdk"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [features]
-schema = ["dep:boreal-schema", "dep:schemars", "dep:validator"]
+schema = ["dep:boreal-schema", "dep:schemars", "dep:temporalio-common", "dep:temporalio-workflow"]
 read-secrets = []
 
 [lib]
@@ -26,12 +26,10 @@ path = "lib.rs"
 boreal-schema = { path = "catalog", optional = true }
 schemars = { version = "1", optional = true, features = ["preserve_order"] }
 temporalio-client = "~1.2.0"
-temporalio-common = "~1.2.0"
-temporalio-macros = "~1.2.0"
+temporalio-common = { version = "~1.2.0", optional = true }
 temporalio-sdk = "~1.2.0"
-temporalio-workflow = "~1.2.0"
+temporalio-workflow = { version = "~1.2.0", optional = true }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync"] }
-validator = { version = "0.20", optional = true, features = ["derive"] }
 
 [dev-dependencies]
-serde = { version = "1", features = ["derive"] }
+temporalio-macros = "~1.2.0"

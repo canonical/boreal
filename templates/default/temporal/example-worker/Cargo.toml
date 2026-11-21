@@ -15,7 +15,7 @@ name = "schema"
 path = "main.rs"
 
 [dependencies]
-boreal-worker.workspace = true
+boreal-sdk.workspace = true
 futures.workspace = true
 schemars.workspace = true
 serde.workspace = true

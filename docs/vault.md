@@ -16,7 +16,7 @@ inputs, fix the credential and destination server-side, sanitize failures, and
 make side effects safe to retry. Grants belong to worker identities, not to
 individual exported workflows or the SSH caller that launched an execution.
 
-The vault package alone enables `boreal-worker/read-secrets` in deployed Boreal
+The vault package alone enables `boreal-sdk/read-secrets` in deployed Boreal
 builds. Cargo features are additive, so packages are checked and built separately.
 This is a build check, not filesystem isolation. On central, ordinary workers
 and schedules belonging to a vault-enabled user run under separate systemd
@@ -35,9 +35,11 @@ retroactively be authorized by the broker.
 ## Configure a vault
 
 Build the vault as its own Cargo package with
-`boreal-worker = { workspace = true, features = [ "read-secrets" ] }`. Use a
+`boreal-sdk = { workspace = true, features = [ "read-secrets" ] }`. Use a
 regular worker binary that registers activities only, for example by calling
-`run_worker("vault", |queue| Ok(WorkerOptions::new(queue).register_activities(Vault).build()))`.
+`boreal_sdk::worker::run("vault", |queue| Ok(WorkerOptions::new(queue).register_activities(Vault).build()))`.
+Read user-managed values via `boreal_sdk::secret::read` or `read_bytes` only
+inside vault activities.
 No schema binary is needed because the shell cannot launch the vault directly.
 
 ```nix
@@ -57,7 +59,16 @@ in {
 
 `grants.greet` allows `alice-greet` (central replica and enrolled peripherals)
 to schedule exactly `verify-demo-token`. Share the activity definition with the
-workflow package, not its implementation. Use `vault_activity_options` with
-the workflow context's namespace to select the queue deterministically. Keep
-the total activity timeout bounded so an unavailable vault does not stall the
-workflow indefinitely.
+workflow package, not its implementation. Use Temporal's standard activity
+options builder and derive the queue from the workflow context, not process
+configuration or workflow input:
+
+```rust,ignore
+let options = ActivityOptions::with_schedule_to_close_timeout(Duration::from_secs(10))
+    .task_queue(boreal_sdk::worker::vault_task_queue(ctx.namespace()))
+    .do_not_eagerly_execute(true)
+    .build();
+```
+
+Keep the total activity timeout bounded so an unavailable vault does not stall
+the workflow indefinitely.

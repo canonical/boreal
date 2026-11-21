@@ -21,13 +21,13 @@ moving branches during deployment.
 | `mkVm { system ? "x86_64-linux", modules, specialArgs ? {} }` | Build a disposable QEMU guest configuration with the default and VM modules. |
 | `mkLabCheck { pkgs, modules, specialArgs ? {} }` | Validate NixOS assertions and generated policy and schema catalogs in `nix flake check`. |
 | `mkFleetCheck { pkgs, hosts }` | Validate that evaluated hosts agree on worker placement and have exactly one central host. |
-| `mkDevShell pkgs { ... }` | Create the Rust development shell and link the pinned worker crate at `.boreal/boreal-worker`. |
-| `buildRustWorker pkgs { ... }` | Build Temporal worker binaries and schema outputs using the pinned worker crate. |
+| `mkDevShell pkgs { ... }` | Create the Rust development shell and link the pinned SDK at `.boreal/boreal-sdk`. |
+| `buildRustWorker pkgs { ... }` | Build Temporal worker binaries and schema outputs using the pinned SDK. |
 | `buildRustVault pkgs { ... }` | Build a separate, activity-only [vault worker package](vault.md#configure-a-vault). |
 | `mkLocal pkgs { workers, vault ? null }` | Build the rootless `boreal-local` launcher for a single-user lab. |
 
 For examples, see [host configuration](host.md), [VM configuration](vm.md),
-[local development](local.md), and the [worker runtime](../worker/README.md).
+[local development](local.md), and the [Boreal SDK](../sdk/README.md).
 
 ## Packages
 

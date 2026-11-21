@@ -12,7 +12,7 @@
 | Area | Start here |
 | --- | --- |
 | Flake API, packaging, NixOS services | `flake.nix`, `lib/`, `packages/`, `modules/` |
-| Downstream starter and example worker | `templates/default/`, `worker/` |
+| Downstream SDK, private schema renderer, and starter | `sdk/`, `sdk/catalog/`, `templates/default/` |
 | Shared catalogs, schemas, and IPC | `common/` |
 | SSH shell, authorization, admin, and activation | `shell/`, `broker/`, `admin/`, `updater/` |
 | Module, local runtime, terminal, and VM checks | `tests/`, `CONTRIBUTING.md` |

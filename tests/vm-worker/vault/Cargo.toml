@@ -10,7 +10,7 @@ name = "lab-vault"
 path = "main.rs"
 
 [dependencies]
-boreal-worker = { path = "../../.boreal/boreal-worker", features = ["read-secrets"] }
+boreal-sdk = { path = "../../.boreal/boreal-sdk", features = ["read-secrets"] }
 futures = "0.3"
 lab-worker = { path = ".." }
 temporalio-common = "~1.2.0"

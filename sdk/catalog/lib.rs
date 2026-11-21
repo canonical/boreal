@@ -1,3 +1,5 @@
+//! Internal renderer for the build-time Boreal launch catalog.
+
 use std::fmt::Write as _;
 
 use schemars::Schema;

@@ -1,8 +1,8 @@
 # Boreal downstream lab starter
 
 Starter flake consuming `github:canonical/boreal`. `boreal.lib.buildRustWorker`
-and `boreal.lib.mkDevShell` automatically link `${boreal}/worker` at
-`.boreal/boreal-worker`, so `flake.lock` is the single source of truth for the
+and `boreal.lib.mkDevShell` automatically link `${boreal}/sdk` at
+`.boreal/boreal-sdk`, so `flake.lock` is the single source of truth for the
 Boreal framework revision.
 
 Develop with the Nix package manager on Linux; the development machine does
