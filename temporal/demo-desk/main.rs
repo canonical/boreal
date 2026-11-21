@@ -1,18 +1,15 @@
 use std::{io, time::Duration};
 
-use boreal_worker::{
-    connect_namespace,
-    temporalio_client::{
-        WorkflowGetResultOptions, WorkflowIdReusePolicy, WorkflowStartOptions,
-        errors::WorkflowGetResultError,
-    },
-    vault_activity_options,
-};
+use boreal_sdk::{client, worker};
 use demo_core::{
     DISPATCH_WORKER, Dispatch, Request, VaultChecks, activity_failure, credential_check_options,
     single_attempt,
 };
 use serde::{Deserialize, Serialize};
+use temporalio_client::{
+    WorkflowGetResultOptions, WorkflowIdReusePolicy, WorkflowStartOptions,
+    errors::WorkflowGetResultError,
+};
 use temporalio_macros::{activities, workflow, workflow_methods};
 use temporalio_sdk::{
     ActivityOptions, WorkflowContext, WorkflowResult,
@@ -54,7 +51,7 @@ impl DeskActivities {
         // A separate Temporal execution, not a child workflow. In the VM the
         // broker authorizes the start and history RPCs as the alice desk worker.
         tokio::time::timeout(Duration::from_secs(30), async {
-            let client = connect_namespace(namespace)
+            let client = client::connect_namespace(namespace)
                 .await
                 .map_err(|_| io::Error::other("could not connect to Temporal for dispatch"))?;
             let options = WorkflowStartOptions::new(
@@ -111,10 +108,13 @@ impl DeskWorkflow {
         request: Request,
     ) -> WorkflowResult<DeskResult> {
         request.validate()?;
-        let vault_options = vault_activity_options(ctx.namespace(), credential_check_options());
-        ctx.execute_activity(VaultChecks::check_desk_badge, (), vault_options)
-            .await
-            .map_err(activity_failure)?;
+        ctx.execute_activity(
+            VaultChecks::check_desk_badge,
+            (),
+            credential_check_options(ctx.namespace()),
+        )
+        .await
+        .map_err(activity_failure)?;
 
         // Do not retry a workflow start or repeat it after an uncertain result.
         let options = ActivityOptions::with_schedule_to_close_timeout(Duration::from_secs(35))
@@ -126,13 +126,13 @@ impl DeskWorkflow {
     }
 }
 
-boreal_worker::declare_worker! {
+worker::main! {
     package = "demo-desk",
     workflows = {
         export request: DeskWorkflow => "Check the desk badge and send a zone request to dispatch",
     },
     configure = |opts| opts
-        .graceful_shutdown_period(boreal_worker::DEFAULT_SHUTDOWN_GRACE)
+        .graceful_shutdown_period(worker::DEFAULT_SHUTDOWN_GRACE)
         .register_activities(DeskActivities),
 }
 

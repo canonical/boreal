@@ -14,8 +14,11 @@ name = "schema"
 path = "main.rs"
 
 [dependencies]
-boreal-worker = { workspace = true, features = ["schema"] }
+boreal-sdk = { workspace = true, features = ["schema"] }
 demo-core.workspace = true
 temporalio-macros.workspace = true
 temporalio-sdk.workspace = true
 temporalio-workflow.workspace = true
+
+[dev-dependencies]
+temporalio-common.workspace = true

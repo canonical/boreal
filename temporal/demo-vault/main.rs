@@ -1,5 +1,6 @@
 use std::io;
 
+use boreal_sdk::{secret, worker};
 use temporalio_macros::activities;
 use temporalio_sdk::{
     WorkerOptions,
@@ -9,7 +10,7 @@ use temporalio_sdk::{
 struct Vault;
 
 fn require_nonempty(
-    credential: boreal_worker::Result<Vec<u8>>,
+    credential: secret::Result<Vec<u8>>,
     message: &'static str,
 ) -> Result<(), ActivityError> {
     match credential {
@@ -25,7 +26,7 @@ impl Vault {
     #[allow(dead_code)] // Callers use the shared definition, not the implementation marker.
     fn check_desk_badge(_ctx: ActivityContext) -> Result<(), ActivityError> {
         require_nonempty(
-            boreal_worker::read_secret_bytes("desk_badge"),
+            secret::read_bytes("desk_badge"),
             "desk_badge is missing, empty, or unreadable",
         )
     }
@@ -34,17 +35,17 @@ impl Vault {
     #[allow(dead_code)]
     fn check_dispatch_key(_ctx: ActivityContext) -> Result<(), ActivityError> {
         require_nonempty(
-            boreal_worker::read_secret_bytes("dispatch_key"),
+            secret::read_bytes("dispatch_key"),
             "dispatch_key is missing, empty, or unreadable",
         )
     }
 }
 
 #[tokio::main]
-async fn main() -> boreal_worker::Result<()> {
-    boreal_worker::run_worker("vault", |queue| {
+async fn main() -> worker::Result<()> {
+    worker::run("vault", |queue| {
         Ok(WorkerOptions::new(queue)
-            .graceful_shutdown_period(boreal_worker::DEFAULT_SHUTDOWN_GRACE)
+            .graceful_shutdown_period(worker::DEFAULT_SHUTDOWN_GRACE)
             .register_activities(Vault)
             .build())
     })

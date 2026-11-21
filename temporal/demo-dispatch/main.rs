@@ -1,4 +1,4 @@
-use boreal_worker::vault_activity_options;
+use boreal_sdk::worker;
 use demo_core::{
     DISPATCH_WORKFLOW_TYPE, Request, VaultChecks, activity_failure, credential_check_options,
 };
@@ -21,27 +21,30 @@ impl DispatchWorkflow {
     #[run(name = DISPATCH_WORKFLOW_TYPE)]
     pub async fn run(ctx: &mut WorkflowContext<Self>, request: Request) -> WorkflowResult<String> {
         request.validate()?;
-        let vault_options = vault_activity_options(ctx.namespace(), credential_check_options());
-        ctx.execute_activity(VaultChecks::check_dispatch_key, (), vault_options)
-            .await
-            .map_err(activity_failure)?;
+        ctx.execute_activity(
+            VaultChecks::check_dispatch_key,
+            (),
+            credential_check_options(ctx.namespace()),
+        )
+        .await
+        .map_err(activity_failure)?;
         Ok(receipt(&request))
     }
 }
 
-boreal_worker::declare_worker! {
+worker::main! {
     package = "demo-dispatch",
     workflows = {
         export receipt: DispatchWorkflow => "Check the dispatch key and issue a zone receipt",
     },
-    configure = |opts| opts.graceful_shutdown_period(boreal_worker::DEFAULT_SHUTDOWN_GRACE),
+    configure = |opts| opts.graceful_shutdown_period(worker::DEFAULT_SHUTDOWN_GRACE),
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use boreal_worker::temporalio_common::WorkflowDefinition;
     use demo_core::{Dispatch, Zone};
+    use temporalio_common::WorkflowDefinition;
 
     #[test]
     fn registered_workflow_matches_the_desk_contract() {

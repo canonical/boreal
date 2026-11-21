@@ -9,6 +9,7 @@ license.workspace = true
 path = "lib.rs"
 
 [dependencies]
+boreal-sdk.workspace = true
 schemars.workspace = true
 serde.workspace = true
 temporalio-common.workspace = true

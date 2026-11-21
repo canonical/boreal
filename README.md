@@ -21,8 +21,8 @@ token-derived value is sent to Temporal. There are no external services.
 
 Run the examples from this worktree. `../..` is the enclosing Boreal checkout;
 point it at your framework checkout if you cloned this branch elsewhere. The
-override is needed for local mode until a framework release with `mkLocal` is
-pinned here. It does not modify the lock file.
+override is needed until the pinned framework revision provides `boreal-sdk`.
+It does not modify the lock file.
 
 ```sh
 framework=$(realpath ../..)

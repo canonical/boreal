@@ -1,5 +1,6 @@
 use std::{fmt, io, time::Duration};
 
+use boreal_sdk::worker::vault_task_queue;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use temporalio_common::{HasWorkflowDefinition, RetryPolicy, WorkflowDefinition};
@@ -91,13 +92,15 @@ pub fn single_attempt() -> RetryPolicy {
     RetryPolicy::builder().maximum_attempts(1).build()
 }
 
-pub fn credential_check_options() -> ActivityOptions {
+pub fn credential_check_options(namespace: &str) -> ActivityOptions {
     // Missing or unreadable fixtures should fail immediately, not keep retrying.
     ActivityOptions::with_close_timeouts(ActivityCloseTimeouts::ScheduleAndStartToClose {
         schedule_to_close: Duration::from_secs(10),
         start_to_close: Duration::from_secs(3),
     })
     .retry_policy(single_attempt())
+    .task_queue(vault_task_queue(namespace))
+    .do_not_eagerly_execute(true)
     .build()
 }
 
@@ -143,11 +146,18 @@ mod tests {
     }
 
     #[test]
-    fn credential_checks_do_not_retry() {
-        assert_eq!(
-            credential_check_options().retry_policy,
-            Some(single_attempt())
-        );
-        assert_eq!(single_attempt().maximum_attempts(), 1);
+    fn test_credential_checks_use_the_namespace_vault_without_eager_execution_or_retries() {
+        let options = credential_check_options("alice");
+        assert_eq!(options.task_queue.as_deref(), Some("alice-vault"));
+        assert!(options.do_not_eagerly_execute);
+        assert_eq!(options.retry_policy.unwrap().maximum_attempts(), 1);
+        assert!(matches!(
+            options.close_timeouts,
+            ActivityCloseTimeouts::ScheduleAndStartToClose {
+                schedule_to_close,
+                start_to_close,
+            } if schedule_to_close == Duration::from_secs(10)
+                && start_to_close == Duration::from_secs(3)
+        ));
     }
 }
