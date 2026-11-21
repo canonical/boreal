@@ -1,23 +1,30 @@
 [workspace]
+members = ["catalog"]
 resolver = "3"
 
-[package]
-name = "boreal-worker"
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.92"
 license = "MIT"
 
+[package]
+name = "boreal-worker"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
 [features]
-schema = ["dep:schemars", "dep:serde_json", "dep:validator"]
+schema = ["dep:boreal-schema", "dep:schemars", "dep:validator"]
 read-secrets = []
 
 [lib]
 path = "lib.rs"
 
 [dependencies]
+boreal-schema = { path = "catalog", optional = true }
 schemars = { version = "1", optional = true, features = ["preserve_order"] }
-serde_json = { version = "1", optional = true }
 temporalio-client = "~1.2.0"
 temporalio-common = "~1.2.0"
 temporalio-macros = "~1.2.0"
