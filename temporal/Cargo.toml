@@ -1,5 +1,5 @@
 [workspace]
-members = ["beijing-worker"]
+members = ["lab-worker"]
 resolver = "3"
 
 [workspace.package]

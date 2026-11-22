@@ -36,8 +36,8 @@
           system = pkgs.stdenv.hostPlatform.system;
         in
         {
-          beijing-worker = boreal.lib.buildRustWorker pkgs {
-            pname = "beijing-worker";
+          lab-worker = boreal.lib.buildRustWorker pkgs {
+            pname = "lab-worker";
             src = ./temporal;
             cargoLock.lockFile = ./temporal/Cargo.lock;
             outputs = [
@@ -47,7 +47,7 @@
             ];
           };
           boreal-local = boreal.lib.mkLocal pkgs {
-            workers.beijing = self.packages.${system}.beijing-worker.beijing;
+            workers.beijing = self.packages.${system}.lab-worker.beijing;
           };
         }
         // nixpkgs.lib.optionalAttrs (pkgs.stdenv.hostPlatform.system == "x86_64-linux") {

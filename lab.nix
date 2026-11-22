@@ -15,7 +15,7 @@ in
         write = false;
       };
       workers.beijing = {
-        package = workers.beijing-worker.beijing;
+        package = workers.lab-worker.beijing;
         placement.central = true;
       };
     };
