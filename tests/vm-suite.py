@@ -41,9 +41,8 @@ def ssh_cmd(user: str, *remote_args: str) -> list[str]:
 
 def run_line(worker: str, workflow_id: str, name: str, wait_seconds: int, *, owner: str | None = None) -> bytes:
     payload = json.dumps({"name": name, "wait_seconds": wait_seconds}, ensure_ascii=False)
-    args = ["run", worker, "--id", workflow_id, "--input-json", payload]
-    if owner is not None:
-        args.extend(["--owner", owner])
+    selector = worker if owner is None else f"{worker}/{owner}"
+    args = ["run", selector, "--id", workflow_id, "--input-json", payload]
     return (shlex.join(args) + "\r").encode()
 
 
@@ -472,20 +471,20 @@ def test_ssh_shell_permissions_secrets_and_recovery() -> None:
         bob.send(run_line("count", "bob-denied-1", "No", 5, owner="alice"))
         bob.wait_for(b"error:")
 
-        bob.send(b"result count-1 --owner alice\r")
+        bob.send(b"result count-1/alice\r")
         bob.wait_for(b"Character count: 4")
 
-        bob.send(b"cancel slow-count-1 --owner alice\r")
+        bob.send(b"cancel slow-count-1/alice\r")
         bob.wait_for(b"error: permission denied")
 
-        bob.send(b"cancel bob-del-1 --owner alice\r")
+        bob.send(b"cancel bob-del-1/alice\r")
         bob.wait_for(b"Cancel DemoWorkflow 'bob-del-1'", b"[y/N]: ", wait_prompt=False)
         bob.send(b"n\r")
         bob.wait_for(b"cancellation aborted.")
-        bob.send(b"status bob-del-1 --owner alice\r")
+        bob.send(b"status bob-del-1/alice\r")
         bob.wait_for(b"status:      running")
 
-        bob.send(b"cancel bob-del-1 --owner alice\r")
+        bob.send(b"cancel bob-del-1/alice\r")
         bob.wait_for(b"Cancel DemoWorkflow 'bob-del-1'", b"[y/N]: ", wait_prompt=False)
         bob.send(b"y\r")
         bob.wait_for(b"cancellation requested for DemoWorkflow 'bob-del-1'")
@@ -497,8 +496,8 @@ def test_ssh_shell_permissions_secrets_and_recovery() -> None:
     try:
         carol.wait_for(b"Boreal lab shell (carol)", "carol on 󰇅 ".encode())
         for _ in range(20):
-            carol.send(b"list --owner alice\r")
-            listing = carol.wait_for(b"list --owner alice")
+            carol.send(b"list alice\r")
+            listing = carol.wait_for(b"list alice")
             if b"rec-wf-1" in listing:
                 assert b"count-1" not in listing, f"carol saw private count-1: {listing!r}"
                 assert b"slow-count-1" not in listing, f"carol saw slow-count-1: {listing!r}"
@@ -507,9 +506,9 @@ def test_ssh_shell_permissions_secrets_and_recovery() -> None:
         else:
             raise AssertionError("carol did not see public alice/greet workflow in list")
 
-        carol.send(b"status count-1 --owner alice\r")
+        carol.send(b"status count-1/alice\r")
         carol.wait_for(b"error: permission denied")
-        carol.send(b"list --owner bob\r")
+        carol.send(b"list bob\r")
         carol.wait_for(b"error:")
     finally:
         carol.close()

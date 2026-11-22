@@ -1,11 +1,10 @@
-use std::collections::BTreeMap;
-
 use boreal_common::catalog::{self, Catalog};
 use boreal_common::secret;
 use boreal_common::wire::RunInput;
 use clap::builder::{PossibleValue, PossibleValuesParser};
 use clap::error::ErrorKind;
 use clap::{Arg, ArgAction, Command};
+use clap_complete::engine::{ArgValueCandidates, CompletionCandidate};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SecretAction {
@@ -136,18 +135,42 @@ impl Context {
         Ok(package)
     }
 
-    pub fn cli(&self, run_owner_hint: Option<&str>) -> Command {
+    pub fn owners(&self, writable: bool) -> Vec<&str> {
+        if writable {
+            self.catalog.writable_owners(&self.caller)
+        } else {
+            self.catalog.readable_owners(&self.caller)
+        }
+    }
+
+    fn target_owner(
+        &self,
+        explicit: Option<&str>,
+        writable: bool,
+    ) -> Result<Option<String>, String> {
+        let owner = explicit.unwrap_or(self.caller());
+        let allowed = if writable {
+            self.catalog.has_any_write(self.caller(), owner)
+        } else {
+            self.catalog.has_any_read(self.caller(), owner)
+        };
+        if allowed {
+            Ok(Some(owner.to_owned()))
+        } else if explicit.is_some() {
+            Err(format!(
+                "permission denied: account '{owner}' is not available for this command"
+            ))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn cli(&self) -> Command {
         let readable = self.catalog.readable_owners(&self.caller);
-        let writable = self.catalog.writable_owners(&self.caller);
         let perm_users = self.catalog.visible_permission_users(&self.caller);
 
-        let mut worker_choices: BTreeMap<String, String> = BTreeMap::new();
+        let mut worker_choices = Vec::new();
         for (owner, policy) in self.catalog.users() {
-            if let Some(hint) = run_owner_hint
-                && owner != hint
-            {
-                continue;
-            }
             for (wname, worker) in policy.workers() {
                 if !self.catalog.can_write(&self.caller, owner, wname) {
                     continue;
@@ -158,26 +181,25 @@ impl Context {
                     .get(worker.package())
                     .and_then(catalog::Package::only_workflow)
                     .map_or("", |workflow| workflow.description());
-                worker_choices
-                    .entry(wname.clone())
-                    .or_insert_with(|| desc.to_owned());
+                if owner == self.caller() {
+                    worker_choices.push((wname.clone(), desc.to_owned()));
+                }
+                worker_choices.push((format!("{wname}/{owner}"), desc.to_owned()));
             }
         }
 
-        let worker_values: Vec<PossibleValue> = worker_choices
-            .into_iter()
-            .map(|(name, desc)| {
-                if desc.is_empty() {
-                    PossibleValue::new(name)
-                } else {
-                    PossibleValue::new(name).help(desc)
-                }
-            })
-            .collect();
-
         let worker_arg = Arg::new("worker")
-            .help("Registered worker name")
-            .value_parser(PossibleValuesParser::new(worker_values));
+            .value_name("WORKER[/OWNER]")
+            .help("Registered worker; append /OWNER to select another account")
+            .add(ArgValueCandidates::new(move || {
+                worker_choices
+                    .iter()
+                    .map(|(value, desc)| {
+                        CompletionCandidate::new(value.clone())
+                            .help((!desc.is_empty()).then(|| desc.clone().into()))
+                    })
+                    .collect()
+            }));
 
         let run_cmd = Command::new("run")
             .about("Run a workflow")
@@ -199,32 +221,37 @@ impl Context {
                     .long("workflow")
                     .value_name("ALIAS")
                     .help("Exported workflow alias"),
-            )
-            .arg(owner_arg(&writable, &self.caller));
+            );
 
-        let list_cmd = Command::new("list")
-            .about("List workflows")
-            .arg(owner_arg(&readable, &self.caller));
+        let list_cmd = Command::new("list").about("List workflows").arg(
+            Arg::new("owner")
+                .value_name("OWNER")
+                .help("Target account; defaults to your account")
+                .value_parser(PossibleValuesParser::new(
+                    readable.into_iter().map(str::to_owned).collect::<Vec<_>>(),
+                )),
+        );
+        let execution_arg = || {
+            Arg::new("id")
+                .value_name("ID[/OWNER]")
+                .help("Workflow ID; append /OWNER to select another account")
+        };
 
         let status_cmd = Command::new("status")
             .about("Describe a workflow")
-            .arg(Arg::new("id").help("Workflow ID"))
-            .arg(owner_arg(&readable, &self.caller));
+            .arg(execution_arg());
 
         let result_cmd = Command::new("result")
             .about("Show a workflow result")
-            .arg(Arg::new("id").help("Workflow ID"))
-            .arg(owner_arg(&readable, &self.caller));
+            .arg(execution_arg());
 
         let view_cmd = Command::new("view")
             .about("Inspect a workflow run in a live TUI")
-            .arg(Arg::new("id").help("Workflow ID"))
-            .arg(owner_arg(&readable, &self.caller));
+            .arg(execution_arg());
 
         let cancel_cmd = Command::new("cancel")
             .about("Cancel a workflow")
-            .arg(Arg::new("id").help("Workflow ID"))
-            .arg(owner_arg(&writable, &self.caller));
+            .arg(execution_arg());
 
         let mut perm_arg = Arg::new("user")
             .help("Boreal user to inspect")
@@ -297,7 +324,7 @@ impl Context {
         if words.is_empty() {
             return Ok(None);
         }
-        let mut cmd = self.cli(None);
+        let mut cmd = self.cli();
         let matches = cmd
             .try_get_matches_from_mut(
                 std::iter::once("boreal").chain(words.iter().map(String::as_str)),
@@ -307,18 +334,23 @@ impl Context {
 
         let action = match matches.subcommand() {
             Some(("workers", _)) => Action::Workers,
-            Some(("run", sub)) => self
-                .prepare_run(
+            Some(("run", sub)) => {
+                let (worker, explicit) = parse_selector(&mut cmd, sub.get_one::<String>("worker"))?;
+                let owner = self
+                    .target_owner(explicit, true)
+                    .map_err(|e| invalid(&mut cmd, e))?;
+                self.prepare_run(
                     Launch {
-                        owner: sub.get_one::<String>("owner").cloned(),
-                        worker: sub.get_one::<String>("worker").cloned(),
+                        owner,
+                        worker: worker.map(str::to_owned),
                         workflow: sub.get_one::<String>("workflow").cloned(),
                         id: sub.get_one::<String>("id").cloned(),
                         input_json: sub.get_one::<String>("input-json").cloned(),
                     },
                     ask,
                 )
-                .map_err(|e| Error::Clap(cmd.error(ErrorKind::ValueValidation, e)))?,
+                .map_err(|e| invalid(&mut cmd, e))?
+            }
             Some((name @ ("list" | "status" | "result" | "view" | "cancel"), sub)) => {
                 let kind = match name {
                     "list" => Target::List,
@@ -327,11 +359,18 @@ impl Context {
                     "view" => Target::View,
                     _ => Target::Cancel,
                 };
-                let owner = sub.get_one::<String>("owner").cloned();
-                let id = sub.try_get_one::<String>("id").ok().flatten().cloned();
-                if let Some(id) = &id {
-                    validate_id_or_clap(&mut cmd, id)?;
+                let (id, explicit) = if kind == Target::List {
+                    (None, sub.get_one::<String>("owner").map(String::as_str))
+                } else {
+                    parse_selector(&mut cmd, sub.get_one::<String>("id"))?
+                };
+                if let Some(id) = id {
+                    catalog::validate_workflow_id(id).map_err(|e| invalid(&mut cmd, e.detail()))?;
                 }
+                let id = id.map(str::to_owned);
+                let owner = self
+                    .target_owner(explicit, kind == Target::Cancel)
+                    .map_err(|e| invalid(&mut cmd, e))?;
                 if let Some(action) = owner
                     .clone()
                     .and_then(|owner| kind.action(owner, id.clone()))
@@ -343,7 +382,7 @@ impl Context {
                     return Err(Error::Clap(cmd.error(
                         ErrorKind::ValueValidation,
                         if owner.is_none() {
-                            "specify --owner"
+                            "specify an account"
                         } else {
                             "specify a workflow ID"
                         },
@@ -391,7 +430,7 @@ impl Context {
                 Ok(Action::Prompt(Missing::Run(launch)))
             } else {
                 Err(if launch.owner.is_none() {
-                    "specify --owner"
+                    "specify a worker as WORKER/OWNER"
                 } else {
                     "specify a worker"
                 }
@@ -440,25 +479,30 @@ pub fn named_secret(name: String, remove: bool) -> Result<Action, String> {
     }))
 }
 
-fn owner_arg(allowed: &[&str], caller: &str) -> Arg {
-    let values: Vec<PossibleValue> = allowed
-        .iter()
-        .map(|u| PossibleValue::new((*u).to_owned()))
-        .collect();
-    let mut arg = Arg::new("owner")
-        .long("owner")
-        .action(ArgAction::Set)
-        .help("Target Boreal account")
-        .value_parser(PossibleValuesParser::new(values));
-    if allowed.contains(&caller) {
-        arg = arg.default_value(caller.to_owned());
+pub fn split_selector(value: &str) -> Result<(&str, Option<&str>), &'static str> {
+    match value.rsplit_once('/') {
+        Some((target, owner)) if !target.is_empty() && !owner.is_empty() => {
+            Ok((target, Some(owner)))
+        }
+        None if !value.is_empty() => Ok((value, None)),
+        _ => Err("expected a non-empty selector and, after '/', a non-empty owner"),
     }
-    arg
 }
 
-fn validate_id_or_clap(cmd: &mut Command, id: &str) -> Result<(), Error> {
-    catalog::validate_workflow_id(id)
-        .map_err(|e| Error::Clap(cmd.error(ErrorKind::ValueValidation, e.detail())))
+fn parse_selector<'a>(
+    cmd: &mut Command,
+    value: Option<&'a String>,
+) -> Result<(Option<&'a str>, Option<&'a str>), Error> {
+    match value {
+        Some(value) => split_selector(value)
+            .map(|(target, owner)| (Some(target), owner))
+            .map_err(|e| invalid(cmd, e)),
+        None => Ok((None, None)),
+    }
+}
+
+fn invalid(cmd: &mut Command, message: impl std::fmt::Display) -> Error {
+    Error::Clap(cmd.error(ErrorKind::ValueValidation, message))
 }
 
 pub enum Error {
@@ -496,7 +540,13 @@ mod tests {
         let cases = [
             ("workers", Action::Workers),
             (
-                "list --owner bob",
+                "list",
+                Action::List {
+                    owner: "alice".into(),
+                },
+            ),
+            (
+                "list bob",
                 Action::List {
                     owner: "bob".into(),
                 },
@@ -509,24 +559,31 @@ mod tests {
                 },
             ),
             (
-                "result run-1 --owner bob",
+                "result run-1/bob",
                 Action::Result {
                     id: "run-1".into(),
                     owner: "bob".into(),
                 },
             ),
             (
-                "view run-1 --owner bob",
+                "view run-1/bob",
                 Action::View {
                     id: "run-1".into(),
                     owner: "bob".into(),
                 },
             ),
             (
-                "cancel run-1",
+                "status suite/run-1/alice",
+                Action::Status {
+                    id: "suite/run-1".into(),
+                    owner: "alice".into(),
+                },
+            ),
+            (
+                "cancel run-1/bob",
                 Action::Cancel {
                     id: "run-1".into(),
-                    owner: "alice".into(),
+                    owner: "bob".into(),
                 },
             ),
             (
@@ -574,7 +631,7 @@ mod tests {
                 },
             ),
             (
-                r#"run greet --id run-1 --owner bob --input-json '{"name":"Alice Smith","wait_seconds":5}'"#,
+                r#"run greet/bob --id run-1 --input-json '{"name":"Alice Smith","wait_seconds":5}'"#,
                 Action::Run {
                     worker: "greet".into(),
                     workflow: None,
@@ -594,7 +651,7 @@ mod tests {
 
         // Alice does NOT have write on bob/count in mock catalog!
         assert!(matches!(
-            ctx.parse(r#"run count --id run-1 --owner bob --input-json '{"name":"Alice"}'"#),
+            ctx.parse(r#"run count/bob --id run-1 --input-json '{"name":"Alice"}'"#),
             Err(Error::Clap(_))
         ));
     }
@@ -610,7 +667,14 @@ mod tests {
             "run greet --id run-1 Alice 5",
             r#"run greet --input-json '{"name":"Alice","wait_seconds":"nope"}'"#,
             "run other --id run-1",
-            "status run-1 --owner eve",
+            "status run-1/eve",
+            "status run-1/",
+            "status /bob",
+            "status temporal-sys-forbidden/bob",
+            "run greet/",
+            "run greet/unknown",
+            "list /bob",
+            "list --owner bob",
             "secrets set api_token leaked_value",
             "secrets set ../escape",
             "workers; exit",
@@ -625,7 +689,7 @@ mod tests {
             matches!(ctx.parse("help"), Err(Error::Clap(err)) if err.kind() == ErrorKind::DisplayHelp)
         );
         assert!(matches!(ctx.parse("run --help"), Err(Error::Clap(err))
-            if err.to_string().lines().any(|line| line == "Usage: boreal run [OPTIONS] [worker]")));
+            if err.to_string().lines().any(|line| line == "Usage: boreal run [OPTIONS] [WORKER[/OWNER]]")));
     }
 
     #[test]

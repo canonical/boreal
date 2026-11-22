@@ -10,6 +10,8 @@ use reedline::{
     FileBackedHistory, History, HistoryItem, HistoryItemId, HistorySessionId, SearchQuery,
 };
 
+use crate::command;
+
 const HISTORY_FILE: &str = "boreal.history";
 const CAPACITY: usize = 2000;
 const MAX_SELECTOR_BYTES: usize = 255;
@@ -60,7 +62,7 @@ fn workflow_id(value: &str) -> Option<&str> {
             .is_some_and(u8::is_ascii_alphanumeric)
         && value
             .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b'/'))
         && catalog::validate_workflow_id(value).is_ok())
     .then_some(value)
 }
@@ -88,8 +90,7 @@ fn canonical(line: &str) -> Option<String> {
 
     let run = cmd == "run";
     let required_id = matches!(cmd, "status" | "result" | "view" | "cancel");
-    let mut worker = None;
-    let mut owner = None;
+    let mut selector = None;
     let mut workflow = None;
     let mut id = None;
     let mut args = args.iter().map(String::as_str);
@@ -102,7 +103,6 @@ fn canonical(line: &str) -> Option<String> {
             .map_or((word, None), |(flag, value)| (flag, Some(value)));
         match flag {
             "--no-ask" if attached.is_none() => {}
-            "--owner" if owner.is_none() => owner = Some(name(attached.or_else(|| args.next())?)?),
             "--workflow" if run && workflow.is_none() => {
                 workflow = Some(name(attached.or_else(|| args.next())?)?);
             }
@@ -121,9 +121,21 @@ fn canonical(line: &str) -> Option<String> {
             }
             "--owner" | "--workflow" | "--id" | "--input-json" => return None,
             _ if word.starts_with('-') => break,
-            _ if run && worker.is_none() => worker = Some(name(word)?),
-            _ if required_id && id.is_none() => {
-                id = Some(workflow_id(word)?);
+            _ if selector.is_none() => {
+                if run || required_id {
+                    let (target, owner) = command::split_selector(word).ok()?;
+                    if run {
+                        name(target)?;
+                    } else {
+                        workflow_id(target)?;
+                    }
+                    if let Some(owner) = owner {
+                        name(owner)?;
+                    }
+                } else {
+                    name(word)?;
+                }
+                selector = Some(word);
             }
             _ if run => break,
             _ => return None,
@@ -131,11 +143,11 @@ fn canonical(line: &str) -> Option<String> {
     }
 
     let mut entry = cmd.to_owned();
+    if let Some(selector) = selector {
+        entry.push(' ');
+        entry.push_str(selector);
+    }
     if run {
-        if let Some(worker) = worker {
-            entry.push(' ');
-            entry.push_str(worker);
-        }
         if let Some(id) = id {
             entry.push_str(" --id ");
             entry.push_str(id);
@@ -144,15 +156,31 @@ fn canonical(line: &str) -> Option<String> {
             entry.push_str(" --workflow ");
             entry.push_str(workflow);
         }
-    } else if required_id && let Some(id) = id {
-        entry.push(' ');
-        entry.push_str(id);
-    }
-    if let Some(owner) = owner {
-        entry.push_str(" --owner ");
-        entry.push_str(owner);
     }
     Some(entry)
+}
+
+fn migrate_owner(line: &str) -> Option<String> {
+    let (base, owner) = line.rsplit_once(" --owner ")?;
+    let owner = name(owner)?;
+    if canonical(base).as_deref() != Some(base) {
+        return None;
+    }
+    if base == "list" {
+        return Some(format!("list {owner}"));
+    }
+    let (cmd, args) = base.split_once(' ')?;
+    let (target, tail) = match cmd {
+        "run" => args
+            .split_once(' ')
+            .map_or((args, ""), |(word, _)| (word, &args[word.len()..])),
+        "status" | "result" | "view" | "cancel" => (args, ""),
+        _ => return None,
+    };
+    if target.starts_with('-') || target.contains('/') {
+        return None;
+    }
+    Some(format!("{cmd} {target}/{owner}{tail}"))
 }
 
 fn unsafe_path() -> io::Error {
@@ -255,14 +283,18 @@ fn read_entries(file: &mut File) -> io::Result<(VecDeque<String>, bool)> {
             dirty = true;
             continue;
         };
-        // Only our canonical format is eligible for recall. Do not copy raw
-        // noncanonical text or a partial final write into history.
-        if canonical(line).as_deref() != Some(line) {
+        // Never recall raw noncanonical text or a partial final write.
+        let entry = if canonical(line).as_deref() == Some(line) {
+            line.to_owned()
+        } else if let Some(migrated) = migrate_owner(line) {
+            dirty = true;
+            migrated
+        } else {
             dirty = true;
             continue;
-        }
+        };
         dirty |= entries.len() == CAPACITY;
-        dirty |= !push_entry(&mut entries, line.to_owned());
+        dirty |= !push_entry(&mut entries, entry);
     }
     Ok((entries, dirty))
 }
@@ -399,19 +431,19 @@ mod tests {
             ("run", Some("run")),
             ("status", Some("status")),
             (
-                "run greet --id first --workflow greeting --owner bob",
-                Some("run greet --id first --workflow greeting --owner bob"),
+                "run greet/bob --id first --workflow greeting",
+                Some("run greet/bob --id first --workflow greeting"),
             ),
             (
-                "run greet --id=first -- --owner leaked",
+                "run greet --id=first -- ignored/leaked",
                 Some("run greet --id first"),
             ),
             (
-                r#"run greet --input-json '{"password":"private-value"}' --owner=bob"#,
-                Some("run greet --owner bob"),
+                r#"run --input-json '{"password":"private-value"}' greet/bob"#,
+                Some("run greet/bob"),
             ),
             (
-                "run greet --id first --input-json { --owner leaked }",
+                "run greet --id first --input-json { extra/leaked }",
                 Some("run greet --id first"),
             ),
             (
@@ -420,11 +452,10 @@ mod tests {
             ),
             ("run greet --id 'not a simple selector'", None),
             ("run greet --id 'unfinished", None),
-            ("run greet --id first\n--owner leaked", None),
-            (
-                "status --owner=bob 'run-1'",
-                Some("status run-1 --owner bob"),
-            ),
+            ("run greet --id first\nextra/leaked", None),
+            ("status 'suite/run-1/bob'", Some("status suite/run-1/bob")),
+            ("status run-1/", None),
+            ("list bob", Some("list bob")),
             ("permissions bob", Some("permissions bob")),
             ("secrets set api_key", Some("secrets set api_key")),
             ("secrets set api_key private-value", None),
@@ -442,6 +473,23 @@ mod tests {
         ] {
             let saved = history.save(HistoryItem::from_command_line(line)).unwrap();
             assert_eq!(saved.command_line, recalled);
+        }
+    }
+
+    #[test]
+    fn test_migrates_only_canonical_owner_history() {
+        for (old, new) in [
+            (
+                "run greet --id old --owner bob",
+                Some("run greet/bob --id old"),
+            ),
+            ("status old --owner bob", Some("status old/bob")),
+            ("list --owner bob", Some("list bob")),
+            ("run greet --input-json private --owner bob", None),
+            ("status old/alice --owner bob", None),
+            ("status old --owner 'bob'", None),
+        ] {
+            assert_eq!(migrate_owner(old).as_deref(), new, "{old}");
         }
     }
 
@@ -464,7 +512,16 @@ mod tests {
         fs::DirBuilder::new().mode(0o700).create(&home.0).unwrap();
         let path = home.0.join(HISTORY_FILE);
         let uid = boreal_common::os::current_euid();
+        OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(FILE_MODE)
+            .open(&path)
+            .unwrap()
+            .write_all(b"status legacy --owner bob\n")
+            .unwrap();
         let mut first = open(&home.0, uid).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "status legacy/bob\n");
         let mut second = open(&home.0, uid).unwrap();
         for i in 0..CAPACITY {
             first
@@ -486,7 +543,7 @@ mod tests {
             last
         );
         second
-            .save(HistoryItem::from_command_line("status new --owner bob"))
+            .save(HistoryItem::from_command_line("status new/bob"))
             .unwrap();
         drop(first);
         drop(second);
@@ -495,7 +552,7 @@ mod tests {
         assert_eq!(reopened.count_all().unwrap(), CAPACITY as i64);
         let contents = fs::read_to_string(&path).unwrap();
         assert!(contents.starts_with("run greet --id old-1\n"));
-        assert!(contents.ends_with("status new --owner bob\n"));
+        assert!(contents.ends_with("status new/bob\n"));
         assert!(!contents.contains("private-value"));
         assert_eq!(fs::metadata(&path).unwrap().mode() & 0o7777, 0o600);
         drop(reopened);

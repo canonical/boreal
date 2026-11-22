@@ -150,8 +150,8 @@ def main():
             # Clear 'badcmd' / 'help' from top of history by running workers below.
 
             # Options include their dashes, but not the value after '='.
-            os.write(master, b"list --owner=bob")
-            wait_for(b"\x1b[33m--owner", b"=bob", b"\x1b[6 q")
+            os.write(master, b"run greet/bob --id=test")
+            wait_for(b"\x1b[33m--id", b"=test", b"\x1b[6 q")
             os.write(master, b"\x03")
             wait_for(ok_arrow, b"\x1b[6 q")
 
@@ -201,12 +201,12 @@ def main():
             wait_for(b"\x1b[?1049l", ok_arrow, b"\x1b[6 q")
 
             # Cancel requires confirmation: 'n' aborts, 'y' proceeds.
-            os.write(master, b"cancel run-1 --owner bob\r")
+            os.write(master, b"cancel run-1/bob\r")
             wait_for(b"Cancel DemoWorkflow 'run-1'", b"[y/N]: ")
             os.write(master, b"n\r")
             wait_for(b"cancellation aborted.", ok_arrow)
 
-            os.write(master, b"cancel run-1 --owner bob\r")
+            os.write(master, b"cancel run-1/bob\r")
             wait_for(b"Cancel DemoWorkflow 'run-1'", b"[y/N]: ")
             os.write(master, b"y\r")
             wait_for(b"[mock] cancellation requested for DemoWorkflow 'run-1'", ok_arrow)

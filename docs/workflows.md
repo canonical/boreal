@@ -20,8 +20,9 @@ abandon the form. In a choice list, Up/Down moves the selection and Left/Right
 changes pages. Field help comes from the Rust input type's doc comments.
 
 - If a worker exports several workflows, choose an alias in the form or pass
-  `--workflow ALIAS`, for example `--workflow count-characters`. The worker name
-  is the only positional argument to `run`.
+  `--workflow ALIAS`, for example `--workflow count-characters`.
+- Use `run example/bob` to select another account's worker. Without `/bob`, the
+  shell uses your account.
 - If you omit `--id`, Boreal generates a workflow ID.
 - Use `--input-json` to skip the form or to supply input the form cannot
   represent. Use `--no-ask` when you want missing required values to produce an
@@ -32,6 +33,11 @@ state, `view job-42` to inspect a live run, or `result job-42` to see the output
 when it is available. These commands respect lab permissions. If you have
 permission to cancel a workflow, `cancel job-42` asks for confirmation (`[y/N]`).
 Use `permissions` to inspect the policy visible to your account.
+
+Use `list bob` to list another account's workflows. For a specific execution,
+append `/bob` to its ID, as in `result job-42/bob`. The final slash separates
+the owner, so if an ID contains a slash, always append the owner explicitly:
+`result suite/job-42/alice` looks up the ID `suite/job-42` in Alice's account.
 
 ## Run from a script
 

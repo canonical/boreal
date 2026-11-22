@@ -420,14 +420,12 @@ fn execute_action(
 }
 
 fn choose_account(ctx: &Context, writable: bool) -> Result<Option<String>, String> {
-    let accounts = if writable {
-        ctx.catalog().writable_owners(ctx.caller())
-    } else {
-        ctx.catalog().readable_owners(ctx.caller())
-    };
     form::choose(
-        "--owner",
-        &accounts.into_iter().map(str::to_owned).collect::<Vec<_>>(),
+        "Account",
+        &ctx.owners(writable)
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>(),
     )
 }
 

@@ -6,7 +6,11 @@ use reedline::{Span, Suggestion};
 pub trait Grammar {
     fn cli(&self, previous: &[String]) -> clap::Command;
 
-    fn typed_arg_candidates(&self, _previous: &[String]) -> Vec<(String, Option<String>)> {
+    fn typed_arg_candidates(
+        &self,
+        _previous: &[String],
+        _prefix: &str,
+    ) -> Vec<(String, Option<String>)> {
         Vec::new()
     }
 }
@@ -49,7 +53,7 @@ pub fn candidates(grammar: &impl Grammar, line: &str, pos: usize) -> Vec<Suggest
     let mut raw_candidates = if word.prefix.starts_with('-') {
         Vec::new()
     } else {
-        grammar.typed_arg_candidates(&previous)
+        grammar.typed_arg_candidates(&previous, &word.prefix)
     };
     if let Ok(clap_items) = clap_complete::engine::complete(&mut command, args, arg_index, None) {
         for item in clap_items {
@@ -72,7 +76,7 @@ pub fn candidates(grammar: &impl Grammar, line: &str, pos: usize) -> Vec<Suggest
 
             if !insertion
                 .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'='))
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'=' | b'/'))
             {
                 return None;
             }

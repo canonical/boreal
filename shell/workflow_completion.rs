@@ -1,46 +1,64 @@
+use boreal_common::catalog;
 use boreal_shell::completion::Grammar;
 
-use crate::command::Context;
+use crate::command::{self, Context};
 
 impl Grammar for Context {
-    fn cli(&self, previous: &[String]) -> clap::Command {
-        self.cli(find_owner_hint(previous).as_deref())
+    fn cli(&self, _previous: &[String]) -> clap::Command {
+        self.cli()
     }
 
-    fn typed_arg_candidates(&self, previous: &[String]) -> Vec<(String, Option<String>)> {
-        if previous.first().map(String::as_str) != Some("run") {
-            return Vec::new();
-        }
-        let Some((_, prefix)) = previous
-            .split_last()
-            .filter(|(flag, _)| *flag == "--workflow")
-        else {
+    fn typed_arg_candidates(
+        &self,
+        previous: &[String],
+        prefix: &str,
+    ) -> Vec<(String, Option<String>)> {
+        let first = previous
+            .iter()
+            .position(|word| word != "--no-ask")
+            .unwrap_or(previous.len());
+        let Some((verb, args)) = previous[first..].split_first() else {
             return Vec::new();
         };
-        let mut args = prefix.iter().skip(1).map(String::as_str);
-        let mut worker = None;
-        let mut owner = self.caller();
+        match verb.as_str() {
+            "status" | "result" | "view" | "cancel"
+                if args.iter().all(|word| word == "--no-ask") =>
+            {
+                return prefix
+                    .rsplit_once('/')
+                    .filter(|(id, _)| catalog::validate_workflow_id(id).is_ok())
+                    .into_iter()
+                    .flat_map(|(id, _)| {
+                        self.owners(verb == "cancel")
+                            .into_iter()
+                            .map(move |owner| (format!("{id}/{owner}"), None))
+                    })
+                    .collect();
+            }
+            "run" => {}
+            _ => return Vec::new(),
+        }
+        let Some((_, args)) = args.split_last().filter(|(flag, _)| *flag == "--workflow") else {
+            return Vec::new();
+        };
+        let mut args = args.iter().map(String::as_str);
+        let mut selector = None;
         while let Some(word) = args.next() {
             let (name, value) = word
                 .split_once('=')
                 .map_or((word, None), |(n, v)| (n, Some(v)));
             match name {
-                "--owner" => {
-                    let Some(value) = value.or_else(|| args.next()) else {
-                        return Vec::new();
-                    };
-                    owner = value;
-                }
                 "--input-json" | "--id" if value.or_else(|| args.next()).is_some() => {}
                 "--no-ask" => {}
-                _ if !word.starts_with('-') && worker.is_none() => worker = Some(word),
+                _ if !word.starts_with('-') && selector.is_none() => selector = Some(word),
                 _ => return Vec::new(),
             }
         }
-        let Some(worker) = worker else {
+        let Some((worker, owner)) = selector.and_then(|value| command::split_selector(value).ok())
+        else {
             return Vec::new();
         };
-        let Ok(pkg) = self.run_package(owner, worker) else {
+        let Ok(pkg) = self.run_package(owner.unwrap_or(self.caller()), worker) else {
             return Vec::new();
         };
         pkg.workflows()
@@ -52,22 +70,6 @@ impl Grammar for Context {
             })
             .collect()
     }
-}
-
-fn find_owner_hint(words: &[String]) -> Option<String> {
-    let mut i = 0;
-    while i < words.len() {
-        if words[i] == "--owner"
-            && let Some(val) = words.get(i + 1)
-        {
-            return Some(val.clone());
-        }
-        if let Some(val) = words[i].strip_prefix("--owner=") {
-            return Some(val.to_owned());
-        }
-        i += 1;
-    }
-    None
 }
 
 #[cfg(test)]
@@ -115,25 +117,25 @@ mod tests {
             ("ru", "run", "run "),
             ("st", "status", "status "),
             ("v", "view", "view "),
-            ("view job-1 --owner b", "bob", "view job-1 --owner bob "),
+            ("view job-1/b", "job-1/bob", "view job-1/bob "),
             ("per", "permissions", "permissions "),
             ("run ", "greet", "run greet "),
             ("run c", "count", "run count "),
-            ("list --o", "--owner", "list --owner "),
-            ("list --owner ", "alice", "list --owner alice "),
-            ("list --owner=", "--owner=bob", "list --owner=bob "),
-            ("status run --owner b", "bob", "status run --owner bob "),
+            ("list ", "alice", "list alice "),
+            ("list b", "bob", "list bob "),
+            ("status run/b", "run/bob", "status run/bob "),
             (
-                "result run --owner=b",
-                "--owner=bob",
-                "result run --owner=bob ",
+                "result suite/run/b",
+                "suite/run/bob",
+                "result suite/run/bob ",
             ),
-            ("cancel run --owner a", "alice", "cancel run --owner alice "),
+            ("cancel run/a", "run/alice", "cancel run/alice "),
             (
-                "run greet --id job --owner b",
-                "bob",
-                "run greet --id job --owner bob ",
+                "run --id job greet/b",
+                "greet/bob",
+                "run --id job greet/bob ",
             ),
+            ("run greet", "greet/bob", "run greet/bob "),
             ("permissions b", "bob", "permissions bob "),
             ("secrets ", "set", "secrets set "),
         ];
@@ -145,15 +147,7 @@ mod tests {
 
         assert!(candidate(&mut comp, "up", 2, "updater").is_none());
 
-        // When --owner bob is specified first, `count` must NOT be completed for `alice`
-        // because `alice` only has write permission on `bob/greet`!
-        let bob_workers: Vec<_> = comp
-            .complete("run --owner bob ", 16)
-            .into_iter()
-            .map(|s| s.display_value().to_owned())
-            .collect();
-        assert!(bob_workers.iter().any(|s| s == "greet"));
-        assert!(!bob_workers.iter().any(|s| s == "count"));
+        assert!(candidate(&mut comp, "run count/b", 11, "count/bob").is_none());
 
         // Workflow aliases still come from the selected, permitted worker.
         let workers_yaml = "\
@@ -181,7 +175,7 @@ train-pkg:
             "alice",
         ));
         let mut custom_comp = Completer::new(custom_ctx);
-        let alias = "run train --workflow train";
+        let alias = "run train/alice --workflow train";
         assert!(candidate(&mut custom_comp, alias, alias.len(), "train-pkg").is_some());
         let no_positionals = "run train f";
         assert!(
@@ -193,8 +187,8 @@ train-pkg:
             )
             .is_none()
         );
-        // Alice has no access to bob -> bob must NOT appear in `list --owner ` or `permissions `!
-        assert!(candidate(&mut custom_comp, "list --owner ", 13, "bob").is_none());
+        assert!(candidate(&mut custom_comp, "list ", 5, "bob").is_none());
+        assert!(candidate(&mut custom_comp, "status id/", 10, "id/bob").is_none());
         assert!(candidate(&mut custom_comp, "permissions ", 12, "bob").is_none());
     }
 
@@ -204,30 +198,15 @@ train-pkg:
         let cases = [
             ("'ru", 3, "run", "'run' "),
             ("\"ru", 3, "run", "\"run\" "),
+            ("list \"a", 7, "alice", "list \"alice\" "),
+            ("stus id/bob", 2, "status", "status id/bob"),
+            ("list ae trailing", 6, "alice", "list alice trailing"),
+            ("list 'ae' trailing", 7, "alice", "list 'alice' trailing"),
             (
-                "list --owner=\"a",
-                15,
-                "--owner=alice",
-                "list --owner=\"alice\" ",
-            ),
-            ("stus --owner bob", 2, "status", "status --owner bob"),
-            (
-                "list --owner=ae trailing",
-                14,
-                "--owner=alice",
-                "list --owner=alice trailing",
-            ),
-            (
-                "list --owner 'ae' trailing",
-                15,
-                "alice",
-                "list --owner 'alice' trailing",
-            ),
-            (
-                "run greet --id 'Zoë' --o",
-                "run greet --id 'Zoë' --o".len(),
-                "--owner",
-                "run greet --id 'Zoë' --owner ",
+                "run --id 'Zoë' 'greet/b",
+                "run --id 'Zoë' 'greet/b".len(),
+                "greet/bob",
+                "run --id 'Zoë' 'greet/bob' ",
             ),
         ];
         for (line, pos, display, expected) in cases {
@@ -248,7 +227,7 @@ train-pkg:
             ("stXYZ", 2),
             ("run \\", 5),
             ("run # comment", 13),
-            ("list --owner 'ab", 14),
+            ("list 'ab", 7),
             ("é", 1),
             ("run", 4),
             ("list\0", 5),
