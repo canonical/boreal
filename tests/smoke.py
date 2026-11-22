@@ -10,9 +10,11 @@ import tempfile
 import time
 
 
-def smoke(launcher, checkout):
+def smoke(launcher, root):
+    checkout = root / "checkout"
+    checkout.mkdir()
     env = {key: value for key, value in os.environ.items() if not key.startswith("SSH_")}
-    env["XDG_STATE_HOME"] = str(checkout / "state")
+    env["XDG_STATE_HOME"] = str(root / "state")
 
     def cli(*args, data=None):
         command = [launcher, *args]
