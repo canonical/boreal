@@ -37,7 +37,7 @@ macro_rules! __worker_main {
         @definitions
         package = $package:literal,
         workflows = {
-            $( $kind:ident $name:path $( : $workflow:ty => $description:literal )? ),+ $(,)?
+            $( $kind:ident $name:path $( : $workflow:ty )? $( => $description:literal )? ),+ $(,)?
         },
         configure = |$builder:ident| $configure:expr $(,)?
     ) => {
@@ -48,17 +48,20 @@ macro_rules! __worker_main {
                 let $builder = $crate::worker::__WorkerOptions::new(queue);
                 ($configure).build()
             };
-            $( $crate::__worker_main!(@register options, $kind $name $(: $workflow => $description)?); )+
+            $( $crate::__worker_main!(@register options, $kind $name $(: $workflow)? $(=> $description)?); )+
             Ok(options)
         }
 
         pub fn schema() -> $crate::schema::Worker {
             $crate::schema::Worker::from_exports($package, [
-                $( $crate::__worker_main!(@export $kind $name $(: $workflow => $description)?), )+
+                $( $crate::__worker_main!(@export $kind $name $(: $workflow)? $(=> $description)?), )+
             ].into_iter().flatten().collect())
         }
     };
     (@register $options:ident, export $alias:path : $workflow:ty => $description:literal) => {
+        $options.register_workflow::<$workflow>()?
+    };
+    (@register $options:ident, export $workflow:path => $description:literal) => {
         $options.register_workflow::<$workflow>()?
     };
     (@register $options:ident, internal $workflow:path) => {
@@ -66,6 +69,9 @@ macro_rules! __worker_main {
     };
     (@export export $alias:path : $workflow:ty => $description:literal) => {
         Some($crate::schema::Workflow::of::<$workflow>(stringify!($alias), $description))
+    };
+    (@export export $workflow:path => $description:literal) => {
+        Some($crate::schema::Workflow::of_type::<$workflow>($description))
     };
     (@export internal $workflow:path) => { None };
 }

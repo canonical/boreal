@@ -33,6 +33,15 @@ impl Worker {
 }
 
 impl Workflow {
+    /// Export the native Temporal workflow type under its own name.
+    pub fn of_type<W>(description: &'static str) -> Self
+    where
+        W: WorkflowImplementation,
+        <W::Run as WorkflowDefinition>::Input: JsonSchema,
+    {
+        Self::of::<W>(W::name(), description)
+    }
+
     pub fn of<W>(alias: &'static str, description: &'static str) -> Self
     where
         W: WorkflowImplementation,
@@ -84,7 +93,7 @@ mod tests {
 
     #[workflow_methods]
     impl Counting {
-        #[run(name = "Count.V1")]
+        #[run(name = "count-objects")]
         async fn run(_: &mut WorkflowContext<Self>, _input: u64) -> WorkflowResult<()> {
             Ok(())
         }
@@ -105,9 +114,9 @@ mod tests {
     worker::main! {
         package = "example",
         workflows = {
-            export greet: Greeting => "Say hello",
+            export say_hello: Greeting => "Say hello",
             internal self::Child,
-            export count: Counting => "Count objects",
+            export self::Counting => "Count objects",
         },
         configure = |opts| opts.graceful_shutdown_period(worker::DEFAULT_SHUTDOWN_GRACE),
     }
@@ -121,8 +130,10 @@ mod tests {
         assert!(options.register_workflow::<Child>().is_err());
 
         let yaml = render(&[schema()]).unwrap();
-        assert!(yaml.contains("example:\n  workflows:\n    greet:\n      workflow: \"Greeting\""));
-        assert!(yaml.contains("    count:\n      workflow: \"Count.V1\""));
+        assert!(
+            yaml.contains("example:\n  workflows:\n    say_hello:\n      workflow: \"Greeting\"")
+        );
+        assert!(yaml.contains("    count-objects:\n      workflow: \"count-objects\""));
         assert!(!yaml.contains("Child"));
     }
 

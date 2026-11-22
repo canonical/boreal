@@ -113,7 +113,7 @@ worker::main! {
     package = "example",
     workflows = {
         export greet: ExampleWorkflow => "Run the starter greeting",
-        export count: CountWorkflow => "Count Unicode scalar values",
+        export CountWorkflow => "Count Unicode scalar values",
         internal ChildGreetingWorkflow,
     },
     configure = |opts| opts.register_activities(ExampleActivities),
@@ -141,9 +141,14 @@ entry points, pass `entrypoint = false,` before `package` to generate only
 All three workflows register on the same queue. Only the two `export` entries
 are Boreal launch targets, and only their input types need `JsonSchema`.
 The `package` key matches the binary output, not the deployed worker name.
+`export CountWorkflow => ...` uses the registered Temporal type as the alias;
+this example assumes the type is named `count-characters`. Aliases start with
+a lowercase ASCII letter and may contain lowercase ASCII letters, digits,
+hyphens, and underscores. For other type names, give an explicit alias as in
+`export greet: ExampleWorkflow => ...`.
 
 If the `example` package is deployed as `tools`, use
-`run tools --workflow count` to open the form (add `--id job-42` to set the
+`run tools --workflow count-characters` to open the form (add `--id job-42` to set the
 workflow ID explicitly). The `workers` command lists the
 available aliases and their arguments. For a worker with one export, omit
 `--workflow`. Handwritten single-workflow schemas and `schema::Worker::new`

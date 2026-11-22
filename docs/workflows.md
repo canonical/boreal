@@ -20,7 +20,8 @@ abandon the form. In a choice list, Up/Down moves the selection and Left/Right
 changes pages. Field help comes from the Rust input type's doc comments.
 
 - If a worker exports several workflows, choose an alias in the form or pass
-  `--workflow ALIAS`. The worker name is the only positional argument to `run`.
+  `--workflow ALIAS`, for example `--workflow count-characters`. The worker name
+  is the only positional argument to `run`.
 - If you omit `--id`, Boreal generates a workflow ID.
 - Use `--input-json` to skip the form or to supply input the form cannot
   represent. Use `--no-ask` when you want missing required values to produce an

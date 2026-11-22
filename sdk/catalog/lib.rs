@@ -85,7 +85,7 @@ pub fn render<'a>(workers: impl IntoIterator<Item = &'a Worker>) -> Result<Strin
                 let mut aliases = std::collections::BTreeSet::new();
                 let mut types = std::collections::BTreeSet::new();
                 for export in exports {
-                    if !valid_arg_name(export.alias) || !aliases.insert(export.alias) {
+                    if !valid_name(export.alias) || !aliases.insert(export.alias) {
                         return Err(format!(
                             "invalid or duplicate export alias '{}' on '{}'",
                             export.alias, worker.name

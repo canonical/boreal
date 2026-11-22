@@ -1173,7 +1173,7 @@ fn parse_packages(doc: &Value) -> Result<BTreeMap<String, Package>, Error> {
             let mut types = BTreeSet::new();
             let mut workflows = BTreeMap::new();
             for (alias, entry) in exports {
-                if !valid_arg_ident(alias) {
+                if !valid_ident(alias) {
                     return Err(Error::InvalidCatalog(format!(
                         "invalid workflow alias '{alias}' in package '{name}'"
                     )));
@@ -1675,12 +1675,12 @@ count:
         let schemas = "\
 example:
   workflows:
-    greet:
+    say_hello:
       workflow: Greet
       args:
         - name: name
           type: string
-    count:
+    count-objects:
       workflow: Count
       args:
         - name: limit
@@ -1699,12 +1699,19 @@ workers:
             .into(),
         )]);
         let catalog = Catalog::from_yaml(schemas, &users).unwrap();
+        for invalid_alias in ["-count", "count/objects"] {
+            let invalid = schemas.replace("count-objects", invalid_alias);
+            assert!(matches!(
+                Catalog::from_yaml(&invalid, &users),
+                Err(Error::InvalidCatalog(_))
+            ));
+        }
         let (_, package) = catalog.worker_and_package("alice", "tools").unwrap();
         assert!(package.select(None).is_err());
         assert!(package.select(Some("missing")).is_err());
         for (alias, ty, input) in [
-            ("greet", "Greet", r#"{"name":"7"}"#),
-            ("count", "Count", r#"{"limit":7}"#),
+            ("say_hello", "Greet", r#"{"name":"7"}"#),
+            ("count-objects", "Count", r#"{"limit":7}"#),
         ] {
             let workflow = package.select(Some(alias)).unwrap();
             assert_eq!(workflow.validate_and_encode(&["7".into()]).unwrap(), input);
