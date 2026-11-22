@@ -66,6 +66,7 @@
             templateOutputs.checks.${system}.lab
           );
           local = import ./tests/local.nix { inherit self pkgs; };
+          artifacts = import ./tests/artifacts.nix { inherit pkgs; };
         }
         // nixpkgs.lib.optionalAttrs (system == "x86_64-linux") {
           vm = import ./tests/vm.nix {
