@@ -1,5 +1,6 @@
 //! Downstream integration with Boreal, using native Temporal workflows and activities.
 
+pub mod artifact;
 pub mod client;
 #[cfg(feature = "schema")]
 pub mod schema;
