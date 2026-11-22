@@ -92,10 +92,10 @@ Manual checks:
 
 1. As Alice, `run desk` and then `result <id>`. A receipt confirms that Alice's
    vault check, the cross-namespace handoff, and the shared vault check worked.
-2. As Alice, `list --owner shared` and `result <dispatch-id> --owner shared`
-   should show the delegated run. `run dispatch --owner shared` also opens the
+2. As Alice, `list shared` and `result <dispatch-id>/shared`
+   should show the delegated run. `run dispatch/shared` also opens the
    shared workflow directly.
-3. As `shared`, `run dispatch` works, but `run desk --owner alice` is denied.
+3. As `shared`, `run dispatch` works, but `run desk/alice` is denied.
    In each user's shell, `secrets list` shows only that user's fixture.
 4. On a fresh VM, seed only `desk_badge` and run the desk workflow before
    seeding `dispatch_key`: dispatch should fail, not fall back to Alice's
