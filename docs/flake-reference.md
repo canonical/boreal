@@ -27,7 +27,8 @@ moving branches during deployment.
 | `mkLocal pkgs { workers, vault ? null }` | Build the rootless `boreal-local` launcher for a single-user lab. |
 
 For examples, see [host configuration](host.md), [VM configuration](vm.md),
-[local development](local.md), and the [Boreal SDK](../sdk/README.md).
+[local development](local.md), [workflow artifacts](artifacts.md), and the
+[Boreal SDK](../sdk/README.md).
 
 ## Packages
 

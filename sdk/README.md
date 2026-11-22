@@ -25,6 +25,28 @@ write Temporal workflows or activities.
 - `secret::read(name)` / `secret::read_bytes(name)` (feature `read-secrets`) —
   reads user-managed values from a dedicated [vault package](../docs/vault.md).
 
+## Artifacts
+
+Enable a [Nix binary cache](../docs/artifacts.md) for the worker, then use
+`artifact::Store::from_env()` in an Activity. On the producing side:
+
+```rust,ignore
+let artifact = boreal_sdk::artifact::Store::from_env()?.publish_file(&finished_iso)?;
+let result = artifact.as_str().to_owned(); // Return this string through Temporal.
+```
+
+On the consuming side, parse the string and hold the returned pin while the
+file is in use:
+
+```rust,ignore
+let store = boreal_sdk::artifact::Store::from_env()?;
+let image = store.fetch(&result.parse()?)?;
+provision(image.path())?;
+```
+
+These helpers block while Nix runs. Call them on a blocking thread in an async
+Activity, never in Workflow code. Only publish non-confidential files.
+
 ## Schedules
 
 A schedule is a Temporal server record, not a long-running process. Downstream

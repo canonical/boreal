@@ -53,7 +53,8 @@ multi-user authorization before deploying.
 - **Build a lab:** Start with the [downstream template guide](templates/default/README.md),
   then see [local development](docs/local.md) and the [Boreal SDK](sdk/README.md).
 - **Deploy a lab:** See [host configuration](docs/host.md),
-  [remote workers](docs/remote-workers.md), and [safe updates](updater/README.md).
+  [remote workers](docs/remote-workers.md), [artifact storage](docs/artifacts.md),
+  and [safe updates](updater/README.md).
 - **Look up an interface:** See the [flake reference](docs/flake-reference.md)
   or the [architecture and security boundaries](docs/architecture.md).
 - **Change the framework:** See [contributing](CONTRIBUTING.md) and
