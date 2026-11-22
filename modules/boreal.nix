@@ -308,6 +308,16 @@ in
                       };
                     };
 
+                    artifacts = mkOption {
+                      type = types.enum [
+                        "off"
+                        "read"
+                        "publish"
+                      ];
+                      default = "off";
+                      description = "Configure Nix artifact helpers for this worker. Publish also enables reading; the cache enforces access.";
+                    };
+
                     schedule = {
                       enable = mkOption {
                         type = types.bool;

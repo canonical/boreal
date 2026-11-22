@@ -160,9 +160,11 @@ let
         train = {
           package = trainBin.train;
           placement.peripherals = [ "compute-01" ];
+          artifacts = "publish";
         };
         daily = {
           package = helloBin.hello;
+          artifacts = "read";
           placement = {
             central = false;
             peripherals = [ "compute-01" ];
@@ -186,6 +188,10 @@ let
       ];
     };
   central = remoteHost "lab" {
+    boreal.artifacts = {
+      readStore = "file:///var/lib/lab-cache";
+      writeStore = "file:///var/lib/lab-cache?compression=zstd";
+    };
     boreal.remote.central = {
       listenAddress = "192.168.42.1:7443";
       serverCertificate = "/run/pki/server.pem";
@@ -198,6 +204,10 @@ let
   };
   peripheral = remoteHost "compute-01" {
     boreal.role = "peripheral";
+    boreal.artifacts = {
+      readStore = "https://cache.example.test";
+      writeStore = "https://upload.example.test?compression=zstd";
+    };
     boreal.remote.peripheral = {
       address = "192.168.42.1:7443";
       serverCaCertificate = "/run/pki/ca.pem";
@@ -232,6 +242,15 @@ let
     boreal = {
       enable = true;
       users.alice.workers.train.package = pkgs.writeShellScriptBin "train" "exit 0";
+    };
+  };
+  missingArtifactStores = mkHost {
+    boreal = {
+      enable = true;
+      users.alice.workers.train = {
+        package = trainBin.train;
+        artifacts = "publish";
+      };
     };
   };
   missingSchedulePackage = mkHost {
@@ -565,6 +584,23 @@ assert !peripheral.config.users.users ? admin && peripheral.config.users.users.a
 assert peripheralServices ? boreal-worker-alice-daily;
 assert !remoteWorker.serviceConfig ? NetworkNamespacePath;
 assert remoteWorker.environment.TEMPORAL_ADDRESS == "192.168.42.1:7443";
+assert
+  centralServices.boreal-worker-alice-train.environment.BOREAL_ARTIFACT_READ_STORE
+  == "file:///var/lib/lab-cache";
+assert
+  remoteWorker.environment.BOREAL_ARTIFACT_WRITE_STORE
+  == "https://upload.example.test?compression=zstd";
+assert
+  peripheralServices.boreal-worker-alice-daily.environment.BOREAL_ARTIFACT_READ_STORE
+  == "https://cache.example.test";
+assert !peripheralServices.boreal-worker-alice-daily.environment ? BOREAL_ARTIFACT_WRITE_STORE;
+assert !centralServices.boreal-schedule-alice-daily.environment ? BOREAL_ARTIFACT_RUNTIME_DIR;
+assert
+  !configured.systemd.services.boreal-worker-alice-train.environment ? BOREAL_ARTIFACT_RUNTIME_DIR;
+assert remoteWorker.serviceConfig.RuntimeDirectory == "boreal-artifacts-alice-train";
+assert builtins.elem "nix-daemon.socket" remoteWorker.requires;
+assert assertionFailed missingArtifactStores "boreal.artifacts.readStore";
+assert assertionFailed missingArtifactStores "boreal.artifacts.writeStore";
 assert
   remoteWorker.environment.TEMPORAL_NAMESPACE == "alice"
   && remoteWorker.environment.TEMPORAL_TLS == "true";
