@@ -39,23 +39,23 @@ def smoke(launcher, root):
         raise AssertionError(f"timed out waiting for {run_id}")
 
     try:
-        assert json.loads(workflow("dut_list", "empty", {})) == {"status": "not_scanned"}
-        scanned = json.loads(workflow("dut_scan", "scan", {}))
+        assert json.loads(workflow("dut-list", "empty", {})) == {"status": "not_scanned"}
+        scanned = json.loads(workflow("dut-scan", "scan", {}))
         assert scanned["status"] == "scanned"
         assert [device["id"] for device in scanned["devices"]] == ["dut-01", "dut-02", "dut-fail"]
-        assert json.loads(workflow("dut_list", "list", {})) == scanned
+        assert json.loads(workflow("dut-list", "list", {})) == scanned
 
-        image = workflow("image_create", "iso", {"label": "smoke"})
+        image = workflow("image-create", "iso", {"label": "smoke"})
         assert image == "fixture-iso:smoke"
-        assert workflow("image_flash", "flash", {"image_ref": image, "usb_target": "usb-01"}) == (
+        assert workflow("image-flash", "flash", {"image_ref": image, "usb_target": "usb-01"}) == (
             "Simulated flash of fixture-iso:smoke to usb-01"
         )
-        deployed = json.loads(workflow("image_deploy", "install", {
+        deployed = json.loads(workflow("image-deploy", "install", {
             "image_ref": image, "dut_id": "dut-01",
         }))
         assert deployed["id"] == "dut-01"
 
-        tested = json.loads(workflow("dut_test", "with-install", {
+        tested = json.loads(workflow("dut-test", "with-install", {
             "image_ref": image, "dut_ids": ["dut-01", "dut-fail"],
             "test_plan": "hardware/audio", "clean_sessions": True,
         }))
@@ -63,7 +63,7 @@ def smoke(launcher, root):
         assert [item["report"]["verdict"] for item in tested] == ["passed", "failed"]
         assert [item["dut_id"] for item in tested] == ["dut-01", "dut-fail"]
 
-        tested_without_image = json.loads(workflow("dut_test", "without-install", {
+        tested_without_image = json.loads(workflow("dut-test", "without-install", {
             "dut_ids": ["unknown", "dut-02"], "test_plan": "sanity",
         }))
         unknown, known = tested_without_image
@@ -75,7 +75,7 @@ def smoke(launcher, root):
 
         report = tested[0]["report"]["report_ref"]
         destinations = ["oem_share", "c3", "bughamster", "bughamster_jira"]
-        assert json.loads(workflow("dut_test_submit", "submit", {
+        assert json.loads(workflow("dut-test-submit", "submit", {
             "report_ref": report, "destinations": destinations,
         })) == [
             {"destination": destination, "report_ref": report, "simulated": True}
