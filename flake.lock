@@ -1,0 +1,49 @@
+{
+  "nodes": {
+    "boreal": {
+      "inputs": {
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1795256801,
+        "narHash": "sha256-S08zZkRr4jMb+yPlN+nLARl7pru1KT8YG8UHzzKQziY=",
+        "owner": "canonical",
+        "repo": "boreal",
+        "rev": "7c8bec59685d6c743c8c717be0b214f0522ed215",
+        "type": "github"
+      },
+      "original": {
+        "owner": "canonical",
+        "repo": "boreal",
+        "rev": "7c8bec59685d6c743c8c717be0b214f0522ed215",
+        "type": "github"
+      }
+    },
+    "nixpkgs": {
+      "locked": {
+        "lastModified": 1794165970,
+        "narHash": "sha256-XuAV2cUwaod3Bt4XFVqiXz3v1w2ex16W6Sv4S7EWres=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "ac588ef1c914865dad517b337ea0eb9694a4021c",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "ac588ef1c914865dad517b337ea0eb9694a4021c",
+        "type": "github"
+      }
+    },
+    "root": {
+      "inputs": {
+        "boreal": "boreal",
+        "nixpkgs": "nixpkgs"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}

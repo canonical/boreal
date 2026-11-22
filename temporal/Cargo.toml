@@ -1,0 +1,19 @@
+[workspace]
+members = ["beijing-worker"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+license = "MIT"
+
+[workspace.dependencies]
+boreal-sdk = { path = "../.boreal/boreal-sdk", features = ["schema"] }
+futures = "0.3"
+schemars = { version = "1", features = ["preserve_order"] }
+serde = { version = "1", features = ["derive"] }
+temporalio-common = "~1.2.0"
+temporalio-macros = "~1.2.0"
+temporalio-sdk = "~1.2.0"
+temporalio-workflow = "~1.2.0"

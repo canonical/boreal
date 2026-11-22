@@ -1,0 +1,25 @@
+[package]
+name = "beijing-worker"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+autobins = false
+
+[[bin]]
+name = "beijing"
+path = "main.rs"
+
+[[bin]]
+name = "schema"
+path = "main.rs"
+
+[dependencies]
+boreal-sdk.workspace = true
+futures.workspace = true
+schemars.workspace = true
+serde.workspace = true
+temporalio-common.workspace = true
+temporalio-macros.workspace = true
+temporalio-sdk.workspace = true
+temporalio-workflow.workspace = true
