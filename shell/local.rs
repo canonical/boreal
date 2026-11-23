@@ -22,6 +22,7 @@ impl LocalProfile {
         catalog_dir: &OsStr,
         socket: &OsStr,
         secret_dir: Option<&OsStr>,
+        caller: Option<&str>,
     ) -> Result<Self, String> {
         let home = absolute_path(home, "profile-home")?;
         let catalog_dir = absolute_path(catalog_dir, "catalog-dir")?;
@@ -40,14 +41,20 @@ impl LocalProfile {
         // Local catalogs can reference immutable, root-owned Nix schemas.
         let catalog = Catalog::load_from_dir(&catalog_dir, None)
             .map_err(|e| format!("invalid local catalog: {}", e.detail()))?;
-        if catalog.users().len() != 1 || !catalog.is_user(LOCAL_CALLER) {
-            return Err("local catalog must contain exactly the 'local' account".into());
+        match caller {
+            Some(name) if !catalog.is_user(name) => {
+                return Err(format!("local catalog does not declare caller '{name}'"));
+            }
+            None if catalog.users().len() != 1 || !catalog.is_user(LOCAL_CALLER) => {
+                return Err("local catalog must contain exactly the 'local' account".into());
+            }
+            _ => {}
         }
 
         Ok(Self {
             home,
             secrets,
-            context: Arc::new(Context::new(catalog, LOCAL_CALLER)),
+            context: Arc::new(Context::new(catalog, caller.unwrap_or(LOCAL_CALLER))),
             socket,
         })
     }

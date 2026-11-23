@@ -113,6 +113,34 @@ fn assert_rejected(output: Output, diagnostic: &str) {
 }
 
 #[test]
+fn test_local_shell_uses_named_caller_from_catalog() {
+    let profile = Profile::new();
+    let alice = profile.catalog.join("users/alice");
+    DirBuilder::new().mode(0o700).create(&alice).unwrap();
+    write_catalog_file(
+        &alice.join("perms.yaml"),
+        "user: alice\npermissions: {read: false, write: false}\n",
+    );
+
+    for (flags, diagnostic) in [
+        (&[][..], "exactly the 'local' account"),
+        (
+            &["--caller", "missing"],
+            "does not declare caller 'missing'",
+        ),
+    ] {
+        assert_rejected(
+            profile.local().args(flags).arg("workers").output().unwrap(),
+            diagnostic,
+        );
+    }
+    let mut command = profile.local();
+    command.args(["--caller", "alice"]);
+    let output = set_fixture_secret(command);
+    assert!(output.status.success(), "{output:?}");
+}
+
+#[test]
 fn direct_workflow_commands_use_local_catalog_and_socket() {
     let profile = Profile::new();
     let listener = UnixListener::bind(&profile.socket).unwrap();

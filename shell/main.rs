@@ -42,7 +42,7 @@ const ECHO: u32 = 0o000010;
 const TCSANOW: i32 = 0;
 const LOCAL_USAGE: &str = concat!(
     "usage: boreal-shell --local <profile-home> <catalog-dir> <broker-socket>",
-    " [--secret-dir <absolute-path>] [command argv...]",
+    " [--caller <name>] [--secret-dir <absolute-path>] [command argv...]",
 );
 
 unsafe extern "C" {
@@ -664,6 +664,14 @@ fn run() -> Result<bool, Box<dyn Error>> {
         let [home, catalog, socket, command @ ..] = args.as_slice() else {
             return Err(LOCAL_USAGE.into());
         };
+        let (caller, command) = match command {
+            [flag, name, command @ ..] if flag == "--caller" => {
+                let name = name.to_str().filter(|n| !n.is_empty()).ok_or(LOCAL_USAGE)?;
+                (Some(name), command)
+            }
+            [flag] if flag == "--caller" => return Err(LOCAL_USAGE.into()),
+            _ => (None, command),
+        };
         let (secret_dir, command) = match command {
             [flag, path, command @ ..] if flag == "--secret-dir" => {
                 (Some(path.as_os_str()), command)
@@ -671,7 +679,7 @@ fn run() -> Result<bool, Box<dyn Error>> {
             [flag] if flag == "--secret-dir" => return Err(LOCAL_USAGE.into()),
             _ => (None, command),
         };
-        let profile = LocalProfile::open(home, catalog, socket, secret_dir)?;
+        let profile = LocalProfile::open(home, catalog, socket, secret_dir, caller)?;
         if command.is_empty() {
             return run_interactive(Some(&profile)).map(|()| true);
         }

@@ -12,30 +12,41 @@ use crate::ledger::Coordinator;
 use crate::temporal::LiveBackend;
 use crate::{UserIdentity, serve_user_socket, wait_for_shutdown};
 
-pub(crate) const PRINCIPAL: &str = "local";
+const PRINCIPAL: &str = "local";
 const TEMPORAL_ADDR: &str = "127.0.0.1:7233";
-const USAGE: &str = "usage: boreal-broker local <catalog-dir> <broker-socket> <state-dir>";
+const USAGE: &str = "usage: boreal-broker local <catalog-dir> <broker-socket> <state-dir> [caller]";
 
 struct Config {
     catalog_dir: PathBuf,
     broker_socket: PathBuf,
     state_dir: PathBuf,
+    caller: Option<String>,
 }
 
 impl Config {
     fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Self, &'static str> {
-        match (args.next(), args.next(), args.next(), args.next()) {
-            (Some(catalog), Some(socket), Some(state), None)
-                if !catalog.is_empty() && !socket.is_empty() && !state.is_empty() =>
-            {
-                Ok(Self {
-                    catalog_dir: catalog.into(),
-                    broker_socket: socket.into(),
-                    state_dir: state.into(),
-                })
-            }
-            _ => Err(USAGE),
+        let mut path = || args.next().filter(|arg| !arg.is_empty()).ok_or(USAGE);
+        let catalog_dir = path()?.into();
+        let broker_socket = path()?.into();
+        let state_dir = path()?.into();
+        let caller = args
+            .next()
+            .map(|arg| {
+                arg.into_string()
+                    .ok()
+                    .filter(|name| !name.is_empty())
+                    .ok_or(USAGE)
+            })
+            .transpose()?;
+        if args.next().is_some() {
+            return Err(USAGE);
         }
+        Ok(Self {
+            catalog_dir,
+            broker_socket,
+            state_dir,
+            caller,
+        })
     }
 }
 
@@ -46,7 +57,8 @@ pub(crate) fn run(args: impl Iterator<Item = OsString>) -> Result<(), Box<dyn st
         return Err("local broker must run as a non-root user".into());
     }
 
-    let catalog = load_catalog(&cfg.catalog_dir)?;
+    let catalog = load_catalog(&cfg.catalog_dir, cfg.caller.as_deref())?;
+    let caller = Arc::from(cfg.caller.as_deref().unwrap_or(PRINCIPAL));
     let coordinator = Coordinator::open(&cfg.state_dir, false)
         .map_err(|e| format!("open state {}: {}", cfg.state_dir.display(), e.detail()))?;
     let engine = Arc::new(Engine::new(
@@ -61,19 +73,25 @@ pub(crate) fn run(args: impl Iterator<Item = OsString>) -> Result<(), Box<dyn st
     runtime.block_on(async move {
         let listener = bind_socket(&cfg.broker_socket, uid)?;
         tokio::select! {
-            _ = serve_user_socket(listener, engine, UserIdentity::Local { uid }) => {}
+            _ = serve_user_socket(listener, engine, UserIdentity::Local { uid, caller }) => {}
             result = wait_for_shutdown() => result?,
         }
         Ok(())
     })
 }
 
-fn load_catalog(dir: &Path) -> Result<Catalog, String> {
+fn load_catalog(dir: &Path, caller: Option<&str>) -> Result<Catalog, String> {
     // The launcher supplies a trusted catalog; schema exports may be store-owned.
     let catalog = Catalog::load_from_dir(dir, None)
         .map_err(|e| format!("load catalog {}: {}", dir.display(), e.detail()))?;
-    if catalog.users().len() != 1 || !catalog.is_user(PRINCIPAL) {
-        return Err("local catalog must declare exactly one user named 'local'".into());
+    match caller {
+        Some(name) if !catalog.is_user(name) => {
+            return Err(format!("local catalog does not declare caller '{name}'"));
+        }
+        None if catalog.users().len() != 1 || !catalog.is_user(PRINCIPAL) => {
+            return Err("local catalog must declare exactly one user named 'local'".into());
+        }
+        _ => {}
     }
     Ok(catalog)
 }
@@ -110,7 +128,7 @@ mod tests {
     use crate::{read_async_frame, write_async_frame};
 
     #[test]
-    fn local_arguments_require_exactly_three_paths() {
+    fn local_arguments_require_three_paths_and_accept_optional_caller() {
         let parse = |args: &[&str]| Config::parse(args.iter().map(OsString::from));
         let cfg = parse(&["/catalog", "/ipc/broker.sock", "/state"]).unwrap();
         assert_eq!(cfg.catalog_dir, Path::new("/catalog"));
@@ -118,7 +136,14 @@ mod tests {
         assert_eq!(cfg.state_dir, Path::new("/state"));
         assert!(parse(&["/catalog", "/ipc/broker.sock"]).is_err());
         assert!(parse(&["/catalog", "", "/state"]).is_err());
-        assert!(parse(&["/catalog", "/ipc/broker.sock", "/state", "extra"]).is_err());
+        assert_eq!(cfg.caller, None);
+        let with_caller = ["/catalog", "/ipc/broker.sock", "/state", "alice"];
+        assert_eq!(
+            parse(&with_caller).unwrap().caller.as_deref(),
+            Some("alice")
+        );
+        assert!(parse(&["/catalog", "/ipc/broker.sock", "/state", ""]).is_err());
+        assert!(parse(&[&with_caller[..], &["extra"]].concat()).is_err());
     }
 
     fn catalog_dir(users: &[&str]) -> tempfile::TempDir {
@@ -161,10 +186,13 @@ mod tests {
     fn local_catalog_rejects_missing_or_additional_principals() {
         for users in [&[][..], &["alice"], &[PRINCIPAL, "alice"]] {
             let dir = catalog_dir(users);
-            let err = load_catalog(dir.path()).unwrap_err();
+            let err = load_catalog(dir.path(), None).unwrap_err();
             assert!(err.contains("exactly one user named 'local'"), "{err}");
         }
-        assert!(load_catalog(catalog_dir(&[PRINCIPAL]).path()).is_ok());
+        assert!(load_catalog(catalog_dir(&[PRINCIPAL]).path(), None).is_ok());
+        let dir = catalog_dir(&["alice", "shared"]);
+        assert!(load_catalog(dir.path(), Some("alice")).is_ok());
+        assert!(load_catalog(dir.path(), Some("missing")).is_err());
     }
 
     #[tokio::test]
@@ -197,9 +225,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_socket_maps_only_the_configured_peer_uid_to_local() {
-        let dir = catalog_dir(&[PRINCIPAL]);
-        let catalog = load_catalog(dir.path()).unwrap();
+    async fn local_socket_maps_only_the_configured_peer_uid_to_caller() {
+        let dir = catalog_dir(&["alice", "shared"]);
+        let catalog = load_catalog(dir.path(), Some("alice")).unwrap();
         let coordinator = Coordinator::open(&dir.path().join("state"), false).unwrap();
         let engine = Arc::new(Engine::new(
             catalog,
@@ -214,7 +242,10 @@ mod tests {
             let server = tokio::spawn(serve_user_socket(
                 listener,
                 Arc::clone(&engine),
-                UserIdentity::Local { uid: expected_uid },
+                UserIdentity::Local {
+                    uid: expected_uid,
+                    caller: Arc::from("alice"),
+                },
             ));
             let mut client = UnixStream::connect(&socket).await.unwrap();
             let req = Request::Permissions { user: None };
@@ -222,7 +253,7 @@ mod tests {
             let frame = read_async_frame(&mut client).await.unwrap();
             match Response::decode(&frame).unwrap() {
                 Response::Permissions(report) if uid == expected_uid => {
-                    assert_eq!(report.user, PRINCIPAL);
+                    assert_eq!(report.user, "alice");
                     assert!(report.is_self);
                 }
                 Response::Error {

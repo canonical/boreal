@@ -114,18 +114,18 @@ async fn write_async_frame(stream: &mut UnixStream, payload: &[u8]) -> Result<()
     stream.flush().await.map_err(|e| format!("flush: {e}"))
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum UserIdentity {
     OsAccount,
-    Local { uid: u32 },
+    Local { uid: u32, caller: Arc<str> },
 }
 
 impl UserIdentity {
-    fn authenticate(self, stream: &StdUnixStream) -> Result<String, os::Error> {
+    fn authenticate(&self, stream: &StdUnixStream) -> Result<String, os::Error> {
         let peer_uid = os::peer_uid(stream)?;
         match self {
             Self::OsAccount => os::user_by_uid(peer_uid).map(|user| user.name().to_owned()),
-            Self::Local { uid } if peer_uid == uid => Ok(local::PRINCIPAL.into()),
+            Self::Local { uid, caller } if peer_uid == *uid => Ok(caller.to_string()),
             Self::Local { .. } => Err(os::Error::InvalidIdentity(
                 "local broker requires a peer UID matching its effective UID".into(),
             )),
@@ -143,6 +143,7 @@ async fn serve_user_socket(
             continue;
         };
         let engine = Arc::clone(&engine);
+        let identity = identity.clone();
         tokio::spawn(async move {
             let Ok(std_ref) = stream.into_std() else {
                 return;
