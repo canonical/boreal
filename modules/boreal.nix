@@ -55,32 +55,8 @@ let
     "nobody"
   ];
 
-  normalizeGrant = grant: if builtins.isList grant then lib.unique grant else grant;
   grantUsers = grant: if builtins.isList grant then grant else [ ];
-
-  resolveWorkerPermissions = userCfg: workerCfg: {
-    read = normalizeGrant (
-      if workerCfg.permissions.read != null then workerCfg.permissions.read else userCfg.permissions.read
-    );
-    write = normalizeGrant (
-      if workerCfg.permissions.write != null then
-        workerCfg.permissions.write
-      else
-        userCfg.permissions.write
-    );
-  };
-
-  mkUserPolicy = user: userCfg: {
-    inherit user;
-    permissions = {
-      read = normalizeGrant userCfg.permissions.read;
-      write = normalizeGrant userCfg.permissions.write;
-    };
-    workers = lib.mapAttrs (_: workerCfg: {
-      package = workerCfg.package.outputName;
-      permissions = resolveWorkerPermissions userCfg workerCfg;
-    }) userCfg.workers;
-  };
+  inherit (import ../lib/catalog.nix { inherit lib; }) userPolicy;
 
   mkShellRc = import ./shell-rc.nix { inherit lib pkgs; };
   deploymentLabel = import ../lib/deployment-label.nix {
@@ -524,7 +500,7 @@ in
         user: userCfg:
         lib.nameValuePair "boreal/users/${user}/perms.yaml" {
           source = yamlFormat.generate (lib.strings.sanitizeDerivationName "boreal-perms-${user}.yaml") (
-            mkUserPolicy user userCfg
+            userPolicy user userCfg
           );
           user = "root";
           group = "boreal";
