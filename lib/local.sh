@@ -7,8 +7,30 @@ case ${1-} in
     -h|--help)
         printf '%s\n' 'Usage: boreal-local [run|list|status|result|workers|secrets set ...]' \
             '       boreal-local [stop|logs|secret-path]' \
+            '       boreal-local --secret-owner OWNER {secret-path|secrets set NAME}' \
             'With no arguments, open the interactive local Boreal shell.'
         exit 0 ;;
+esac
+
+caller=${local_caller:-local}
+secret_owner=$caller
+if [[ ${1-} == --secret-owner ]]; then
+    [[ -n $local_caller ]] || die '--secret-owner requires an owner-aware local lab'
+    [[ $# -ge 3 ]] || die 'usage: boreal-local --secret-owner OWNER {secret-path|secrets set NAME}'
+    secret_owner=$2
+    shift 2
+    case $#:$1:${2-} in
+        1:secret-path:|3:secrets:set) ;;
+        *) die '--secret-owner is only supported for secret-path and secrets set' ;;
+    esac
+    found=0
+    for owner in "${owners[@]}"; do
+        if [[ $owner == "$secret_owner" ]]; then found=1; break; fi
+    done
+    (( found )) || die "unknown fixture owner: $secret_owner"
+fi
+
+case ${1-} in
     stop|logs|secret-path)
         [[ $# == 1 ]] || die "usage: boreal-local $1" ;;
 esac
@@ -33,7 +55,12 @@ private_dir() {
 
 # Checkout identity does not depend on the commit, the flake lock or the image.
 checkout=$(pwd -P)
-key=$(printf '%s' "$checkout" | sha256sum)
+# A named caller uses a separate profile; never reinterpret old local executions.
+if [[ -n $local_caller ]]; then
+    key=$(printf '%s\0%s' "$checkout" "$caller" | sha256sum)
+else
+    key=$(printf '%s' "$checkout" | sha256sum)
+fi
 key=${key:0:24}
 safe_base() {
     case $1/ in
@@ -47,7 +74,10 @@ profile=$state_base/boreal-local/$key
 home=$profile/home
 catalog=$profile/catalog
 secrets=$home/.config/boreal/secrets
-if [[ -n $vault_secret_rel ]]; then
+if [[ -n $local_caller ]]; then
+    catalog+=/${store_catalog##*/}
+    secrets=$profile/fixtures/$secret_owner
+elif [[ -n $vault_secret_rel ]]; then
     secrets=$profile/mounts/$vault_secret_rel
 fi
 if [[ ${1-} == secret-path ]]; then
@@ -80,11 +110,23 @@ label=dev.boreal.profile=$key
 build_label=dev.boreal.image
 temporal=$name-temporal
 broker=$name-broker
+worker_container() {
+    if [[ -n $local_caller ]]; then
+        printf '%s-worker-%s.%s' "$name" "$1" "$2"
+    else
+        printf '%s-worker-%s' "$name" "$2"
+    fi
+}
+vault_container() {
+    printf '%s-vault%s' "$name" "${local_caller:+.$1}"
+}
 expected=("$temporal" "$broker")
-for worker in "${worker_names[@]}"; do
-    expected+=("$name-worker-$worker")
+for i in "${!worker_names[@]}"; do
+    expected+=("$(worker_container "${worker_owners[i]}" "${worker_names[i]}")")
 done
-[[ -z $vault_bin ]] || expected+=("$name-vault")
+for owner in "${vault_owners[@]}"; do
+    expected+=("$(vault_container "$owner")")
+done
 
 containers() {
     podman ps -a --filter "label=$label" --format '{{.Names}}'
@@ -127,8 +169,19 @@ private_dir "$profile/broker"
 private_dir "$ipc"
 
 shell_options=()
+broker_options=()
 vault_mount_id=
-if [[ -n $vault_secret_rel ]]; then
+if [[ -n $local_caller ]]; then
+    private_dir "$profile/fixtures"
+    for owner in "${owners[@]}"; do
+        private_dir "$profile/fixtures/$owner"
+    done
+    for owner in "${vault_owners[@]}"; do
+        vault_mount_id+="$owner:$(stat -c '%d:%i' -- "$profile/fixtures/$owner");"
+    done
+    shell_options=(--caller "$caller" --secret-dir "$secrets")
+    broker_options=("$caller")
+elif [[ -n $vault_secret_rel ]]; then
     # Validate each parent, rather than letting a symlink escape the profile.
     mount_dir=$profile/mounts
     verify_private_dir "$mount_dir"
@@ -143,8 +196,8 @@ if [[ -n $vault_secret_rel ]]; then
 fi
 
 start_container() {
-    local container=$1 network=$2
-    shift 2
+    local container=$1 network=$2 namespace=$3
+    shift 3
     podman run --detach --name "$container" --label "$label" \
         --label "$build_label=$image_ref" --label "dev.boreal.vault-mount=$vault_mount_id" \
         --network "$network" \
@@ -153,13 +206,13 @@ start_container() {
         --passwd-entry "local:x:$UID:$gid::/home/local:/sbin/nologin" \
         --read-only --cap-drop=ALL --security-opt=no-new-privileges \
         --http-proxy=false --unsetenv-all --env HOME=/home/local \
-        --env TEMPORAL_ADDRESS=127.0.0.1:7233 --env TEMPORAL_NAMESPACE=local \
+        --env TEMPORAL_ADDRESS=127.0.0.1:7233 --env "TEMPORAL_NAMESPACE=$namespace" \
         "$@" >/dev/null
 }
 
 temporal_ready() {
     podman exec "$temporal" "$temporal_bin" operator namespace describe \
-        --address 127.0.0.1:7233 --namespace local --disable-config-file \
+        --address 127.0.0.1:7233 --namespace "$1" --disable-config-file \
         --disable-config-env --command-timeout 1s --output none >/dev/null 2>&1
 }
 
@@ -173,6 +226,8 @@ await_ready() {
 }
 
 launch() {
+    local owner worker i vault_secrets
+    local -a namespace_args=()
     gid=$(id -g)
     if ! podman image exists "$image_ref"; then
         podman load --signature-policy "$archive_policy" --input "$archive" >&2
@@ -182,32 +237,43 @@ launch() {
         rm -- "$socket"
     fi
     # The catalog loader requires private modes; Nix normalizes store paths.
+    private_dir "$profile/catalog"
     private_dir "$catalog"
     private_dir "$catalog/users"
-    private_dir "$catalog/users/local"
     install -m 400 -- "$store_catalog/schemas.yaml" "$catalog/schemas.yaml"
-    install -m 400 -- "$store_catalog/users/local/perms.yaml" "$catalog/users/local/perms.yaml"
-    start_container "$temporal" none --volume "$profile/temporal:/data:Z" \
+    for owner in "${owners[@]}"; do
+        private_dir "$catalog/users/$owner"
+        install -m 400 -- "$store_catalog/users/$owner/perms.yaml" "$catalog/users/$owner/perms.yaml"
+        namespace_args+=(--namespace "$owner")
+    done
+    start_container "$temporal" none "$caller" --volume "$profile/temporal:/data:Z" \
         "$image_ref" "$temporal_bin" server start-dev --headless --ip 127.0.0.1 \
-        --namespace local --db-filename /data/temporal.sqlite
-    await_ready 'the local Temporal namespace' 80 temporal_ready
-    start_container "$broker" "container:$temporal" --volume "$profile/broker:/data:Z" \
+        "${namespace_args[@]}" --db-filename /data/temporal.sqlite
+    for owner in "${owners[@]}"; do
+        await_ready "Temporal namespace $owner" 80 temporal_ready "$owner"
+    done
+    start_container "$broker" "container:$temporal" "$caller" --volume "$profile/broker:/data:Z" \
         --volume "$ipc:/ipc:Z" --volume "$catalog:/catalog:ro,Z" \
-        "$image_ref" "$broker_bin" local /catalog /ipc/broker.sock /data
-    if [[ -n $vault_bin ]]; then
+        "$image_ref" "$broker_bin" local /catalog /ipc/broker.sock /data "${broker_options[@]}"
+    for i in "${!vault_owners[@]}"; do
+        owner=${vault_owners[i]}
         # Match the vault account's passwd home. No other container gets this mount.
-        if [[ -z $vault_secret_rel ]]; then
+        vault_secrets=$secrets
+        if [[ -n $local_caller ]]; then
+            vault_secrets=$profile/fixtures/$owner
+        elif [[ -z $vault_secret_rel ]]; then
             private_dir "$home/.config"
             private_dir "$home/.config/boreal"
             private_dir "$secrets"
         fi
-        start_container "$name-vault" "container:$temporal" \
-            --volume "$secrets:/home/local/.config/boreal/secrets:ro,Z" \
-            "$image_ref" "$vault_bin"
-    fi
+        start_container "$(vault_container "$owner")" "container:$temporal" "$owner" \
+            --volume "$vault_secrets:/home/local/.config/boreal/secrets:ro,Z" \
+            "$image_ref" "${vault_bins[i]}"
+    done
     for i in "${!worker_names[@]}"; do
+        owner=${worker_owners[i]}
         worker=${worker_names[i]}
-        start_container "$name-worker-$worker" "container:$temporal" \
+        start_container "$(worker_container "$owner" "$worker")" "container:$temporal" "$owner" \
             "$image_ref" "${worker_bins[i]}" "$worker"
     done
     await_ready 'the local broker socket' 80 test -S "$socket"

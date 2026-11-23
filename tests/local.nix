@@ -27,6 +27,20 @@ let
       };
     };
   rejects = path: !(builtins.tryEval (mkLocal path).drvPath).success;
+  users = {
+    alice = {
+      workers.desk.package = worker.greet;
+      vault.package = vault.lab-vault;
+    };
+    shared = {
+      workers.desk = {
+        package = worker.count;
+        permissions.write = [ "alice" ];
+      };
+      vault.package = vault.lab-vault;
+    };
+  };
+  mkLocalOwners = caller: users: self.lib.mkLocalOwners pkgs { inherit caller users; };
 in
 assert builtins.all rejects [
   ""
@@ -36,4 +50,15 @@ assert builtins.all rejects [
   ./vm-worker
   "${pkgs.hello}/fixtures"
 ];
+assert (builtins.tryEval (mkLocalOwners "alice" users).drvPath).success;
+assert !(builtins.tryEval (mkLocalOwners "missing" users).drvPath).success;
+assert !(builtins.tryEval (mkLocalOwners "alice" (users // { root = { }; })).drvPath).success;
+assert
+  !(builtins.tryEval
+    (mkLocalOwners "alice" (
+      pkgs.lib.recursiveUpdate users {
+        alice.vault.secretDir = "./fixtures";
+      }
+    )).drvPath
+  ).success;
 mkLocal "./fixtures/alice"

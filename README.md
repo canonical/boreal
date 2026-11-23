@@ -43,9 +43,10 @@ nix develop -c boreal-local stop
 ```
 
 The result is `Processed: hello`. To use the interactive shell, run
-`nix develop -c boreal-local` without arguments. Local mode is for single-user
-workflow development; use the [QEMU VM](docs/vm.md) to verify SSH access and
-multi-user authorization before deploying.
+`nix develop -c boreal-local` without arguments. Local mode is for one
+developer, with optional [separate worker namespaces and vault fixture stores](docs/local.md#use-multiple-worker-owners-locally).
+Use the [QEMU VM](docs/vm.md) to verify SSH access and production authorization
+before deploying.
 
 ## Where to go next
 

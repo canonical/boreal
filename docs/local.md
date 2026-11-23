@@ -1,6 +1,6 @@
 # Local lab
 
-`boreal-local` runs a single-user lab on Linux using rootless Podman. The real
+`boreal-local` runs a lab for one developer on Linux using rootless Podman. The real
 Boreal shell runs on the host. A local Temporal development server, a
 user-only broker, and the downstream workers run in separate containers that
 share a loopback-only network namespace. The shell uses a private Unix socket
@@ -65,10 +65,43 @@ devShells.${system}.default = boreal.lib.mkDevShell pkgs {
 The launcher uses the configured binary outputs and generated workflow schemas
 from that build, so rebuilding requires no duplicate catalog or worker code.
 
+## Use multiple worker owners locally
+
+Use `mkLocalOwners` when workflows need to hand work across namespaces or
+exercise separate vault stores. Pass the same user definitions as the NixOS
+module, with a fixed local shell caller:
+
+```nix
+packages.${system}.boreal-local = boreal.lib.mkLocalOwners pkgs {
+  caller = "alice";
+  users = import ./users.nix self.packages.${system};
+};
+```
+
+The launcher uses `workers.<name>.package`, optional `vault.package`, and the
+user and worker `permissions` for shell requests. It does not configure SSH,
+placement, schedules, or vault activity grants. Each owner gets a Temporal
+namespace, so `run dispatch/shared` works when Alice has a write grant on the
+worker. The launcher creates private fixture directories automatically; only
+an owner's vault container gets that owner's directory, mounted read-only.
+
+```sh
+printf '%s' 'desk-fixture' | boreal-local secrets set desk_badge
+printf '%s' 'dispatch-fixture' | boreal-local --secret-owner shared secrets set dispatch_key
+boreal-local --secret-owner shared secret-path
+```
+
+`--secret-owner` selects a fixture store, not a workflow caller. The local
+developer controls all fixture stores and should use only synthetic data.
+Owner-aware profiles are keyed by checkout and caller and are separate from
+existing `mkLocal` profiles. As in single-owner mode, use the VM to test the
+production worker gate and vault grants.
+
 ## Persistent state and local secret reads
 
-Each canonical checkout directory has a profile under
-`${XDG_STATE_HOME:-$HOME/.local/state}/boreal-local/`. Its identity does not
+Each profile lives under `${XDG_STATE_HOME:-$HOME/.local/state}/boreal-local/`
+and is keyed by the canonical checkout directory (and the caller in
+owner-aware mode). Its identity does not
 depend on the commit, generation, or image. Keep the checkout and state base
 paths unchanged to reuse a profile. No writable state belongs in the checkout
 or Nix store. The runtime keeps Temporal's SQLite database, and the shell
@@ -76,8 +109,8 @@ keeps private selector-only history; JSON inputs are not written to shell
 history. Temporal does keep workflow input and results as execution data, so
 never put secret values there.
 
-To test a vault-backed workflow, configure `vault`, then run `secrets set NAME`
-in the local shell (hidden prompt) or pipe fixture bytes to:
+With `mkLocal`, configure `vault` and run `secrets set NAME` in the local shell
+(hidden prompt), or pipe fixture bytes to:
 
 ```sh
 nix develop -c boreal-local secrets set NAME < ./fixture-file

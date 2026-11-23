@@ -1,18 +1,31 @@
 { self, lib }:
 pkgs:
 {
-  workers,
-  vault ? null,
+  caller,
+  users,
 }:
 let
   system = pkgs.stdenv.hostPlatform.system;
   inherit (self.packages.${system}) boreal-broker boreal-shell;
-  vaultConfig = if vault == null || !lib.isDerivation vault then vault else { package = vault; };
-  vaultPackage = if vaultConfig == null then null else vaultConfig.package;
-  secretDir = if vaultConfig == null then null else vaultConfig.secretDir or null;
+  inherit (import ./catalog.nix { inherit lib; }) userPolicy;
+  owners = builtins.attrNames users;
+  normalizeVault = vault: if lib.isDerivation vault then { package = vault; } else vault;
+  vaults = lib.filterAttrs (_: vault: vault != null) (
+    lib.mapAttrs (_: user: normalizeVault (user.vault or null)) users
+  );
+  vaultOwners = builtins.attrNames vaults;
+  secretDir = if caller == null then vaults.local.secretDir or null else null;
   relativeDir = if secretDir == null then "" else lib.removePrefix "./" secretDir;
   safeComponent = part: part != "." && part != ".." && builtins.match "[A-Za-z0-9._-]+" part != null;
-  names = builtins.attrNames workers;
+  workers = lib.concatLists (
+    lib.mapAttrsToList (
+      owner: user:
+      lib.mapAttrsToList (name: worker: {
+        inherit owner name;
+        inherit (worker) package;
+      }) (user.workers or { })
+    ) users
+  );
   validName = name: builtins.match "[a-z][a-z0-9_-]*" name != null;
   validBin =
     pkg:
@@ -22,25 +35,16 @@ let
       "schema"
     ]);
   yaml = pkgs.formats.yaml { };
-  schemaDirs = lib.unique (map (worker: toString worker.schema) (builtins.attrValues workers));
+  schemaDirs = lib.unique (map (worker: toString worker.package.schema) workers);
   schemas = yaml.generate "boreal-local-schemas.yaml" { directories = schemaDirs; };
-  permissions = yaml.generate "boreal-local-perms.yaml" {
-    user = "local";
-    permissions = {
-      read = false;
-      write = false;
-    };
-    workers = lib.mapAttrs (_: worker: {
-      package = worker.outputName;
-      permissions = {
-        read = false;
-        write = false;
-      };
-    }) workers;
-  };
+  policies = lib.mapAttrs (
+    owner: user: yaml.generate "boreal-local-perms-${owner}.yaml" (userPolicy owner user)
+  ) users;
   catalog = pkgs.runCommand "boreal-local-catalog" { } ''
     install -Dm444 ${schemas} "$out/schemas.yaml"
-    install -Dm444 ${permissions} "$out/users/local/perms.yaml"
+    ${lib.concatMapStringsSep "\n" (owner: ''
+      install -Dm444 ${policies.${owner}} "$out/users/${owner}/perms.yaml"
+    '') owners}
   '';
   binOf = worker: "${worker}/bin/${worker.outputName}";
   # This is scoped to loading the exact archive from the Nix store, not pulls.
@@ -57,8 +61,8 @@ let
       pkgs.temporal-cli
       boreal-broker
     ]
-    ++ builtins.attrValues workers
-    ++ lib.optional (vaultPackage != null) vaultPackage;
+    ++ map (worker: worker.package) workers
+    ++ map (owner: vaults.${owner}.package) vaultOwners;
     extraCommands = ''
       mkdir -p etc home/local/.config/boreal/secrets data ipc
       printf 'root:x:0:0:root:/root:/sbin/nologin\n' > etc/passwd
@@ -70,18 +74,27 @@ let
     };
   };
 in
-assert lib.assertMsg (names != [ ]) "mkLocal: configure at least one worker";
-assert lib.assertMsg (builtins.all (
-  name: validName name && name != "vault" && !lib.hasSuffix "-vault" name
-) names) "mkLocal: invalid worker name or reserved vault queue";
-assert lib.assertMsg (builtins.all
-  (worker: worker ? schema && validBin worker && !(worker.borealVault or false))
-  (builtins.attrValues workers)
-) "mkLocal: workers must be executable buildRustWorker outputs with schemas";
 assert lib.assertMsg (
-  vaultConfig == null
-  || (vaultPackage != null && (vaultPackage.borealVault or false) && validBin vaultPackage)
+  caller == null || builtins.hasAttr caller users
+) "mkLocalOwners: caller must be declared in users";
+assert lib.assertMsg (builtins.all (
+  name: validName name && name != "root"
+) owners) "mkLocal: invalid owner name";
+assert lib.assertMsg (workers != [ ]) "mkLocal: configure at least one worker";
+assert lib.assertMsg (builtins.all (
+  { name, ... }: validName name && name != "vault" && !lib.hasSuffix "-vault" name
+) workers) "mkLocal: invalid worker name or reserved vault queue";
+assert lib.assertMsg (builtins.all (
+  { package, ... }: package ? schema && validBin package && !(package.borealVault or false)
+) workers) "mkLocal: workers must be executable buildRustWorker outputs with schemas";
+assert lib.assertMsg (builtins.all
+  ({ package, ... }: (package.borealVault or false) && validBin package)
+  (builtins.attrValues vaults)
 ) "mkLocal: vault.package must be an executable buildRustVault output";
+assert lib.assertMsg (
+  caller == null
+  || builtins.all (vault: (vault.secretDir or null) == null) (builtins.attrValues vaults)
+) "mkLocalOwners: vault fixture directories are managed per owner; do not set vault.secretDir";
 assert lib.assertMsg (
   secretDir == null
   || (
@@ -105,10 +118,14 @@ pkgs.writeShellApplication {
     archive=${image}
     archive_policy=${archivePolicy}
     image_ref=${image.imageName}:${image.imageTag}
-    vault_bin=${if vaultPackage == null then "" else lib.escapeShellArg (binOf vaultPackage)}
+    local_caller=${lib.escapeShellArg (if caller == null then "" else caller)}
+    owners=(${lib.escapeShellArgs owners})
+    vault_owners=(${lib.escapeShellArgs vaultOwners})
+    vault_bins=(${lib.escapeShellArgs (map (owner: binOf vaults.${owner}.package) vaultOwners)})
     vault_secret_rel=${lib.escapeShellArg relativeDir}
-    worker_names=(${lib.escapeShellArgs names})
-    worker_bins=(${lib.escapeShellArgs (map (name: binOf workers.${name}) names)})
+    worker_owners=(${lib.escapeShellArgs (map (worker: worker.owner) workers)})
+    worker_names=(${lib.escapeShellArgs (map (worker: worker.name) workers)})
+    worker_bins=(${lib.escapeShellArgs (map (worker: binOf worker.package) workers)})
   ''
   + builtins.readFile ./local.sh;
 }

@@ -25,6 +25,7 @@ moving branches during deployment.
 | `buildRustWorker pkgs { ... }` | Build Temporal worker binaries and schema outputs using the pinned SDK. |
 | `buildRustVault pkgs { ... }` | Build a separate, activity-only [vault worker package](vault.md#configure-a-vault). |
 | `mkLocal pkgs { workers, vault ? null }` | Build the rootless `boreal-local` launcher for a single-user lab. |
+| `mkLocalOwners pkgs { caller, users }` | Build a local launcher with one shell caller and separate Temporal namespaces and vault fixture stores per owner. |
 
 For examples, see [host configuration](host.md), [VM configuration](vm.md),
 [local development](local.md), [workflow artifacts](artifacts.md), and the

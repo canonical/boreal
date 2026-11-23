@@ -2,6 +2,7 @@
 
 let
   inherit (nixpkgs) lib;
+  local = import ./local.nix { inherit self lib; };
 
   borealSdkSrc = lib.cleanSourceWith {
     src = "${self}/sdk";
@@ -40,7 +41,25 @@ in
       ++ modules;
     };
 
-  mkLocal = import ./local.nix { inherit self lib; };
+  mkLocal =
+    pkgs:
+    {
+      workers,
+      vault ? null,
+    }:
+    local pkgs {
+      caller = null;
+      users.local = {
+        workers = lib.mapAttrs (_: package: { inherit package; }) workers;
+        inherit vault;
+      };
+    };
+
+  mkLocalOwners =
+    pkgs:
+    { caller, users }:
+    assert lib.assertMsg (builtins.isString caller) "mkLocalOwners: caller must be an owner name";
+    local pkgs { inherit caller users; };
 
   mkFleetCheck =
     { pkgs, hosts }:
