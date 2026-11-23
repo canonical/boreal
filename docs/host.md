@@ -116,6 +116,43 @@ namespace. The binary should call `boreal_sdk::client::connect()`, upsert schedu
 with the stock Temporal client, and exit. Schedules are rows in Temporal, not a
 timer: the server starts the workflows, and the worker unit executes them.
 
+## Pin SSH keys from GitHub and Launchpad
+
+On the central host, `boreal.users.<user>.keys` adds manual public keys to the
+keys from every entry in `boreal.users.<user>.accounts`. Entry names are local
+labels: use as many GitHub or Launchpad accounts as you need.
+
+```nix
+boreal.users.pseudoc = {
+  keys = [ ]; # Optional extra OpenSSH public keys.
+  accounts = {
+    personal = {
+      name = "gh:pseudocc";
+      keyHash = "sha256-...";
+    };
+    packages = {
+      name = "lp:pseudoc";
+      keyHash = "sha256-...";
+    };
+  };
+};
+```
+
+Replace the placeholders with the `hash` from each command. Review **all** the
+public keys in the reported `storePath` before trusting the hash:
+
+```sh
+nix store prefetch-file --json https://github.com/pseudocc.keys
+nix store prefetch-file --json https://launchpad.net/~pseudoc/+sshkeys
+```
+
+Nix pins the exact response bytes, including comments and newlines. SSH never
+fetches keys at login. If a provider changes its key list, the existing
+generation keeps its keys; a fresh fetch must match the pinned hash. To rotate
+or revoke access, review the new list, update the hash or remove the account,
+and activate the new configuration. These options do not change `admin` keys
+or add SSH logins on peripheral hosts.
+
 ## User secrets and restricted administration
 
 Lab users connect over SSH into `boreal-shell` and manage their own secrets

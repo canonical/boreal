@@ -19,6 +19,32 @@ let
   permissionType = types.either types.bool (types.listOf types.str);
   nonEmpty = text: builtins.match "^[[:space:]]*$" text == null;
   validName = name: builtins.match "^[a-z][a-z0-9_-]*$" name != null;
+  accountKeysType = types.submodule {
+    options = {
+      name = mkOption {
+        type = types.strMatching "(gh:[a-zA-Z0-9]([a-zA-Z0-9-]{0,37}[a-zA-Z0-9])?|lp:[a-z0-9][a-z0-9.+-]*)";
+        example = "gh:example-user";
+        description = "Account name prefixed with gh: for GitHub or lp: for Launchpad.";
+      };
+      keyHash = mkOption {
+        type = types.strMatching "sha256-[A-Za-z0-9+/]{43}=";
+        description = "SHA-256 SRI hash of the unmodified SSH public key response.";
+      };
+    };
+  };
+  fetchAccountKeys =
+    account:
+    let
+      github = lib.hasPrefix "gh:" account.name;
+      provider = if github then "github" else "launchpad";
+      name = lib.removePrefix (if github then "gh:" else "lp:") account.name;
+    in
+    builtins.fetchurl {
+      url =
+        if github then "https://github.com/${name}.keys" else "https://launchpad.net/~${name}/+sshkeys";
+      sha256 = account.keyHash;
+      name = "boreal-${provider}-${name}-keys";
+    };
   reservedUsers = [
     "root"
     "admin"
@@ -231,6 +257,12 @@ in
               type = types.listOf types.str;
               default = [ ];
               description = "Public SSH authorized keys; never place private keys here.";
+            };
+
+            accounts = mkOption {
+              type = types.attrsOf accountKeysType;
+              default = { };
+              description = "Named GitHub or Launchpad accounts whose hash-pinned public SSH keys are added to this user.";
             };
 
             editMode = mkOption {
@@ -453,7 +485,10 @@ in
         homeMode = "0700";
         shell = "${cfg.shellPackage}/bin/boreal-shell";
         extraGroups = [ "boreal" ];
-        openssh.authorizedKeys.keys = userCfg.keys;
+        openssh.authorizedKeys = {
+          keys = userCfg.keys;
+          keyFiles = map fetchAccountKeys (builtins.attrValues userCfg.accounts);
+        };
       }) cfg.users;
 
       systemd.tmpfiles.rules = [

@@ -91,6 +91,58 @@ let
       ];
     }).config;
 
+  accountFixture =
+    provider: prefix: account: text:
+    let
+      fixture = builtins.toFile "${provider}-${account}-fixture" text;
+      keyHash = builtins.hashString "sha256" text;
+    in
+    # Seed the fixed-output path for offline evaluation of the real HTTPS fetch.
+    builtins.seq
+      (builtins.fetchurl {
+        url = "file://${builtins.unsafeDiscardStringContext fixture}";
+        sha256 = keyHash;
+        name = "boreal-${provider}-${account}-keys";
+      })
+      {
+        name = "${prefix}:${account}";
+        keyHash =
+          "sha256-"
+          + builtins.convertHash {
+            hash = keyHash;
+            hashAlgo = "sha256";
+            toHashFormat = "base64";
+          };
+      };
+  accountKeysHost = mkHost {
+    services.openssh.enable = true;
+    boreal = {
+      enable = true;
+      users.alice = {
+        keys = [ "ssh-ed25519 AAAA manual-fixture" ];
+        accounts = {
+          personal = accountFixture "github" "gh" "github-fixture" ''
+            ssh-ed25519 BBBB github-fixture-one
+            ssh-ed25519 CCCC github-fixture-two
+          '';
+          work = accountFixture "github" "gh" "github-work" "ssh-ed25519 DDDD github-work";
+          packages = accountFixture "launchpad" "lp" "launchpad.fixture" "ssh-ed25519 EEEE launchpad-fixture";
+        };
+      };
+    };
+  };
+  authorizedKeys = accountKeysHost.environment.etc."ssh/authorized_keys.d/alice".source;
+  rejectsAccount =
+    account:
+    !(builtins.tryEval (
+      builtins.deepSeq
+        (mkHost {
+          boreal.enable = true;
+          boreal.users.alice.accounts.test = account;
+        }).boreal.users.alice.accounts
+        true
+    )).success;
+
   sampleLabModule = {
     boreal = {
       enable = true;
@@ -687,6 +739,32 @@ assert assertionFailed removedUpdaterBranch "boreal.updater.branch";
 assert assertionFailed removedUpdaterConfigName "boreal.updater.configurationName";
 assert assertionFailed invalidUpdaterHost "networking.hostName";
 assert assertionFailed removedPocOption "boreal.poc";
+assert configured.users.users.alice.openssh.authorizedKeys.keyFiles == [ ];
+assert builtins.length accountKeysHost.users.users.alice.openssh.authorizedKeys.keyFiles == 3;
+assert builtins.all rejectsAccount (
+  let
+    validHash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+  in
+  [
+    {
+      name = "git:github-fixture";
+      keyHash = validHash;
+    }
+    {
+      name = "gh:example/other";
+      keyHash = validHash;
+    }
+    {
+      name = "lp:../other";
+      keyHash = validHash;
+    }
+    {
+      name = "gh:example";
+      keyHash = "sha256-not-a-hash";
+    }
+    { name = "gh:example"; }
+  ]
+);
 assert vm.boreal.enable;
 assert vm.boreal.updater.enable;
 assert vm.services.openssh.enable;
@@ -777,6 +855,14 @@ pkgs.runCommand "boreal-module-tests"
 
     assert json.loads(pathlib.Path("alice-rc.json").read_text()) == {"edit_mode": "emacs"}
     assert json.loads(pathlib.Path("bob-rc.json").read_text()) == {"edit_mode": "helix"}
+    keys = pathlib.Path("${authorizedKeys}").read_text().splitlines()
+    assert sorted(key for key in keys if key.strip()) == sorted([
+        "ssh-ed25519 AAAA manual-fixture",
+        "ssh-ed25519 BBBB github-fixture-one",
+        "ssh-ed25519 CCCC github-fixture-two",
+        "ssh-ed25519 DDDD github-work",
+        "ssh-ed25519 EEEE launchpad-fixture",
+    ])
     PY
     touch "$out"
   ''
