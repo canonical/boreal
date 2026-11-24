@@ -60,6 +60,4 @@ nix develop --override-input boreal ../.. --no-write-lock-file \
 For an SSH check on a disposable central host, add your public key to
 `boreal.vm.devAuthorizedKeys` and run
 `nix run --override-input boreal ../.. --no-write-lock-file .#vm`. Connect as `beijing`
-on port `2222` and use the same `run` and `result` commands. There is no
-production host definition, no SSH key checked in, and no artifact cache
-enabled.
+on port `2222` and use the same `run` and `result` commands.

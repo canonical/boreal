@@ -7,12 +7,17 @@
       url = "github:canonical/boreal";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    lanzaboote = {
+      url = "github:nix-community/lanzaboote/v1.2.0";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
     {
       self,
       boreal,
+      lanzaboote,
       nixpkgs,
       ...
     }:
@@ -55,6 +60,7 @@
           system = "x86_64-linux";
           specialArgs = { inherit self; };
           modules = [
+            lanzaboote.nixosModules.lanzaboote
             ./lab.nix
             ./hosts/chopstick.nix
           ];
