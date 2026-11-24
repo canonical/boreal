@@ -85,11 +85,13 @@
       };
 
       checks = forAllSystems (pkgs: {
-        lab = boreal.lib.mkLabCheck {
-          inherit pkgs;
-          specialArgs = { inherit self; };
-          modules = [ ./lab.nix ];
-        };
+        lab =
+          assert import ./tests/authorized-keys.nix { inherit (pkgs) lib; };
+          boreal.lib.mkLabCheck {
+            inherit pkgs;
+            specialArgs = { inherit self; };
+            modules = [ ./lab.nix ];
+          };
       });
 
       formatter = forAllSystems (pkgs: pkgs.nixfmt);

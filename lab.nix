@@ -2,10 +2,19 @@
 
 let
   workers = self.packages.${pkgs.stdenv.hostPlatform.system};
-  authorizedKeys = let
-    perUser = user: config.users.users.${user}.openssh.authorizedKeys.keys;
-  in
-    users: lib.unique (lib.concatMap perUser users);
+  authorizedKeys =
+    users:
+    let
+      readKeyFile = file: lib.splitString "\n" (builtins.readFile file);
+      perUser =
+        user:
+        let
+          inherit (config.users.users.${user}.openssh.authorizedKeys) keys keyFiles;
+        in
+        keys ++ lib.concatMap readKeyFile keyFiles;
+      lines = map lib.trim (lib.concatMap perUser users);
+    in
+    lib.unique (builtins.filter (line: line != "" && !lib.hasPrefix "#" line) lines);
 in
 {
   boreal = {
