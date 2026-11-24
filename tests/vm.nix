@@ -23,6 +23,7 @@ let
   };
 
   temporalCli = "${pkgs.temporal-cli}/bin/temporal";
+  testReleaseRev = "d9c4975000000000000000000000000000000000";
 in
 pkgs.testers.runNixOSTest {
   name = "boreal-integration";
@@ -44,7 +45,7 @@ pkgs.testers.runNixOSTest {
       networking.hostName = "lab-vm";
       networking.extraHosts = "127.0.0.1 git.lab.internal";
       system.stateVersion = "26.05";
-      _module.args.self.rev = "d9c49750000000000000000000000000000000000";
+      _module.args.self.rev = testReleaseRev;
 
       nix.settings = {
         experimental-features = [
@@ -73,7 +74,7 @@ pkgs.testers.runNixOSTest {
       boreal = {
         enable = true;
         deploymentRelease = {
-          rev = "d9c49750000000000000000000000000000000000";
+          rev = testReleaseRev;
           tags = [ "v1.2.3" ];
         };
         users = {
