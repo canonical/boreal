@@ -24,7 +24,7 @@ cargo test --manifest-path updater/Cargo.toml --locked
 - **SDK features:** See the [SDK checks](sdk/README.md#checks)
   for `schema` and `read-secrets` coverage.
 - **Flake and module changes:** Run `nix flake check`. The flake defines
-  module, template, and local checks, plus a VM check on `x86_64-linux`.
+  module, template, and artifact checks, plus a VM check on `x86_64-linux`.
 - **Terminal changes:** Build the shell and run the PTY suite with Python 3.
   On a local terminal outside SSH, `nix run .#boreal-shell` opens the standalone
   mock preview if `/etc/boreal` is absent.
@@ -34,7 +34,6 @@ cargo test --manifest-path updater/Cargo.toml --locked
   python3 tests/shell-pty.py shell/target/debug/boreal-shell
   ```
 
-- **Local runtime changes:** Follow the [rootless Podman smoke test](docs/local.md#smoke-test-from-the-framework-checkout).
 - **Docs changes:** Check links and anchors, verify commands against the
   implementation, and run `git diff --check`. Run changed examples when the
   prerequisites are available.

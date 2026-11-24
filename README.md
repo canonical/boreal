@@ -16,43 +16,47 @@ flake that pins Boreal and defines its own users, workers, and permissions.
 | --- | --- |
 | Connect to an existing lab | An SSH client and a lab account. No Nix required. |
 | Develop Boreal or a downstream lab | The Nix package manager with flakes enabled on `x86_64-linux` or `aarch64-linux`. |
-| Run workflows locally | Nix and a working rootless Podman setup on Linux. |
-| Test a deployment in QEMU | Nix on the development machine; the guest runs NixOS. The starter VM targets `x86_64-linux`. |
+| Run workflows offline or test a deployment | Nix on an `x86_64-linux` machine to build the starter QEMU VM. KVM is recommended. |
 | Host a deployed lab | NixOS on the servers running Boreal services. |
 
 ## Quickstart: run a workflow locally
 
-With Git, Nix, and rootless Podman set up, create a lab from the starter
-template and submit its example workflow:
+With Git and Nix, create a lab from the starter template:
 
 ```sh
 nix flake new my-lab -t github:canonical/boreal
 cd my-lab
 git init
 git add .
-
-nix develop -c boreal-local run example --id local-1 --input-json '{"message":"hello"}'
 ```
 
-`run` returns after submission. Once the workflow completes, check its result
-and stop the local runtime:
+Add your SSH public key to `boreal.vm.devAuthorizedKeys` in `flake.nix`. While
+connected, build the VM and keep the output link. Then launch it directly,
+even when the lab server is unreachable:
 
 ```sh
-nix develop -c boreal-local result local-1
-nix develop -c boreal-local stop
+nix build .#vm --out-link result-vm
+NIX_DISK_IMAGE="$PWD/lab-vm.qcow2" ./result-vm/bin/run-lab-vm
 ```
 
-The result is `Processed: hello`. To use the interactive shell, run
-`nix develop -c boreal-local` without arguments. Local mode is for one
-developer, with optional [separate worker namespaces and vault fixture stores](docs/local.md#use-multiple-worker-owners-locally).
-Use the [QEMU VM](docs/vm.md) to verify SSH access and production authorization
-before deploying.
+In another terminal, submit a workflow over SSH and check its result:
+
+```sh
+ssh -T -p 2222 alice@127.0.0.1 'run example --id local-1 --input-json -' <<'JSON'
+{"message":"hello"}
+JSON
+ssh -T -p 2222 alice@127.0.0.1 'result local-1'
+```
+
+`run` returns after submission. Once the workflow completes, `result` returns
+`Processed: hello`. See the [VM guide](docs/vm.md) for shutdown, persistence, and
+the limits of offline execution.
 
 ## Where to go next
 
 - **Use an existing lab:** [Run and inspect workflows over SSH](docs/workflows.md).
 - **Build a lab:** Start with the [downstream template guide](templates/default/README.md),
-  then see [local development](docs/local.md) and the [Boreal SDK](sdk/README.md).
+  then see the [VM guide](docs/vm.md) and the [Boreal SDK](sdk/README.md).
 - **Deploy a lab:** See [host configuration](docs/host.md),
   [remote workers](docs/remote-workers.md), [artifact storage](docs/artifacts.md),
   and [safe updates](updater/README.md).

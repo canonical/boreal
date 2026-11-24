@@ -3,7 +3,7 @@
 If you have a lab account, connect with `ssh alice@lab.example` (substitute
 your own username and host). Boreal opens a restricted workflow shell, not a
 general-purpose Unix shell. To try the same workflow interface without a
-deployed lab, use the [local lab](local.md).
+deployed lab or to work offline, use the [local QEMU VM](vm.md).
 
 ## Use the interactive shell
 

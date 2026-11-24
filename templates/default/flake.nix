@@ -25,16 +25,11 @@
     in
     {
       devShells = forAllSystems (pkgs: {
-        default = boreal.lib.mkDevShell pkgs {
-          extraPackages = [ self.packages.${pkgs.stdenv.hostPlatform.system}.boreal-local ];
-        };
+        default = boreal.lib.mkDevShell pkgs { };
       });
 
       packages = forAllSystems (
         pkgs:
-        let
-          system = pkgs.stdenv.hostPlatform.system;
-        in
         {
           example-worker = boreal.lib.buildRustWorker pkgs {
             pname = "example-worker";
@@ -46,9 +41,6 @@
               "schema"
             ];
           };
-          boreal-local = boreal.lib.mkLocal pkgs {
-            workers.example = self.packages.${system}.example-worker.example;
-          };
         }
         // nixpkgs.lib.optionalAttrs (pkgs.stdenv.hostPlatform.system == "x86_64-linux") {
           vm = self.nixosConfigurations.vm.config.system.build.vm;
@@ -56,7 +48,7 @@
       );
 
       nixosConfigurations = {
-        # Disposable local test VM (`nix run .#vm`):
+        # Local VM (`nix run .#vm`), also usable offline after building:
         vm = boreal.lib.mkVm {
           system = "x86_64-linux";
           specialArgs = { inherit self; };
