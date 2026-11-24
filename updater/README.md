@@ -60,6 +60,9 @@ updater status
    into pure evaluation for the new generation's SSH prompt. The build uses a
    distinct `/var/lib/boreal-updater/attempt-*/result` GC root and records `prebuilt`
    (or `blocked` when `allowSwitch` is `false`).
+   If Ctrl-C or a crash leaves `phase=building`, rerun `update`. Once it acquires
+   the updater lock, it records the unfinished attempt as `failed` and starts
+   a fresh build. It never activates or reuses the unfinished attempt's result.
 2. **Schedule switch (`schedule`)**: verifies `phase=prebuilt`, `allowSwitch`,
    the prebuilt GC root, and an open broker admission gate, persists
    `phase=scheduled`, releases `/var/lib/boreal-updater/lock`, and starts
@@ -83,7 +86,9 @@ updater status
    executes `<result>/bin/switch-to-configuration switch` without re-evaluating
    Git or flakes, waits for `temporal.service` and `boreal-broker.service`,
    reopens the gate, and records `phase=activated`.
-7. **Recovery (`recover`)**: `boreal-updater.service` sets
+7. **Recovery (`recover`)**: with the updater lock held, `recover` records an
+   unfinished `building` attempt as `failed` without building, draining, or
+   activating anything. `boreal-updater.service` sets
    `restartIfChanged = false` and `stopIfChanged = false`. If interrupted during
    `draining` or `activating`, `boreal-updater recover` checks
    `/run/current-system` against `state.result`: completed switches reopen the

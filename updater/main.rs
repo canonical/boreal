@@ -967,27 +967,28 @@ impl Environment for LiveEnv<'_> {
 }
 
 fn update_locked(dir: &Path, policy: &Policy, env: &impl Environment) -> Result<State, String> {
-    if let Some(existing) = load_opt(dir)? {
-        if matches!(
-            existing.phase,
-            Phase::Building | Phase::Scheduled | Phase::Draining | Phase::Activating
-        ) {
-            return Err(format!(
-                "cannot run update while '{}' is in phase '{}'",
-                existing.update_id,
-                existing.phase.name()
-            ));
-        }
-        if existing.phase == Phase::Blocked
-            && !matches!(
-                env.broker_call(&UpdaterRequest::GateStatus),
-                Ok(UpdaterResponse::GateStatus { open: true, .. })
-            )
-        {
-            return Err(format!(
-                "previous update '{}' is blocked ({}); run 'boreal-updater recover' first",
-                existing.update_id, existing.reason
-            ));
+    if let Some(mut existing) = load_opt(dir)? {
+        match existing.phase {
+            Phase::Building => mark_build_interrupted(dir, &mut existing)?,
+            Phase::Scheduled | Phase::Draining | Phase::Activating => {
+                return Err(format!(
+                    "cannot run update while '{}' is in phase '{}'",
+                    existing.update_id,
+                    existing.phase.name()
+                ));
+            }
+            Phase::Blocked => {
+                if !matches!(
+                    env.broker_call(&UpdaterRequest::GateStatus),
+                    Ok(UpdaterResponse::GateStatus { open: true, .. })
+                ) {
+                    return Err(format!(
+                        "previous update '{}' is blocked ({}); run 'boreal-updater recover' first",
+                        existing.update_id, existing.reason
+                    ));
+                }
+            }
+            Phase::Prebuilt | Phase::Activated | Phase::Failed => {}
         }
     }
 
@@ -1002,10 +1003,12 @@ fn update_locked(dir: &Path, policy: &Policy, env: &impl Environment) -> Result<
     };
     save(dir, &state)?;
 
-    let attempt = attempt_dir(dir)?;
-    match env.build_generation(policy, &state.target, &attempt) {
-        Ok(path) => {
-            let gc_root = attempt.join("result");
+    let build = attempt_dir(dir).and_then(|attempt| {
+        let path = env.build_generation(policy, &state.target, &attempt)?;
+        Ok((path, attempt.join("result")))
+    });
+    match build {
+        Ok((path, gc_root)) => {
             state.result = Some(path.clone());
             state.gc_root = Some(gc_root.clone());
             if !policy.allow_switch {
@@ -1031,6 +1034,16 @@ fn update_locked(dir: &Path, policy: &Policy, env: &impl Environment) -> Result<
             Err(err)
         }
     }
+}
+
+fn mark_build_interrupted(dir: &Path, state: &mut State) -> Result<(), String> {
+    // The caller holds the same lock as the build. A remaining Building state
+    // was never finalized, even if Nix left a result in its attempt directory.
+    state.phase = Phase::Failed;
+    state.result = None;
+    state.gc_root = None;
+    state.reason = "build interrupted before recording a verified result".into();
+    save(dir, state)
 }
 
 fn prepare_schedule_locked(
@@ -1318,6 +1331,7 @@ fn recover_locked(dir: &Path, policy: &Policy, env: &impl Environment) -> Result
         return Ok(());
     };
     match state.phase {
+        Phase::Building => mark_build_interrupted(dir, &mut state),
         Phase::Activating => {
             let Some(result_path) = state.result.clone() else {
                 return block_update(dir, &mut state, "missing result path during recovery");
@@ -1372,7 +1386,9 @@ fn recover_locked(dir: &Path, policy: &Policy, env: &impl Environment) -> Result
                 ),
             }
         }
-        _ => Ok(()),
+        Phase::Prebuilt | Phase::Scheduled | Phase::Activated | Phase::Failed | Phase::Blocked => {
+            Ok(())
+        }
     }
 }
 
@@ -1914,6 +1930,63 @@ workerUnits:
         assert!(!env.switched.get());
         assert!(!env.gate_open.get());
         assert!(update_locked(&dir.0, &policy, &env).is_err());
+    }
+
+    #[test]
+    fn test_retry_and_recover_discard_unfinished_build_state() {
+        for recover_first in [false, true] {
+            let dir = TempDir::new();
+            let policy = sample_policy(true);
+            let env = FakeEnv::new();
+            let previous = {
+                let _guard = lock(&dir.0).unwrap();
+                let previous = update_locked(&dir.0, &policy, &env).unwrap();
+                save(
+                    &dir.0,
+                    &State {
+                        phase: Phase::Building,
+                        result: None,
+                        gc_root: None,
+                        ..previous.clone()
+                    },
+                )
+                .unwrap();
+                previous
+            };
+
+            // Nix may have written the result link before the updater exited.
+            let abandoned_root = previous.gc_root.unwrap();
+            assert!(schedule_update(&dir.0, &policy, &env).is_err());
+            let _guard = lock(&dir.0).unwrap();
+            env.events.borrow_mut().clear();
+            if recover_first {
+                recover_locked(&dir.0, &policy, &env).unwrap();
+            } else {
+                env.fail_sync.set(true);
+                assert_eq!(
+                    update_locked(&dir.0, &policy, &env).unwrap_err(),
+                    "git fetch failed"
+                );
+                env.fail_sync.set(false);
+            }
+            let failed = load(&dir.0).unwrap();
+            assert_eq!(failed.update_id, previous.update_id);
+            assert_eq!(failed.phase, Phase::Failed);
+            assert!(failed.reason.contains("interrupted"));
+            assert!(failed.result.is_none() && failed.gc_root.is_none());
+            assert_eq!(
+                env.events.borrow().as_slice(),
+                if recover_first { &[][..] } else { &["sync"] }
+            );
+
+            let retry = update_locked(&dir.0, &policy, &env).unwrap();
+            assert_eq!(retry.phase, Phase::Prebuilt);
+            assert_ne!(retry.update_id, failed.update_id);
+            assert_ne!(retry.gc_root.as_ref(), Some(&abandoned_root));
+            assert_eq!(fs::read_link(abandoned_root).unwrap(), env.prebuilt_path);
+            assert!(env.gate_open.get());
+            assert!(!env.service_started.get() && !env.switched.get());
+        }
     }
 
     #[test]
