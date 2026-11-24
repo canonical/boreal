@@ -1,7 +1,7 @@
 use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::os;
@@ -72,13 +72,6 @@ pub fn zeroize(buf: &mut [u8]) {
 pub struct Store {
     root: PathBuf,
     owner_uid: u32,
-    policy: DirectoryPolicy,
-}
-
-#[derive(PartialEq, Eq)]
-enum DirectoryPolicy {
-    CreateUnderHome,
-    Existing,
 }
 
 impl Store {
@@ -92,27 +85,7 @@ impl Store {
         Self {
             root: home.as_ref().join(".config/boreal/secrets"),
             owner_uid,
-            policy: DirectoryPolicy::CreateUnderHome,
         }
-    }
-
-    /// Open an existing private secrets directory without creating or changing it.
-    /// The caller must supply a path under trusted parent directories.
-    pub fn from_existing_dir<P: AsRef<Path>>(root: P, owner_uid: u32) -> Result<Self, Error> {
-        let root = root.as_ref();
-        if !root.is_absolute() || root.components().any(|c| c == Component::ParentDir) {
-            return Err(Error::UnsafePermissions(
-                "secret directory path must be absolute and contain no '..' components".into(),
-            ));
-        }
-        let store = Self {
-            // A trailing '/' or '/.' would otherwise hide a final symlink.
-            root: root.components().collect(),
-            owner_uid,
-            policy: DirectoryPolicy::Existing,
-        };
-        store.verify_root_dir()?;
-        Ok(store)
     }
 
     pub fn root(&self) -> &Path {
@@ -120,9 +93,6 @@ impl Store {
     }
 
     fn ensure_dirs(&self) -> Result<(), Error> {
-        if self.policy == DirectoryPolicy::Existing {
-            return self.verify_root_dir();
-        }
         let boreal_dir = self
             .root
             .parent()
@@ -169,12 +139,7 @@ impl Store {
             )));
         }
         let mode = meta.mode() & 0o7777;
-        let mask = if self.policy == DirectoryPolicy::Existing {
-            0o7777
-        } else {
-            0o777
-        };
-        if mode & mask != 0o700 {
+        if mode & 0o777 != 0o700 {
             return Err(Error::UnsafePermissions(format!(
                 "{} must have mode 0700 (found {mode:04o})",
                 self.root.display()
@@ -186,12 +151,7 @@ impl Store {
     fn root_present(&self) -> Result<bool, Error> {
         match self.verify_root_dir() {
             Ok(()) => Ok(true),
-            Err(Error::Io(e))
-                if e.kind() == io::ErrorKind::NotFound
-                    && self.policy == DirectoryPolicy::CreateUnderHome =>
-            {
-                Ok(false)
-            }
+            Err(Error::Io(e)) if e.kind() == io::ErrorKind::NotFound => Ok(false),
             Err(e) => Err(e),
         }
     }
@@ -199,10 +159,9 @@ impl Store {
     pub fn exists<S: AsRef<str>>(&self, name: S) -> Result<bool, Error> {
         let name = name.as_ref();
         validate_name(name)?;
-        if self.policy == DirectoryPolicy::CreateUnderHome && !self.root.exists() {
+        if !self.root_present()? {
             return Ok(false);
         }
-        self.verify_root_dir()?;
         let path = self.root.join(name);
         match fs::symlink_metadata(&path) {
             Ok(meta) => {
@@ -447,75 +406,28 @@ mod tests {
     }
 
     #[test]
-    fn existing_store_requires_an_owned_private_directory() {
-        let parent = test_dir();
-        let root = parent.join("secrets");
-        let uid = os::current_euid();
+    fn test_store_rejects_an_unsafe_secret_directory() {
+        let home = test_dir();
+        let store = Store::from_home(&home, os::current_euid());
+        assert!(!store.exists("item").unwrap());
+        store.ensure_dirs().unwrap();
+
+        fs::set_permissions(store.root(), fs::Permissions::from_mode(0o750)).unwrap();
         assert!(matches!(
-            Store::from_existing_dir(&root, uid),
-            Err(Error::Io(e)) if e.kind() == io::ErrorKind::NotFound
-        ));
-        assert!(!root.exists());
-        assert!(matches!(
-            Store::from_existing_dir("relative", uid),
+            store.put("item", b"fixture"),
             Err(Error::UnsafePermissions(_))
         ));
 
-        fs::write(&root, b"fixture").unwrap();
+        let outside = home.join("outside");
+        fs::rename(store.root(), &outside).unwrap();
+        fs::set_permissions(&outside, fs::Permissions::from_mode(0o700)).unwrap();
+        symlink(&outside, store.root()).unwrap();
         assert!(matches!(
-            Store::from_existing_dir(&root, uid),
+            store.put("item", b"fixture"),
             Err(Error::UnsafePermissions(_))
         ));
-        fs::remove_file(&root).unwrap();
-        DirBuilder::new().mode(0o700).create(&root).unwrap();
-        assert!(matches!(
-            Store::from_existing_dir(&root, uid ^ 1),
-            Err(Error::UnsafePermissions(_))
-        ));
-
-        let link = parent.join("linked");
-        symlink(&root, &link).unwrap();
-        for path in [&link, &link.join("."), &link.join("")] {
-            assert!(matches!(
-                Store::from_existing_dir(path, uid),
-                Err(Error::UnsafePermissions(_))
-            ));
-        }
-
-        for mode in [0o500, 0o750, 0o1700] {
-            fs::set_permissions(&root, fs::Permissions::from_mode(mode)).unwrap();
-            assert!(matches!(
-                Store::from_existing_dir(&root, uid),
-                Err(Error::UnsafePermissions(_))
-            ));
-            assert_eq!(fs::metadata(&root).unwrap().mode() & 0o7777, mode);
-        }
-        fs::remove_dir_all(parent).unwrap();
-    }
-
-    #[test]
-    fn existing_store_never_recreates_a_removed_directory() {
-        let parent = test_dir();
-        let root = parent.join("secrets");
-        DirBuilder::new().mode(0o700).create(&root).unwrap();
-        let store = Store::from_existing_dir(&root, os::current_euid()).unwrap();
-        store.put("item", b"fixture").unwrap();
-        assert_eq!(store.list().unwrap()[0].name(), "item");
-        assert!(store.exists("item").unwrap());
-        assert_eq!(store.read_bytes("item").unwrap(), b"fixture");
-        store.remove("item").unwrap();
-        fs::remove_dir(&root).unwrap();
-
-        for error in [
-            store.put("item", b"fixture").unwrap_err(),
-            store.exists("item").unwrap_err(),
-            store.list().unwrap_err(),
-            store.read_bytes("item").unwrap_err(),
-            store.remove("item").unwrap_err(),
-        ] {
-            assert!(matches!(error, Error::Io(e) if e.kind() == io::ErrorKind::NotFound));
-        }
-        assert!(!root.exists());
-        fs::remove_dir(parent).unwrap();
+        assert!(matches!(store.list(), Err(Error::UnsafePermissions(_))));
+        assert!(fs::read_dir(outside).unwrap().next().is_none());
+        fs::remove_dir_all(home).unwrap();
     }
 }
