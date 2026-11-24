@@ -1,6 +1,5 @@
 mod engine;
 mod ledger;
-mod local;
 mod netns;
 mod pg;
 mod proxy;
@@ -9,7 +8,6 @@ mod temporal;
 mod vault;
 
 use std::env;
-use std::os::unix::net::UnixStream as StdUnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -114,41 +112,17 @@ async fn write_async_frame(stream: &mut UnixStream, payload: &[u8]) -> Result<()
     stream.flush().await.map_err(|e| format!("flush: {e}"))
 }
 
-#[derive(Clone)]
-enum UserIdentity {
-    OsAccount,
-    Local { uid: u32, caller: Arc<str> },
-}
-
-impl UserIdentity {
-    fn authenticate(&self, stream: &StdUnixStream) -> Result<String, os::Error> {
-        let peer_uid = os::peer_uid(stream)?;
-        match self {
-            Self::OsAccount => os::user_by_uid(peer_uid).map(|user| user.name().to_owned()),
-            Self::Local { uid, caller } if peer_uid == *uid => Ok(caller.to_string()),
-            Self::Local { .. } => Err(os::Error::InvalidIdentity(
-                "local broker requires a peer UID matching its effective UID".into(),
-            )),
-        }
-    }
-}
-
-async fn serve_user_socket(
-    listener: UnixListener,
-    engine: Arc<Engine<LiveBackend>>,
-    identity: UserIdentity,
-) {
+async fn serve_user_socket(listener: UnixListener, engine: Arc<Engine<LiveBackend>>) {
     loop {
         let Ok((stream, _)) = listener.accept().await else {
             continue;
         };
         let engine = Arc::clone(&engine);
-        let identity = identity.clone();
         tokio::spawn(async move {
             let Ok(std_ref) = stream.into_std() else {
                 return;
             };
-            let peer_res = identity.authenticate(&std_ref);
+            let peer_res = os::peer_uid(&std_ref).and_then(os::user_by_uid);
             let Ok(mut stream) = UnixStream::from_std(std_ref) else {
                 return;
             };
@@ -161,7 +135,7 @@ async fn serve_user_socket(
                     message: format!("failed to verify caller OS identity: {}", err.detail()),
                 },
                 Ok(user) => match Request::decode(&raw) {
-                    Ok(req) => engine.handle_user_request(&user, req).await,
+                    Ok(req) => engine.handle_user_request(user.name(), req).await,
                     Err(err) => Response::Error {
                         code: ErrorCode::InvalidArgument,
                         message: err.detail(),
@@ -328,15 +302,8 @@ fn chown_recursive(dir: &Path, uid: u32, gid: u32) -> Result<(), String> {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut args = env::args_os().skip(1);
-    match args.next() {
-        Some(command) if command == "local" => return local::run(args),
-        Some(_) => {
-            return Err(
-                "usage: boreal-broker [local <catalog-dir> <broker-socket> <state-dir>]".into(),
-            );
-        }
-        None => {}
+    if env::args_os().nth(1).is_some() {
+        return Err("usage: boreal-broker".into());
     }
 
     let cfg = Config::from_env();
@@ -374,11 +341,11 @@ async fn run_broker(
     );
     let backend = Arc::new(LiveBackend::new(
         &cfg.upstream_temporal_addr,
-        Some(PostgresConfig {
+        PostgresConfig {
             socket: cfg.pg_socket,
             user: cfg.pg_user,
             database: cfg.pg_db,
-        }),
+        },
     ));
     let catalog = Arc::new(catalog);
     let engine = Arc::new(Engine::new(
@@ -414,11 +381,7 @@ async fn run_broker(
         ));
     }
 
-    tokio::spawn(serve_user_socket(
-        user_listener,
-        Arc::clone(&engine),
-        UserIdentity::OsAccount,
-    ));
+    tokio::spawn(serve_user_socket(user_listener, Arc::clone(&engine)));
     tokio::spawn(serve_updater_socket(updater_listener, Arc::clone(&engine)));
 
     wait_for_shutdown().await?;

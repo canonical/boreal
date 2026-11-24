@@ -223,7 +223,7 @@ pub trait Backend: Send + Sync {
 
 pub struct LiveBackend {
     endpoint_uri: String,
-    postgres: Option<PostgresConfig>,
+    postgres: PostgresConfig,
 }
 
 pub struct PostgresConfig {
@@ -233,7 +233,7 @@ pub struct PostgresConfig {
 }
 
 impl LiveBackend {
-    pub fn new(temporal_addr: &str, postgres: Option<PostgresConfig>) -> Self {
+    pub fn new(temporal_addr: &str, postgres: PostgresConfig) -> Self {
         let endpoint_uri =
             if temporal_addr.starts_with("http://") || temporal_addr.starts_with("https://") {
                 temporal_addr.to_owned()
@@ -1004,9 +1004,7 @@ impl Backend for LiveBackend {
 
     fn list_running_history_db(&self) -> BoxFuture<'_, Vec<ActiveDbExecution>> {
         Box::pin(async move {
-            let pg = self.postgres.as_ref().ok_or_else(|| {
-                BackendError::Unavailable("PostgreSQL is not configured for this broker".into())
-            })?;
+            let pg = &self.postgres;
             let (sock, user, db) = (pg.socket.clone(), pg.user.clone(), pg.database.clone());
             tokio::task::spawn_blocking(move || pg::query_running_executions(&sock, &user, &db))
                 .await
@@ -1017,9 +1015,7 @@ impl Backend for LiveBackend {
 
     fn count_open_workflows<'a>(&'a self, namespace: &'a str) -> BoxFuture<'a, WorkflowCounts> {
         Box::pin(async move {
-            let Some(pg) = &self.postgres else {
-                return self.count_open_visibility(namespace).await;
-            };
+            let pg = &self.postgres;
             let (sock, user, db) = (pg.socket.clone(), pg.user.clone(), pg.database.clone());
             let ns = namespace.to_owned();
             tokio::task::spawn_blocking(move || pg::count_open_in_namespace(&sock, &user, &db, &ns))
@@ -1027,44 +1023,6 @@ impl Backend for LiveBackend {
                 .map_err(|e| BackendError::Internal(format!("db task join error: {e}")))?
                 .map_err(BackendError::Unavailable)
         })
-    }
-}
-
-impl LiveBackend {
-    // The local dev server has no PostgreSQL history database. This count is
-    // for the prompt only; it is not a substitute for the updater's DB check.
-    async fn count_open_visibility(&self, namespace: &str) -> Result<WorkflowCounts, BackendError> {
-        let mut client = self.client().await?;
-        let mut counts = WorkflowCounts::default();
-        let mut token = Vec::new();
-        loop {
-            let resp = client
-                .list_workflow_executions(ListWorkflowExecutionsRequest {
-                    namespace: namespace.to_owned(),
-                    page_size: 200,
-                    next_page_token: token,
-                    query: "ExecutionStatus IN ('Running', 'Paused')".into(),
-                })
-                .await
-                .map_err(BackendError::from_status)?
-                .into_inner();
-            for info in resp.executions {
-                if info.execution.is_none_or(|exec| {
-                    exec.workflow_id.is_empty() || exec.workflow_id.starts_with("temporal-sys-")
-                }) {
-                    continue;
-                }
-                match ExecStatus::from_proto(info.status) {
-                    ExecStatus::Running => counts.running += 1,
-                    ExecStatus::Paused => counts.paused += 1,
-                    _ => {}
-                }
-            }
-            token = resp.next_page_token;
-            if token.is_empty() {
-                return Ok(counts);
-            }
-        }
     }
 }
 
