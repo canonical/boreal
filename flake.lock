@@ -7,11 +7,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1795487909,
-        "narHash": "sha256-i3/+xu27qk+AgluV4zZ1X5jlerFgT4Zfv7+bJabUhiY=",
+        "lastModified": 1795513315,
+        "narHash": "sha256-O0AWPZBpI4vXDhuEUNW2GHUkeYnkf0eAJVf3EvUvV2U=",
         "owner": "canonical",
         "repo": "boreal",
-        "rev": "dc5c1241fcce9b8c2de7ee0305234478bbf751ec",
+        "rev": "9a3490a9999bf86f1c35e457772e4a171c8d1664",
         "type": "github"
       },
       "original": {
