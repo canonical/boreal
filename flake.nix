@@ -2,9 +2,9 @@
   description = "Beijing Boreal lab (synthetic workflows only)";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/ac588ef1c914865dad517b337ea0eb9694a4021c";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
     boreal = {
-      url = "github:canonical/boreal/7c8bec59685d6c743c8c717be0b214f0522ed215";
+      url = "github:canonical/boreal";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
@@ -25,9 +25,7 @@
     in
     {
       devShells = forAllSystems (pkgs: {
-        default = boreal.lib.mkDevShell pkgs {
-          extraPackages = [ self.packages.${pkgs.stdenv.hostPlatform.system}.boreal-local ];
-        };
+        default = boreal.lib.mkDevShell pkgs {};
       });
 
       packages = forAllSystems (
@@ -46,9 +44,6 @@
               "schema"
             ];
           };
-          boreal-local = boreal.lib.mkLocal pkgs {
-            workers.beijing = self.packages.${system}.lab-worker.beijing;
-          };
         }
         // nixpkgs.lib.optionalAttrs (pkgs.stdenv.hostPlatform.system == "x86_64-linux") {
           vm = self.nixosConfigurations.vm.config.system.build.vm;
@@ -56,18 +51,26 @@
       );
 
       nixosConfigurations = {
+        chopstick = boreal.lib.mkHost {
+          system = "x86_64-linux";
+          specialArgs = { inherit self; };
+          modules = [
+            ./lab.nix
+            ./hosts/chopstick.nix
+          ];
+        };
+
         vm = boreal.lib.mkVm {
           system = "x86_64-linux";
           specialArgs = { inherit self; };
           modules = [
             ./lab.nix
             {
+              boreal.role = "central";
               boreal.vm = {
                 systemName = "beijing";
                 hostName = "beijing-vm";
                 diskImage = "./beijing-vm.qcow2";
-                # Optional: authorize your local public SSH key for VM testing:
-                # devAuthorizedKeys = [ "ssh-ed25519 AAAAC3Nza..." ];
               };
             }
           ];
