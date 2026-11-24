@@ -5,7 +5,7 @@ let
   authorizedKeys = let
     perUser = user: config.users.users.${user}.openssh.authorizedKeys.keys;
   in
-    users: lib.uniq (lib.concatMap perUser users);
+    users: lib.unique (lib.concatMap perUser users);
 in
 {
   boreal = {
@@ -35,7 +35,7 @@ in
 
     users.pseudoc = {
       accounts.github = {
-        name = "pseudocc";
+        name = "gh:pseudocc";
         keyHash = "sha256-mkqqirN8HTatqcqfpYv4dth6YMko8N4IJ6Zm2nNHl7A=";
       };
     };
