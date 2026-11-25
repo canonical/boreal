@@ -4,3 +4,4 @@
 /.boreal/
 /temporal/target/
 /.direnv/
+/secrets
