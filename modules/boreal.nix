@@ -2,6 +2,7 @@
   config,
   lib,
   pkgs,
+  borealRustPlatform,
   self ? null,
   ...
 }:
@@ -235,15 +236,15 @@ in
 
     shellPackage = mkOption {
       type = types.package;
-      default = pkgs.callPackage ../packages/shell.nix { };
-      defaultText = lib.literalExpression "pkgs.callPackage ../packages/shell.nix { }";
+      default = pkgs.callPackage ../packages/shell.nix { rustPlatform = borealRustPlatform; };
+      defaultText = lib.literalExpression "pkgs.callPackage ../packages/shell.nix { rustPlatform = borealRustPlatform; }";
       description = "Restricted Boreal shell package assigned to lab user accounts.";
     };
 
     brokerPackage = mkOption {
       type = types.package;
-      default = pkgs.callPackage ../packages/broker.nix { };
-      defaultText = lib.literalExpression "pkgs.callPackage ../packages/broker.nix { }";
+      default = pkgs.callPackage ../packages/broker.nix { rustPlatform = borealRustPlatform; };
+      defaultText = lib.literalExpression "pkgs.callPackage ../packages/broker.nix { rustPlatform = borealRustPlatform; }";
       description = "Boreal policy broker and worker gRPC gate package.";
     };
 

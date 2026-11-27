@@ -2,6 +2,7 @@
   config,
   lib,
   pkgs,
+  borealRustPlatform,
   ...
 }:
 
@@ -47,8 +48,8 @@ in
 
     package = lib.mkOption {
       type = lib.types.package;
-      default = pkgs.callPackage ../packages/admin.nix { };
-      defaultText = lib.literalExpression "pkgs.callPackage ../packages/admin.nix { }";
+      default = pkgs.callPackage ../packages/admin.nix { rustPlatform = borealRustPlatform; };
+      defaultText = lib.literalExpression "pkgs.callPackage ../packages/admin.nix { rustPlatform = borealRustPlatform; }";
       description = "Package providing boreal-admin and boreal-admin-ctl.";
     };
 

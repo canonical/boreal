@@ -2,6 +2,7 @@
   config,
   lib,
   pkgs,
+  borealRustPlatform,
   ...
 }:
 
@@ -64,8 +65,8 @@ in
 
     package = lib.mkOption {
       type = lib.types.package;
-      default = pkgs.callPackage ../packages/updater.nix { };
-      defaultText = lib.literalExpression "pkgs.callPackage ../packages/updater.nix { }";
+      default = pkgs.callPackage ../packages/updater.nix { rustPlatform = borealRustPlatform; };
+      defaultText = lib.literalExpression "pkgs.callPackage ../packages/updater.nix { rustPlatform = borealRustPlatform; }";
       description = "The Boreal updater package.";
     };
   };

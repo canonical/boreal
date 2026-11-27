@@ -1,4 +1,8 @@
-{ self, nixpkgs }:
+{
+  self,
+  nixpkgs,
+  rust,
+}:
 
 let
   inherit (nixpkgs) lib;
@@ -14,6 +18,8 @@ let
   };
 in
 {
+  inherit (rust) rustBin;
+
   mkHost =
     {
       system,
@@ -129,20 +135,17 @@ in
     {
       extraPackages ? [ ],
       extraShellHook ? "",
+      rustToolchain ? rust.toolchain pkgs,
     }:
     pkgs.mkShell {
       packages =
         (with pkgs; [
-          cargo
-          clippy
           nixfmt
           pkg-config
           protobuf
-          rust-analyzer
-          rustc
-          rustfmt
           temporal-cli
         ])
+        ++ [ rustToolchain ]
         ++ extraPackages;
       shellHook = ''
         mkdir -p .boreal
@@ -161,6 +164,8 @@ in
         src,
         cargoLock,
         version ? null,
+        rustToolchain ? rust.toolchain pkgs,
+        rustPlatform ? rust.platform pkgs rustToolchain,
         ...
       }@args:
       let
@@ -181,6 +186,8 @@ in
           "pname"
           "version"
           "src"
+          "rustToolchain"
+          "rustPlatform"
           "outputs"
           "cargoTestFlags"
           "nativeBuildInputs"
@@ -204,7 +211,7 @@ in
       assert lib.assertMsg (
         !vault || builtins.length binOutputs == 1
       ) "buildRustVault: exactly one executable output is required";
-      pkgs.rustPlatform.buildRustPackage (
+      rustPlatform.buildRustPackage (
         passthrough
         // {
           inherit pname cargoLock;

@@ -1,24 +1,42 @@
 {
   description = "Boreal NixOS and Temporal lab framework";
 
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
+    rust-overlay = {
+      url = "github:oxalica/rust-overlay";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+  };
 
   outputs =
-    { self, nixpkgs, ... }:
+    {
+      self,
+      nixpkgs,
+      rust-overlay,
+      ...
+    }:
     let
       systems = [
         "x86_64-linux"
         "aarch64-linux"
       ];
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
-      borealLib = import ./lib { inherit self nixpkgs; };
+      rust = import ./lib/rust.nix { inherit rust-overlay; };
+      borealLib = import ./lib { inherit self nixpkgs rust; };
+      borealModule =
+        { pkgs, ... }:
+        {
+          imports = [ ./modules ];
+          _module.args.borealRustPlatform = rust.platform pkgs (rust.toolchain pkgs);
+        };
     in
     {
       lib = borealLib;
 
       nixosModules = {
-        default = import ./modules;
-        boreal = import ./modules;
+        default = borealModule;
+        boreal = borealModule;
         vm = import ./modules/vm.nix;
       };
 
@@ -27,21 +45,25 @@
         description = "Starter Boreal downstream lab with Temporal Rust worker and QEMU VM";
       };
 
-      packages = forAllSystems (pkgs: import ./packages { inherit pkgs; });
+      packages = forAllSystems (
+        pkgs:
+        import ./packages {
+          inherit pkgs;
+          rustPlatform = rust.platform pkgs (rust.toolchain pkgs);
+        }
+      );
 
       devShells = forAllSystems (pkgs: {
         default = pkgs.mkShell {
-          packages = with pkgs; [
-            cargo
-            clippy
-            nixfmt
-            pkg-config
-            protobuf
-            rust-analyzer
-            rustc
-            rustfmt
-            temporal-cli
-          ];
+          packages =
+            with pkgs;
+            [
+              nixfmt
+              pkg-config
+              protobuf
+              temporal-cli
+            ]
+            ++ [ (rust.toolchain pkgs) ];
         };
       });
 
