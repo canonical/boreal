@@ -84,6 +84,7 @@
           modules = import ./tests/modules.nix {
             inherit self nixpkgs pkgs;
           };
+          rust = import ./tests/rust.nix { inherit self pkgs; };
           template = builtins.seq templateOutputs.devShells.${system}.default.drvPath (
             templateOutputs.checks.${system}.lab
           );
