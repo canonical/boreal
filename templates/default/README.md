@@ -73,6 +73,58 @@ test deployment behavior. The starter VM targets `x86_64-linux`.
      and run `ssh admin@<host> "updater update"` followed by
      `ssh admin@<host> "updater schedule"`.
 
+## Choosing a Rust toolchain
+
+By default, the development shell and Rust worker builds use the same stable
+`latest` toolchain with `rust-analyzer` from Boreal's pinned rust-overlay input.
+`latest` is relative to that pinned overlay revision; it does not change until
+the pin changes. Review `flake.lock` changes when updating Boreal or its
+rust-overlay input.
+
+To select an explicit version for both the shell and worker, add a
+`rust-toolchain.toml` at the lab flake root:
+
+```toml
+[toolchain]
+channel = "1.92.0"
+profile = "default"
+components = ["rust-analyzer"]
+```
+
+Add this file to Git so the flake can access it. The version is an example;
+choose one compatible with the lab's locked dependencies.
+
+In the starter's `flake.nix`, define `toolchain` in the `outputs` let block and
+use it in both outputs (keeping the other outputs unchanged):
+
+```nix
+toolchain = pkgs: (boreal.lib.rustBin pkgs).fromRustupToolchainFile ./rust-toolchain.toml;
+```
+
+```nix
+devShells = forAllSystems (pkgs: {
+  default = boreal.lib.mkDevShell pkgs {
+    rustToolchain = toolchain pkgs;
+  };
+});
+
+packages = forAllSystems (pkgs: {
+  example-worker = boreal.lib.buildRustWorker pkgs {
+    pname = "example-worker";
+    src = ./temporal;
+    cargoLock.lockFile = ./temporal/Cargo.lock;
+    outputs = [ "out" "example" "schema" ];
+    rustToolchain = toolchain pkgs;
+  };
+  # Retain any other packages, including the VM output, from the starter.
+});
+```
+
+`buildRustVault` accepts the same `rustToolchain` override. Either build helper
+also accepts `rustPlatform`; for example, `rustPlatform = pkgs.rustPlatform`
+opts out of Boreal's overlay-backed build platform. If both are supplied, the
+platform takes precedence for the build, so choose a matching shell toolchain.
+
 **Security note:** Provision user secrets under `~/.config/boreal/secrets`
 (`0700` directory, `0600` files) via `boreal-shell` (`secrets set <name>`).
 Never place secrets in Git, the Nix store, command-line arguments, or Temporal
